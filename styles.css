@@ -44,3 +44,24 @@ button {
 button:hover {
     background-color: #3e8e41;
 }
+
+/* Responsive design */
+@media only screen and (max-width: 600px) {
+    .calculator {
+        width: 80%;
+    }
+}
+
+@media only screen and (max-width: 400px) {
+    .calculator {
+        width: 90%;
+    }
+    #display {
+        height: 30px;
+        font-size: 18px;
+    }
+    button {
+        height: 30px;
+        font-size: 14px;
+    }
+}
