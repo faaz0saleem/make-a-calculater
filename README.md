@@ -1,5 +1,5 @@
 # make-a-calculater
-A basic calculator project built in JavaScript, HTML, and CSS.
+A basic calculator project built in Python, HTML, and CSS.
 
 ## Description
 This project provides a simple calculator that can perform addition, subtraction, multiplication, and division operations.
@@ -10,5 +10,5 @@ This project provides a simple calculator that can perform addition, subtraction
 3. Open `index.html` in a web browser to run the calculator.
 
 ## Known edge cases
-* Division by zero will result in `Infinity` or `NaN`.
-* Non-numeric input will result in `NaN`.
+* Division by zero will result in an error.
+* Non-numeric input will result in an error.
