@@ -36,7 +36,7 @@ buttons.forEach(button => {
             operation = '';
         } else if (buttonId === 'add' || buttonId === 'subtract' || buttonId === 'multiply' || buttonId === 'divide') {
             previousNumber = currentNumber;
-            operation = buttonId.replace('add', '+').replace('subtract', '-').replace('multiply', '*').replace('divide', '/');
+            operation = buttonId;
             currentNumber = '';
             display.value = '';
         } else {
