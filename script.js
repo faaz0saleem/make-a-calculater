@@ -25,7 +25,11 @@ buttons.forEach(button => {
             } else if (operation === 'multiply') {
                 display.value = parseFloat(previousNumber) * parseFloat(currentNumber);
             } else if (operation === 'divide') {
-                display.value = parseFloat(previousNumber) / parseFloat(currentNumber);
+                if (currentNumber !== '0') {
+                    display.value = parseFloat(previousNumber) / parseFloat(currentNumber);
+                } else {
+                    display.value = 'Error';
+                }
             }
             currentNumber = display.value;
             previousNumber = '';
