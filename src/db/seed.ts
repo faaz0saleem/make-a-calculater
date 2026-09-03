@@ -38,6 +38,7 @@ import {
   creditPurchases,
   credentials,
   follows,
+  availabilityExceptions,
   payoutMethods,
   payouts,
   reviews,
@@ -64,6 +65,16 @@ import {
 import { CREDIT_PACKS, type CreditPack } from '@/lib/money/packs';
 import { resolveBookingOutcome, type Attendance, type BookingForOutcome } from '@/lib/money/outcomes';
 import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
+import {
+  applyExceptions,
+  expandWeeklyRules,
+  slotsWithin,
+  subtractBusy,
+  type AvailabilityException as EngineException,
+  type BusyInterval,
+  type Interval,
+  type WeeklyRule,
+} from '@/lib/availability';
 import { avatarKey, credentialKey, getObjectStore, publicUrlFor } from '@/lib/storage';
 import { getVideoPipeline, isVideoPipelineAvailable } from '@/lib/video';
 import { LANGUAGES } from '@/lib/tutors/languages';
@@ -316,8 +327,8 @@ const SEED_CLIP_SOURCES = [
 ];
 
 type SeedClip = {
-  hlsUrl: string;
   previewUrl: string;
+  heroUrl: string;
   thumbnailUrls: string[];
   durationS: number;
   width: number;
@@ -354,8 +365,8 @@ async function buildSeedClips(): Promise<SeedClip[] | null> {
       const output = await pipeline.transcode({ sourceKey, ownerId: 'seed', videoId: String(index) });
 
       clips.push({
-        hlsUrl: publicUrlFor(output.hlsKey),
         previewUrl: publicUrlFor(output.previewKey),
+        heroUrl: publicUrlFor(output.heroKey),
         thumbnailUrls: output.thumbnailKeys.map(publicUrlFor),
         durationS: Math.round(output.durationSeconds),
         width: output.width,
@@ -533,6 +544,8 @@ async function seedTutors(
 ): Promise<{
   verified: SeededTutor[];
   pending: SeededTutor[];
+  rulesByTutor: Map<string, WeeklyRule[]>;
+  exceptionsByTutor: Map<string, EngineException[]>;
 }> {
   const verified: SeededTutor[] = [];
   const pending: SeededTutor[] = [];
@@ -645,8 +658,8 @@ async function seedTutors(
       return {
         id: randomUUID(),
         ownerId: tutor.id,
-        hlsUrl: clip?.hlsUrl ?? null,
         previewUrl: clip?.previewUrl ?? null,
+        heroUrl: clip?.heroUrl ?? null,
         // Rotate which candidate is chosen, so the feed is not a wall of the
         // same still.
         thumbnailUrl: clip ? (clip.thumbnailUrls[index % clip.thumbnailUrls.length] ?? null) : null,
@@ -781,8 +794,7 @@ async function seedTutors(
 
   await db.insert(credentials).values(credentialRows);
 
-  await db.insert(availabilityRules).values(
-    all.flatMap((tutor, index) => {
+  const ruleRows = all.flatMap((tutor, index) => {
       if (statusForIndex(index) === 'draft') return [];
       const pattern = availabilityPatternFor(index);
       return pattern.weekdays.map((weekdayLocal) => {
@@ -823,10 +835,83 @@ async function seedTutors(
           active: true,
         };
       });
-    }),
-  );
+  });
 
-  return { verified, pending };
+  await db.insert(availabilityRules).values(ruleRows);
+
+  // A few exceptions, so the engine has blocks, a vacation and an extra window
+  // to work around rather than a uniform grid.
+  const exceptionRows: (typeof availabilityExceptions.$inferInsert)[] = [];
+
+  for (const [index, tutor] of all.entries()) {
+    if (statusForIndex(index) === 'draft') continue;
+
+    if (index % 7 === 3) {
+      // Vacation: one row covering a range, which is how vacation mode is stored.
+      const from = daysFromNow(randInt(3, 20), 0);
+      const to = new Date(from.getTime() + randInt(4, 12) * 86_400_000);
+      exceptionRows.push({
+        tutorId: tutor.id,
+        date: from.toISOString().slice(0, 10),
+        kind: 'block',
+        startUtc: from,
+        endUtc: to,
+        note: 'Away',
+      });
+    }
+
+    if (index % 5 === 1) {
+      // A single blocked afternoon.
+      const from = daysFromNow(randInt(2, 25), 12);
+      exceptionRows.push({
+        tutorId: tutor.id,
+        date: from.toISOString().slice(0, 10),
+        kind: 'block',
+        startUtc: from,
+        endUtc: new Date(from.getTime() + 5 * 3_600_000),
+        note: 'Not available',
+      });
+    }
+
+    if (index % 6 === 2) {
+      // An extra window outside the usual weekly pattern.
+      const from = daysFromNow(randInt(2, 25), 6);
+      exceptionRows.push({
+        tutorId: tutor.id,
+        date: from.toISOString().slice(0, 10),
+        kind: 'extra',
+        startUtc: from,
+        endUtc: new Date(from.getTime() + 4 * 3_600_000),
+        note: 'Extra session time',
+      });
+    }
+  }
+
+  if (exceptionRows.length > 0) {
+    await db.insert(availabilityExceptions).values(exceptionRows);
+  }
+
+  const rulesByTutor = new Map<string, WeeklyRule[]>();
+  for (const row of ruleRows) {
+    const list = rulesByTutor.get(row.tutorId) ?? [];
+    list.push({
+      weekdayLocal: row.weekdayLocal,
+      startTimeLocal: row.startTimeLocal,
+      endTimeLocal: row.endTimeLocal,
+      timezone: row.timezone,
+      active: true,
+    });
+    rulesByTutor.set(row.tutorId, list);
+  }
+
+  const exceptionsByTutor = new Map<string, EngineException[]>();
+  for (const row of exceptionRows) {
+    const list = exceptionsByTutor.get(row.tutorId) ?? [];
+    list.push({ kind: row.kind, startUtc: row.startUtc, endUtc: row.endUtc });
+    exceptionsByTutor.set(row.tutorId, list);
+  }
+
+  return { verified, pending, rulesByTutor, exceptionsByTutor };
 }
 
 type HistoryCounts = {
@@ -845,11 +930,34 @@ type HistoryCounts = {
  * appended, exactly as the settlement job will do in Phase 4. Nothing here
  * writes a balance directly.
  */
+/**
+ * Slots a tutor was actually free for, over an arbitrary range.
+ *
+ * The seed places its history through the same engine the product uses, so a
+ * seeded session never lands at a time the tutor never published. `freeSlots`
+ * itself refuses anything before `now`, which is exactly wrong for backfilling
+ * a history, so this composes the pieces directly.
+ */
+function slotsInRange(
+  rules: WeeklyRule[],
+  exceptions: EngineException[],
+  busy: BusyInterval[],
+  bufferMinutes: number,
+  durationMinutes: number,
+  range: Interval,
+) {
+  if (rules.length === 0) return [];
+  const published = applyExceptions(expandWeeklyRules(rules, range), exceptions, range);
+  return slotsWithin(subtractBusy(published, busy, bufferMinutes), durationMinutes);
+}
+
 async function seedHistory(
   students: SeededStudent[],
   tutors: SeededTutor[],
   subjectIds: Map<string, string>,
   wallets: Wallets,
+  rulesByTutor: Map<string, WeeklyRule[]>,
+  exceptionsByTutor: Map<string, EngineException[]>,
 ): Promise<HistoryCounts> {
   const counts: HistoryCounts = { settled: 0, cancelled: 0, noShow: 0, upcoming: 0, trials: 0, reviews: 0 };
   const trialPairs = new Set<string>();
@@ -866,13 +974,35 @@ async function seedHistory(
   for (const [tutorIndex, tutor] of tutors.entries()) {
     if ((PAYOUT_FIXTURE_EMAILS as readonly string[]).includes(tutor.email)) continue;
 
+    const rules = rulesByTutor.get(tutor.id) ?? [];
+    const exceptions = exceptionsByTutor.get(tutor.id) ?? [];
+    const bufferMinutes = 10;
+
+    // Bookings this tutor already has, so the engine keeps them apart as the
+    // seed fills the calendar in.
+    const busy: BusyInterval[] = [];
+
+    /** Takes a real free slot, or null when the tutor has none left. */
+    const takeSlot = (range: Interval, durationMinutes: number): Date | null => {
+      const candidates = slotsInRange(rules, exceptions, busy, bufferMinutes, durationMinutes, range);
+      if (candidates.length === 0) return null;
+
+      const chosen = candidates[Math.floor(random() * candidates.length)]!;
+      busy.push({ startUtc: chosen.startUtc, endUtc: chosen.endUtc });
+      return chosen.startUtc;
+    };
+
+    const pastRange: Interval = { startUtc: daysFromNow(-120, 0), endUtc: daysFromNow(-1, 0) };
+    const futureRange: Interval = { startUtc: daysFromNow(1, 0), endUtc: daysFromNow(21, 0) };
+
     const sessionCount = randInt(0, 9);
 
     for (let n = 0; n < sessionCount; n += 1) {
       const student = pick(students);
       const durationMinutes = chance(0.4) ? 30 : 60;
-      const startAt = onSlotGrid(daysFromNow(-randInt(1, 120), randInt(8, 20), chance(0.5) ? 0 : 30));
-      if (!reserve(tutor.id, startAt)) continue;
+
+      const startAt = takeSlot(pastRange, durationMinutes);
+      if (!startAt || !reserve(tutor.id, startAt)) continue;
 
       const { priceCents } = priceForBooking({
         rates: {
@@ -1013,8 +1143,8 @@ async function seedHistory(
     // A couple of upcoming confirmed bookings so the calendar is not empty.
     if (tutorIndex % 3 === 0) {
       const student = pick(students);
-      const startAt = onSlotGrid(daysFromNow(randInt(1, 20), randInt(9, 19), chance(0.5) ? 0 : 30));
-      if (reserve(tutor.id, startAt)) {
+      const startAt = takeSlot(futureRange, 60);
+      if (startAt && reserve(tutor.id, startAt)) {
         const bookingId = randomUUID();
         const { priceCents } = priceForBooking({
           rates: {
@@ -1057,8 +1187,8 @@ async function seedHistory(
     if (tutor.offersTrial && tutorIndex % 4 === 0) {
       const student = pick(students);
       const pairKey = `${student.id}:${tutor.id}`;
-      const startAt = onSlotGrid(daysFromNow(randInt(1, 6), randInt(9, 19)));
-      if (!trialPairs.has(pairKey) && reserve(tutor.id, startAt)) {
+      const startAt = takeSlot({ startUtc: daysFromNow(1, 0), endUtc: daysFromNow(7, 0) }, 15);
+      if (startAt && !trialPairs.has(pairKey) && reserve(tutor.id, startAt)) {
         trialPairs.add(pairKey);
         await db.insert(bookings).values({
           studentId: student.id,
@@ -1100,6 +1230,8 @@ async function seedPayoutFixtures(
   students: SeededStudent[],
   subjectIds: Map<string, string>,
   wallets: Wallets,
+  rulesByTutor: Map<string, WeeklyRule[]>,
+  exceptionsByTutor: Map<string, EngineException[]>,
 ): Promise<{ pendingPayoutId: string; amounts: Record<string, number> }> {
   const byEmail = new Map(tutors.map((tutor) => [tutor.email, tutor]));
   const targets = [
@@ -1116,7 +1248,15 @@ async function seedPayoutFixtures(
     // One completed 60-minute session at the tutor's rate, priced so that the
     // 80% share is exactly the number we want.
     const student = students[1]!;
-    const startAt = onSlotGrid(daysFromNow(-2, 14));
+    const startAt =
+      slotsInRange(
+        rulesByTutor.get(tutor.id) ?? [],
+        exceptionsByTutor.get(tutor.id) ?? [],
+        [],
+        10,
+        60,
+        { startUtc: daysFromNow(-30, 0), endUtc: daysFromNow(-1, 0) },
+      )[0]?.startUtc ?? onSlotGrid(daysFromNow(-2, 14));
     const bookingId = randomUUID();
     const priceCents = tutor.hourlyCents;
 
@@ -1284,9 +1424,27 @@ async function main() {
   const clips = await buildSeedClips();
   console.log(clips ? `${clips.length} clips transcoded.` : 'skipped (no ffmpeg on this machine).');
 
-  const { verified, pending } = await seedTutors(subjectIds, passwordHash, clips);
-  const counts = await seedHistory(students, verified, subjectIds, wallets);
-  const payoutFixtures = await seedPayoutFixtures(verified, students, subjectIds, wallets);
+  const { verified, pending, rulesByTutor, exceptionsByTutor } = await seedTutors(
+    subjectIds,
+    passwordHash,
+    clips,
+  );
+  const counts = await seedHistory(
+    students,
+    verified,
+    subjectIds,
+    wallets,
+    rulesByTutor,
+    exceptionsByTutor,
+  );
+  const payoutFixtures = await seedPayoutFixtures(
+    verified,
+    students,
+    subjectIds,
+    wallets,
+    rulesByTutor,
+    exceptionsByTutor,
+  );
   await assertNoNegativeBalances();
   await assertLedgerConservation();
 

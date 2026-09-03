@@ -7,11 +7,83 @@ Phases follow `SPEC.md` §15.
 | 0 — repo, schema, migrations, auth, seed | **Done** |
 | 1 — tutor onboarding wizard + admin verification queue | **Done** |
 | 2 — discovery feed, search, filters, tutor profile | **Done** |
-| 3 — availability engine + booking + credits | Not started |
+| 3A — availability engine | **Done** |
+| 3B — credits and booking | Not started |
 | 4 — LiveKit calls + session state machine + settlement | Not started |
 | 5 — trials, messaging, reviews, follows | Not started |
 | 6 — payouts + admin dashboard + audit log | Not started |
 | 7 — real payment provider, notifications, SEO, analytics | Not started |
+
+---
+
+## Phase 3, checkpoint A — done
+
+### The availability engine (SPEC.md §5)
+
+`src/lib/availability/engine.ts` is pure: rules → exceptions → minus busy →
+slots → limits. `src/lib/availability/database.ts` is the part that talks to
+Postgres and runs it.
+
+The thing that makes it correct rather than nearly-correct: a weekly rule is a
+**local** fact. "Monday 17:00–21:00" means five in the afternoon where the tutor
+lives, in January and in July. Expanding it by adding 7×24 hours to a UTC
+instant silently shifts a New York tutor's evening by an hour twice a year, so
+expansion walks calendar days in the tutor's own timezone and converts each one.
+
+Implemented: 30-minute grid, per-tutor buffer applied on both sides of every
+booking, max sessions per local day, booking horizon, minimum lead time,
+one-off extra windows, blocked ranges and vacation mode (one row over a range).
+A 60-minute booking needing two contiguous slots falls out of requiring the
+whole duration to sit inside one free interval.
+
+### The stub is gone
+
+`DatabaseAvailability` replaced `StubAvailability` everywhere. Live now:
+"Available today", the next-free line on cards, the "Available in the next hour"
+rail, the day-and-time filter, and the `availability_density_next_7d` term of the
+ranking score — which moved the median from 7421 to 8050 once it was real
+numbers rather than a neutral constant.
+
+The three-valued interface stayed, and `unknown` is now rare rather than
+universal. It no longer means "not built"; it means **this tutor has published
+no hours at all**, which is genuinely different from "their week is full". The
+first deserves silence on a card, the second an honest "nothing free".
+
+### The seed places bookings through the engine
+
+Every seeded booking now comes out of the same code the product uses, so none of
+them sit at a time the tutor never published. A check across all 151 confirms it.
+The count fell from 222 because a real calendar constrains where sessions can go
+— tutors only have so many hours.
+
+Also seeded: 24 exceptions across the tutors — vacations, blocked afternoons and
+extra windows — so the engine has something to work around.
+
+### The DST gate
+
+`src/lib/availability/engine.test.ts` covers the SPEC.md §16 case and the two
+hard nights:
+
+- A Karachi tutor and a New York student see the same instant as 22:00 and
+  12:00 before the change, and 22:00 and 13:00 after it.
+- A New York tutor's Monday evening stays at 17:00 local either side, which
+  means the UTC instant moves by an hour — as it must.
+- A window containing the spring-forward gap is three real hours, not four.
+- A window containing the ambiguous fall-back hour is three real hours, and
+  starts at the first of the two 00:30s.
+- A Sunday rule produces exactly one window across spring-forward night —
+  not zero, not two.
+
+### Also in this checkpoint
+
+**Item 13, reworked as you asked.** The pipeline produces two fixed MP4
+renditions instead of an HLS ladder — a small muted one for card previews, a
+larger one for the profile hero — served from R2. `hls.js` is gone. The
+reasoning is in `src/lib/video/types.ts` so it is not rediscovered later.
+
+**Signed-out visitors get their own timezone.** A small client component records
+the browser's zone in a cookie; the server renders in it. Without that a
+signed-out visitor would have seen UTC, which is useless.
 
 ---
 
@@ -133,12 +205,11 @@ right element, muted, and stopped on schedule.
 
 | Piece | State |
 |---|---|
-| Availability | A port with a stub, by design. `TODO(phase-3)` in `src/lib/availability/`. The real engine is `SPEC.md` §5. |
-| Hosted transcoding | `FfmpegVideoPipeline` works locally. Production needs Mux or Cloudflare Stream — `DECISIONS_NEEDED.md` item 13. |
+| Booking | The calendar is read-only. Choosing a slot, paying with credits and the escrow debit are checkpoint B. |
+| Hosted transcoding | `FfmpegVideoPipeline` works locally. A deployed environment needs ffmpeg somewhere — `DECISIONS_NEEDED.md` item 13. |
 | Transcoding is inline | Fine for a 90-second clip in development; production should queue it (`SPEC.md` §14). Item 14. |
 | Infinite scroll | The grid shows the first 24 with a count. Paging is a small addition once there is enough supply to need it. |
 | Booking | The `Book session` button is disabled. `assertBookable` is the gate Phase 3's booking mutation calls. |
-| Day/time filter | Labelled as arriving with the calendar, rather than shipped as a filter that cannot filter. |
 | Reviews on the profile | Rating and count are shown; the breakdown bar and review list are Phase 5. |
 | Messaging, LiveKit, notifications | Schema only. Phases 4, 5 and 7. |
 | Rate limiting | Real, but in-memory, so it is per instance. Needs a shared store before more than one node. |
@@ -170,12 +241,15 @@ says the videos were skipped.
 
 ```
 pnpm typecheck   clean
-pnpm test        22 files, 303 tests passed
+pnpm test        23 files, 344 tests passed
 pnpm build       compiled, 18 routes
 pnpm seed        58 users · 40 verified · 5 pending · 1 draft · 1 rejected
-                 4 transcoded clips (HLS + preview + 3 thumbnails each)
-                 73 credential PDFs · 1,444 ledger entries · zero drift
-                 Ranked 40 verified tutors: top 8666, median 7421
-pnpm e2e         18 passed
-pnpm reconcile   Ledger reconciled: 1444 entries, zero drift.
+                 4 transcoded clips (preview + hero + 3 thumbnails each)
+                 151 bookings, every one inside published availability
+                 152 availability rules · 24 exceptions
+                 1,023 ledger entries · zero drift
+                 Ranked 40 verified tutors: top 9220, median 8050
+                 (availability from database)
+pnpm e2e         26 passed
+pnpm reconcile   Ledger reconciled: zero drift.
 ```

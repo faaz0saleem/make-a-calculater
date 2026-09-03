@@ -32,7 +32,9 @@ import {
   type DiscoveryFilters,
   type SortOption,
 } from '@/db/discovery';
+import { TIMEZONE_COOKIE, TimezoneProbe } from '@/components/timezone-probe';
 import { currentUser } from '@/lib/auth/guards';
+import { isValidTimeZone, zonedTimeToUtc } from '@/lib/time';
 import { toCardData } from '@/lib/tutors/card';
 import { LAST_SUBJECT_COOKIE } from '@/middleware';
 
@@ -50,6 +52,39 @@ function dollarsToCents(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const dollars = Number(value);
   return Number.isFinite(dollars) && dollars >= 0 ? Math.round(dollars * 100) : undefined;
+}
+
+/**
+ * The day-and-time window, read in the *viewer's* timezone.
+ *
+ * "Free on Tuesday between 18:00 and 21:00" means their evening, not a UTC one,
+ * so the conversion has to happen with their zone rather than the server's.
+ */
+function parseTimeWindow(
+  params: SearchParams,
+  timezone: string,
+): { from?: Date; to?: Date; raw: { date?: string; from?: string; to?: string } } {
+  const date = first(params, 'availDate');
+  const from = first(params, 'availFrom');
+  const to = first(params, 'availTo');
+  const raw = { date, from, to };
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return { raw };
+
+  const [year, month, day] = date.split('-').map(Number) as [number, number, number];
+  const parseTime = (value: string | undefined, fallback: [number, number]): [number, number] => {
+    const match = value?.match(/^(\d{1,2}):(\d{2})$/);
+    return match ? [Number(match[1]), Number(match[2])] : fallback;
+  };
+
+  const [fromHour, fromMinute] = parseTime(from, [0, 0]);
+  const [toHour, toMinute] = parseTime(to, [23, 59]);
+
+  const startUtc = zonedTimeToUtc({ year, month, day, hour: fromHour, minute: fromMinute }, timezone);
+  const endUtc = zonedTimeToUtc({ year, month, day, hour: toHour, minute: toMinute }, timezone);
+
+  if (endUtc <= startUtc) return { raw };
+  return { from: startUtc, to: endUtc, raw };
 }
 
 function parseFilters(params: SearchParams): DiscoveryFilters {
@@ -81,23 +116,40 @@ function isBrowsing(filters: DiscoveryFilters): boolean {
     filters.language ||
     filters.hasFreeTrial ||
     filters.country ||
+    filters.availableFromUtc ||
     (filters.sort && filters.sort !== 'relevance')
   );
 }
 
 export default async function HomePage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const params = await searchParams;
-  const filters = parseFilters(params);
 
-  const [viewer, jar, subjects, countries, results] = await Promise.all([
+  const [viewer, jar, subjects, countries] = await Promise.all([
     currentUser(),
     cookies(),
     listSubjects(),
     listTutorCountries(),
-    searchTutors(filters),
   ]);
 
-  const timezone = viewer?.timezone ?? 'UTC';
+  const cookieTimezone = jar.get(TIMEZONE_COOKIE)?.value;
+  const timezone =
+    viewer?.timezone ??
+    (cookieTimezone && isValidTimeZone(cookieTimezone) ? cookieTimezone : null) ??
+    'UTC';
+
+  const timeWindow = parseTimeWindow(params, timezone);
+  const filters: DiscoveryFilters = {
+    ...parseFilters(params),
+    ...(timeWindow.from && timeWindow.to
+      ? {
+          availableFromUtc: timeWindow.from,
+          availableToUtc: timeWindow.to,
+          availableDurationMinutes: 30,
+        }
+      : {}),
+  };
+
+  const results = await searchTutors(filters);
   const browsing = isBrowsing(filters);
   const grid = await toCardData(results.tutors, timezone);
 
@@ -136,6 +188,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   return (
     <>
       <SiteHeader />
+      <TimezoneProbe current={cookieTimezone ?? null} />
 
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-8">
         <section>
@@ -148,7 +201,14 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
         <CategoryChips subjects={subjects} active={filters.subject} buildHref={buildHref} />
 
-        <Filters filters={filters} subjects={subjects} countries={countries} resultCount={results.total} />
+        <Filters
+          filters={filters}
+          subjects={subjects}
+          countries={countries}
+          resultCount={results.total}
+          timeWindow={timeWindow.raw}
+          viewerTimezone={timezone}
+        />
 
         {browsing ? (
           <>

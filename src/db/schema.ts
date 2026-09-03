@@ -214,10 +214,10 @@ export const videos = pgTable('videos', {
     .references(() => users.id, { onDelete: 'cascade' }),
   /** The tutor's original upload, kept so a failed transcode can be retried. */
   sourceKey: text(),
-  /** HLS master playlist. Played by the profile page hero. */
-  hlsUrl: text(),
-  /** Short muted MP4. Played by the feed card on hover, so no player library. */
+  /** Short muted MP4. Played by the feed card on hover. */
   previewUrl: text(),
+  /** Full-length MP4 with audio. Played by the profile page hero. */
+  heroUrl: text(),
   /** The candidate the tutor picked. Becomes the card and hero poster. */
   thumbnailUrl: text(),
   /** All three candidates, kept so the tutor can change their mind. */

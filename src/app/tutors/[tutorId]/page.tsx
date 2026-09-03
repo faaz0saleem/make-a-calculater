@@ -11,9 +11,12 @@
  */
 
 import Link from 'next/link';
+import { cookies } from 'next/headers';
 import { notFound } from 'next/navigation';
 
+import { BookingCalendar } from '@/components/booking/calendar';
 import { SiteHeader } from '@/components/site-header';
+import { TimezoneProbe, TIMEZONE_COOKIE } from '@/components/timezone-probe';
 import { IntroPlayer } from '@/components/video/intro-player';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -22,15 +25,29 @@ import { loadTutorDossier } from '@/db/tutors';
 import { currentUser } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
 import { languageName, PROFICIENCY_LABELS, type LanguageProficiency } from '@/lib/tutors/languages';
+import { getAvailability } from '@/lib/availability';
+import { priceForBooking } from '@/lib/money/pricing';
+import { isValidTimeZone } from '@/lib/time';
 import { bookabilityProblem, canViewProfile, isPubliclyVisible } from '@/lib/tutors/visibility';
 
 export const dynamic = 'force-dynamic';
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-export default async function TutorProfilePage({ params }: { params: Promise<{ tutorId: string }> }) {
+export default async function TutorProfilePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ tutorId: string }>;
+  searchParams: Promise<{ duration?: string }>;
+}) {
   const { tutorId } = await params;
-  const [tutor, viewer] = await Promise.all([loadTutorDossier(tutorId), currentUser()]);
+  const [tutor, viewer, jar, query] = await Promise.all([
+    loadTutorDossier(tutorId),
+    currentUser(),
+    cookies(),
+    searchParams,
+  ]);
 
   if (!tutor) notFound();
   if (!canViewProfile(tutor.id, tutor, viewer)) notFound();
@@ -38,9 +55,42 @@ export default async function TutorProfilePage({ params }: { params: Promise<{ t
   const isPreview = !isPubliclyVisible(tutor);
   const problem = bookabilityProblem(tutor);
 
+  // The viewer's timezone: their account if they have one, the cookie the
+  // browser set otherwise, and UTC only if neither is available.
+  const cookieTimezone = jar.get(TIMEZONE_COOKIE)?.value;
+  const studentTimezone =
+    viewer?.timezone ??
+    (cookieTimezone && isValidTimeZone(cookieTimezone) ? cookieTimezone : null) ??
+    'UTC';
+
+  const durationMinutes = query.duration === '30' ? 30 : 60;
+  const { priceCents } = priceForBooking({
+    rates: {
+      hourlyCents: tutor.hourlyCents,
+      halfHourCents: tutor.halfHourCents,
+      promoCents: tutor.promoCents,
+      promoStartsAt: tutor.promoStartsAt,
+      promoEndsAt: tutor.promoEndsAt,
+    },
+    durationMinutes,
+    isTrial: false,
+    now: new Date(),
+  });
+
+  // Two weeks is enough to choose from without rendering a month of buttons.
+  const slots = problem
+    ? null
+    : await getAvailability().freeSlotsFor({
+        tutorId: tutor.id,
+        durationMinutes,
+        toUtc: new Date(Date.now() + 14 * 86_400_000),
+        limit: 120,
+      });
+
   return (
     <>
       <SiteHeader />
+      <TimezoneProbe current={cookieTimezone ?? null} />
 
       <main className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-10">
         {isPreview ? (
@@ -78,7 +128,7 @@ export default async function TutorProfilePage({ params }: { params: Promise<{ t
         </header>
 
         <IntroPlayer
-          hlsUrl={tutor.video?.hlsUrl ?? null}
+          heroUrl={tutor.video?.heroUrl ?? null}
           previewUrl={tutor.video?.previewUrl ?? null}
           posterUrl={tutor.video?.thumbnailUrl ?? null}
           name={tutor.name}
@@ -152,42 +202,30 @@ export default async function TutorProfilePage({ params }: { params: Promise<{ t
           </Card>
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Availability</CardTitle>
-            <CardDescription>Shown in the tutor&rsquo;s timezone ({tutor.timezone}).</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {tutor.availability.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No hours published.</p>
-            ) : (
-              <ul className="flex flex-col gap-1 text-sm">
-                {tutor.availability.map((rule, index) => (
-                  <li key={`${rule.weekdayLocal}-${index}`} className="flex justify-between">
-                    <span>{WEEKDAYS[rule.weekdayLocal]}</span>
-                    <span className="text-muted-foreground tabular-nums">
-                      {rule.startTimeLocal.slice(0, 5)} – {rule.endTimeLocal.slice(0, 5)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
+        <BookingCalendar
+          slots={slots && slots.known ? slots.value : null}
+          studentTimezone={studentTimezone}
+          tutorTimezone={tutor.timezone}
+          durationMinutes={durationMinutes}
+          priceCents={priceCents}
+          durationHref={(minutes) => `/tutors/${tutor.id}?duration=${minutes}`}
+          bookable={!problem}
+          notBookableReason={
+            problem === 'suspended'
+              ? 'This tutor is not currently taking bookings.'
+              : 'This tutor has not completed verification yet, so they cannot be booked.'
+          }
+        />
 
         <div className="sticky bottom-4 flex items-center justify-between gap-4 rounded-lg border border-border bg-card p-4">
-          {problem ? (
-            <p className="text-sm text-muted-foreground">
-              {problem === 'suspended'
+          <p className="text-sm text-muted-foreground">
+            {problem
+              ? problem === 'suspended'
                 ? 'This tutor is not currently taking bookings.'
-                : 'This tutor has not completed verification yet, so they cannot be booked.'}
-            </p>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Booking opens in Phase 3, with the calendar in your own timezone.
-            </p>
-          )}
-          <Button disabled title="Booking arrives in Phase 3">
+                : 'This tutor has not completed verification yet, so they cannot be booked.'
+              : 'Pick a slot above. Paying with credits arrives with booking.'}
+          </p>
+          <Button disabled title="Booking arrives with credits">
             {tutor.offersTrial && !problem ? 'Book free trial' : 'Book session'}
           </Button>
         </div>

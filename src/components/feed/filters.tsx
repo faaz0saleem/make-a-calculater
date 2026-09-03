@@ -11,16 +11,28 @@ import { Field, Select } from '@/components/ui/select';
 import { SORT_LABELS, SORT_OPTIONS, type DiscoveryFilters } from '@/db/discovery';
 import { LANGUAGES } from '@/lib/tutors/languages';
 
+/** Half-hour options for the day-and-time window. */
+const TIMES = Array.from({ length: 48 }, (_, index) => {
+  const hour = Math.floor(index / 2);
+  const minute = index % 2 === 0 ? '00' : '30';
+  return `${String(hour).padStart(2, '0')}:${minute}`;
+});
+
 export function Filters({
   filters,
   subjects,
   countries,
   resultCount,
+  timeWindow,
+  viewerTimezone,
 }: {
   filters: DiscoveryFilters;
   subjects: { slug: string; name: string }[];
   countries: string[];
   resultCount: number;
+  /** The raw day/time values, so the form can render what was submitted. */
+  timeWindow: { date?: string; from?: string; to?: string };
+  viewerTimezone: string;
 }) {
   return (
     <form
@@ -134,18 +146,48 @@ export function Filters({
         </div>
       </div>
 
+      <fieldset className="grid gap-3 border-t border-border pt-4 sm:grid-cols-4">
+        <legend className="sr-only">Free at a particular time</legend>
+
+        <Field label="Free on" htmlFor="availDate" hint={`Times in ${viewerTimezone}.`}>
+          <Input id="availDate" name="availDate" type="date" defaultValue={timeWindow.date ?? ''} />
+        </Field>
+
+        <Field label="Between" htmlFor="availFrom">
+          <Select id="availFrom" name="availFrom" defaultValue={timeWindow.from ?? '09:00'}>
+            {TIMES.map((time) => (
+              <option key={time} value={time}>
+                {time}
+              </option>
+            ))}
+          </Select>
+        </Field>
+
+        <Field label="And" htmlFor="availTo">
+          <Select id="availTo" name="availTo" defaultValue={timeWindow.to ?? '21:00'}>
+            {TIMES.map((time) => (
+              <option key={time} value={time}>
+                {time}
+              </option>
+            ))}
+          </Select>
+        </Field>
+
+        <div className="flex items-end">
+          <p className="text-xs text-muted-foreground">
+            Checked against each tutor&rsquo;s real calendar — their hours, minus sessions already booked,
+            their buffer between sessions and any time blocked off.
+          </p>
+        </div>
+      </fieldset>
+
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
         <p className="text-sm text-muted-foreground">
           {resultCount} tutor{resultCount === 1 ? '' : 's'} match. Only verified tutors are listed.
         </p>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-muted-foreground">
-            Filtering by day and time arrives with the booking calendar in Phase&nbsp;3.
-          </span>
-          <Button type="submit" variant="outline" size="sm">
-            Apply
-          </Button>
-        </div>
+        <Button type="submit" variant="outline" size="sm">
+          Apply
+        </Button>
       </div>
     </form>
   );

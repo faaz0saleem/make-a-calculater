@@ -71,7 +71,7 @@ export async function toCardData(
           },
           now,
         ),
-        nextFreeLabel: next.known ? nextFreeLabel(next.value?.startAtUtc ?? null, viewerTimezone, now) : null,
+        nextFreeLabel: next.known ? nextFreeLabel(next.value?.startUtc ?? null, viewerTimezone, now) : null,
       };
     }),
   );

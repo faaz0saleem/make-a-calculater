@@ -8,13 +8,19 @@
  * a video library.
  *
  * A tutor uploads one file. The pipeline turns it into:
- *   - an HLS ladder, for the profile page hero
- *   - a short muted MP4, for the card that autoplays in the feed
+ *   - a small muted MP4, for the card that autoplays in the feed
+ *   - a larger MP4, for the profile page hero
  *   - three thumbnail candidates, of which the tutor picks one
  *
- * Production uses Mux or Cloudflare Stream (SPEC.md §14). Development runs
- * ffmpeg locally. Both sit behind this interface, so the wizard, the feed and
- * the profile page never know which one produced their URLs.
+ * Two fixed renditions rather than an HLS ladder, deliberately. Adaptive
+ * streaming earns its keep on long video where a viewer's bandwidth changes
+ * mid-watch; these clips are 30-90 seconds. And the hosted transcoders that
+ * produce HLS bill per minute *delivered*, which — with a feed that autoplays
+ * previews on hover — scales with browsing rather than with bookings. R2 has no
+ * egress charge, so two MP4s served straight from the bucket cost nothing to
+ * show and need no player library.
+ *
+ * SPEC.md §14's Mux / Cloudflare Stream line is superseded by that reasoning.
  */
 
 export const INTRO_VIDEO_MIN_SECONDS = 30;
@@ -26,6 +32,10 @@ export const THUMBNAIL_CANDIDATE_COUNT = 3;
 /** The card preview is deliberately short — SPEC.md §4 autoplays 8 seconds. */
 export const PREVIEW_SECONDS = 8;
 
+/** Rendition heights. Small enough to autoplay on a phone, large enough to watch. */
+export const PREVIEW_HEIGHT = 360;
+export const HERO_HEIGHT = 720;
+
 export type TranscodeInput = {
   /** Where the tutor's original upload landed in the public bucket. */
   sourceKey: string;
@@ -35,10 +45,10 @@ export type TranscodeInput = {
 };
 
 export type TranscodeOutput = {
-  /** HLS master playlist key. Played by the profile hero. */
-  hlsKey: string;
-  /** Short muted MP4 key. Played by the feed card on hover. */
+  /** Short muted MP4. Played by the feed card on hover. */
   previewKey: string;
+  /** Full-length MP4 with audio. Played by the profile hero. */
+  heroKey: string;
   /** Three stills; the tutor picks one and it becomes the poster. */
   thumbnailKeys: string[];
   durationSeconds: number;

@@ -1,20 +1,14 @@
 /**
  * Availability, as far as discovery is concerned.
  *
- * The real availability engine is Phase 3 (SPEC.md §5): weekly recurring rules,
- * exceptions, buffers, lead times, and slot expansion in two timezones. None of
- * that exists yet, and building a partial version to make the feed look busier
- * would be worse than not having it — a wrong "Next free: today 6:30 PM" costs
- * more trust than a missing one.
+ * `DatabaseAvailability` is the real implementation, running the engine in
+ * `./engine.ts` against the tutor's rules, exceptions and existing bookings.
+ * `StubAvailability` remains for tests that need a calendar that knows nothing.
  *
- * So discovery asks this narrow interface instead. Today the only implementation
- * is `StubAvailability`, which answers "I don't know" to everything, and callers
- * are written to render nothing rather than guess.
- *
- * TODO(phase-3): implement `DatabaseAvailability` against the availability
- * engine in SPEC.md §5 and register it in `src/lib/availability/index.ts`. It is
- * the real source for every answer below; nothing else about this interface
- * should need to change.
+ * The three-valued answers stayed after the engine landed. They are no longer
+ * about a missing feature: a tutor who has published no hours at all is not the
+ * same as one whose week is full, and the feed should say nothing rather than
+ * "no availability" about someone who simply has not set a calendar up yet.
  */
 
 /**
@@ -31,12 +25,25 @@ export function known<T>(value: T): Availability<T> {
 }
 
 export type NextFreeSlot = {
-  startAtUtc: Date;
+  startUtc: Date;
   durationMinutes: number;
+};
+
+export type SlotQuery = {
+  tutorId: string;
+  durationMinutes: number;
+  /** Optional window; intersected with the tutor's own bookable range. */
+  fromUtc?: Date;
+  toUtc?: Date;
+  /** Cap on returned slots, so a 30-day calendar cannot flood a response. */
+  limit?: number;
 };
 
 export interface AvailabilityPort {
   readonly name: string;
+
+  /** Bookable start times for one tutor. The calendar reads this. */
+  freeSlotsFor(query: SlotQuery): Promise<Availability<NextFreeSlot[]>>;
 
   /** Powers the "Next free: Today 6:30 PM" line on a tutor card (SPEC.md §4). */
   nextFreeSlot(tutorId: string): Promise<Availability<NextFreeSlot | null>>;
@@ -49,7 +56,27 @@ export interface AvailabilityPort {
 
   /**
    * Powers the `availability_density_next_7d` term of the ranking score
-   * (SPEC.md §4), as basis points: 10000 means every published hour is free.
+   * (SPEC.md §4), as basis points.
+   *
+   * Not "share of published time still free" — that would reward a tutor nobody
+   * books. It measures how much bookable time a student searching now would
+   * actually find, against `DENSITY_TARGET_MINUTES` of open time in a week.
    */
   densityNext7dBps(tutorIds: string[]): Promise<Availability<Map<string, number>>>;
+
+  /** Tutors with any free slot inside a window, for the day/time filter. */
+  tutorsFreeBetween(
+    tutorIds: string[],
+    fromUtc: Date,
+    toUtc: Date,
+    durationMinutes: number,
+  ): Promise<Availability<string[]>>;
 }
+
+/**
+ * How much open time in the next week counts as "fully available" for ranking.
+ *
+ * Twenty hours. Beyond that a tutor is not more findable, just emptier, and the
+ * term should not keep rewarding it.
+ */
+export const DENSITY_TARGET_MINUTES = 20 * 60;

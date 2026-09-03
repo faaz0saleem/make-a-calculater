@@ -18,6 +18,12 @@ import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
 import { subjects, tutorProfiles, tutorRanking, users, videos } from './schema';
 
+/**
+ * How many ranked tutors the day-and-time filter will consult the calendar
+ * about. Well beyond a page, and bounded so the filter cannot turn into a scan.
+ */
+const TIME_FILTER_CANDIDATE_LIMIT = 200;
+
 export const SORT_OPTIONS = ['relevance', 'price_asc', 'price_desc', 'rating', 'sessions'] as const;
 export type SortOption = (typeof SORT_OPTIONS)[number];
 
@@ -42,6 +48,14 @@ export type DiscoveryFilters = {
   hasFreeTrial?: boolean;
   /** ISO 3166-1 alpha-2. */
   country?: string;
+  /**
+   * Day-and-time window (SPEC.md §4). Resolved through the availability port
+   * rather than in SQL, because "free" means rules minus exceptions minus
+   * bookings minus buffers — none of which is a column.
+   */
+  availableFromUtc?: Date;
+  availableToUtc?: Date;
+  availableDurationMinutes?: number;
   sort?: SortOption;
   limit?: number;
   offset?: number;
@@ -224,26 +238,50 @@ export async function searchTutors(
 ): Promise<SearchResult> {
   const limit = Math.min(filters.limit ?? 24, 60);
   const offset = Math.max(filters.offset ?? 0, 0);
-  const conditions = buildConditions(filters);
-  const where = and(...conditions)!;
+  const where = and(...buildConditions(filters))!;
 
+  const wantsTimeWindow = Boolean(filters.availableFromUtc && filters.availableToUtc);
+
+  // Without a time filter, page in SQL. With one, the filter is not expressible
+  // as a column, so take a bounded candidate set, ask the calendar, then page
+  // the survivors. The bound is what stops this becoming a table scan.
   const rows = await baseQuery(database)
     .where(where)
     .orderBy(...orderFor(filters.sort ?? 'relevance'))
-    // One extra row tells us whether there is another page, without a count.
-    .limit(limit + 1)
-    .offset(offset);
+    .limit(wantsTimeWindow ? TIME_FILTER_CANDIDATE_LIMIT : limit + 1)
+    .offset(wantsTimeWindow ? 0 : offset);
 
-  const [{ total }] = (await database.execute(sql`
-    select count(*)::int as total
-    from tutor_profiles
-    join users on users.id = tutor_profiles.user_id
-    left join tutor_ranking on tutor_ranking.tutor_id = tutor_profiles.user_id
-    where ${where}
-  `)) as unknown as [{ total: number }];
+  if (!wantsTimeWindow) {
+    const [{ total }] = (await database.execute(sql`
+      select count(*)::int as total
+      from tutor_profiles
+      join users on users.id = tutor_profiles.user_id
+      left join tutor_ranking on tutor_ranking.tutor_id = tutor_profiles.user_id
+      where ${where}
+    `)) as unknown as [{ total: number }];
 
-  const hasMore = rows.length > limit;
-  return { tutors: (hasMore ? rows.slice(0, limit) : rows) as FeedTutor[], total: Number(total), hasMore };
+    const hasMore = rows.length > limit;
+    return { tutors: (hasMore ? rows.slice(0, limit) : rows) as FeedTutor[], total: Number(total), hasMore };
+  }
+
+  const candidates = rows as unknown as FeedTutor[];
+  const free = await getAvailability().tutorsFreeBetween(
+    candidates.map((tutor) => tutor.id),
+    filters.availableFromUtc!,
+    filters.availableToUtc!,
+    filters.availableDurationMinutes ?? 30,
+  );
+
+  // A calendar that cannot answer must not silently empty the results.
+  const matching = free.known
+    ? candidates.filter((tutor) => new Set(free.value).has(tutor.id))
+    : candidates;
+
+  return {
+    tutors: matching.slice(offset, offset + limit),
+    total: matching.length,
+    hasMore: matching.length > offset + limit,
+  };
 }
 
 // ---------------------------------------------------------------------------

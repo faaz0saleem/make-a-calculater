@@ -1,19 +1,19 @@
 /**
- * The stand-in until Phase 3 builds the availability engine.
+ * A calendar that knows nothing.
  *
- * Every method answers "unknown". Nothing here invents a slot, and nothing here
- * reads `availability_rules` — a half-expanded rule set that ignores exceptions,
- * buffers, lead times and existing bookings would produce slots that are not
- * really free, which is worse than silence.
- *
- * TODO(phase-3): delete this and register the real implementation. The
- * behaviour to match is SPEC.md §5.
+ * Kept after the real engine landed, for tests that need to prove callers
+ * behave when availability is unknown — the badge absent, the rail honest, the
+ * ranking term neutral. `setAvailability` swaps it in.
  */
 
 import { UNKNOWN, type Availability, type AvailabilityPort, type NextFreeSlot } from './port';
 
 export class StubAvailability implements AvailabilityPort {
   readonly name = 'stub';
+
+  async freeSlotsFor(): Promise<Availability<NextFreeSlot[]>> {
+    return UNKNOWN;
+  }
 
   async nextFreeSlot(): Promise<Availability<NextFreeSlot | null>> {
     return UNKNOWN;
@@ -28,6 +28,10 @@ export class StubAvailability implements AvailabilityPort {
   }
 
   async densityNext7dBps(): Promise<Availability<Map<string, number>>> {
+    return UNKNOWN;
+  }
+
+  async tutorsFreeBetween(): Promise<Availability<string[]>> {
     return UNKNOWN;
   }
 }

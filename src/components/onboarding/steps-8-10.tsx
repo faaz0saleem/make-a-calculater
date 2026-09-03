@@ -4,13 +4,20 @@
 
 import Link from 'next/link';
 
-import { savePayoutMethod, saveAvailability, submitProfile } from '@/app/tutor/onboarding/actions';
+import {
+  addAvailabilityException,
+  removeAvailabilityException,
+  savePayoutMethod,
+  saveAvailability,
+  submitProfile,
+} from '@/app/tutor/onboarding/actions';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Field, Select } from '@/components/ui/select';
 import { PAYOUT_THRESHOLD_CENTS } from '@/lib/money/payouts';
 import { formatCents } from '@/lib/money/cents';
+import { formatInTimeZone } from '@/lib/time';
 import { BUFFER_MINUTE_OPTIONS, type WizardProgress } from '@/lib/tutors/wizard';
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -19,14 +26,24 @@ export function AvailabilityStep({
   timezone,
   bufferMinutes,
   rules,
+  exceptions,
 }: {
   timezone: string;
   bufferMinutes: number;
   rules: { weekdayLocal: number; startTimeLocal: string; endTimeLocal: string }[];
+  exceptions: {
+    id: string;
+    kind: 'block' | 'extra';
+    startUtc: Date;
+    endUtc: Date;
+    note: string | null;
+  }[];
 }) {
   const byWeekday = new Map(rules.map((rule) => [rule.weekdayLocal, rule]));
+  const today = new Date().toISOString().slice(0, 10);
 
   return (
+    <div className="flex flex-col gap-8">
     <form action={saveAvailability} className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
         These are the hours you teach, in <strong>{timezone}</strong>. Students see them converted into their
@@ -80,6 +97,84 @@ export function AvailabilityStep({
         Save and continue
       </Button>
     </form>
+
+    {/* ------------------------------------------------------------------ */}
+    {/* Time off and one-off extras (SPEC.md §5)                            */}
+    {/* ------------------------------------------------------------------ */}
+    <section className="flex flex-col gap-4 border-t border-border pt-6">
+      <div>
+        <h3 className="text-sm font-medium">Time off and extra hours</h3>
+        <p className="text-xs text-muted-foreground">
+          Block a holiday or an afternoon, or open up time outside your usual week. Dates are in{' '}
+          {timezone}.
+        </p>
+      </div>
+
+      {exceptions.length > 0 ? (
+        <ul className="flex flex-col divide-y divide-border rounded-md border border-border text-sm">
+          {exceptions.map((exception) => (
+            <li key={exception.id} className="flex items-center justify-between gap-3 px-3 py-2">
+              <div>
+                <p className="font-medium">
+                  {formatInTimeZone(exception.startUtc, timezone, { dateStyle: 'medium', timeStyle: 'short' })}
+                  {' → '}
+                  {formatInTimeZone(exception.endUtc, timezone, { dateStyle: 'medium', timeStyle: 'short' })}
+                </p>
+                {exception.note ? <p className="text-muted-foreground">{exception.note}</p> : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <Badge variant={exception.kind === 'block' ? 'destructive' : 'success'}>
+                  {exception.kind === 'block' ? 'Blocked' : 'Extra'}
+                </Badge>
+                <form action={removeAvailabilityException}>
+                  <input type="hidden" name="exceptionId" value={exception.id} />
+                  <Button type="submit" size="sm" variant="ghost">
+                    Remove
+                  </Button>
+                </form>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground">
+          Nothing blocked. Your weekly hours apply as they are.
+        </p>
+      )}
+
+      <form action={addAvailabilityException} className="flex flex-col gap-4 rounded-md border border-border p-4">
+        <Field label="What is this?" htmlFor="kind">
+          <Select id="kind" name="kind" defaultValue="block" className="max-w-64">
+            <option value="block">Block time off</option>
+            <option value="extra">Add extra hours</option>
+          </Select>
+        </Field>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="From" htmlFor="fromDate">
+            <div className="flex gap-2">
+              <Input id="fromDate" name="fromDate" type="date" min={today} required />
+              <Input name="fromTime" type="time" step={1800} aria-label="Start time" className="max-w-32" />
+            </div>
+          </Field>
+          <Field label="To" htmlFor="toDate" hint="Leave the times blank to cover whole days.">
+            <div className="flex gap-2">
+              <Input id="toDate" name="toDate" type="date" min={today} />
+              <Input name="toTime" type="time" step={1800} aria-label="End time" className="max-w-32" />
+            </div>
+          </Field>
+        </div>
+
+        <Field label="Note" htmlFor="note" hint="Only you see this.">
+          <Input id="note" name="note" maxLength={200} placeholder="Away / exam week / extra revision hours" />
+        </Field>
+
+        <Button type="submit" variant="outline" className="self-start">
+          Add
+        </Button>
+      </form>
+    </section>
+    </div>
   );
 }
 

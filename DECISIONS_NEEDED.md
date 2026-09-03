@@ -156,27 +156,32 @@ a contained change — `objectUrl` for the private bucket, and the route goes aw
 
 ## 13. Which hosted transcoder?
 
-**Blocks:** intro videos working on a real deployment. **Default in place:**
-ffmpeg locally, and an honest failure message anywhere without it.
+**Settled: neither.** You reframed the question rather than answering it, and
+you were right — both bill per minute *delivered*, and a feed that autoplays a
+preview on hover makes delivery scale with browsing rather than with bookings.
+R2 has no egress charge.
 
-`SPEC.md` §14 names Mux or Cloudflare Stream. Vercel has no ffmpeg, so
-`FfmpegVideoPipeline` is a development tool only — on a deployed environment a
-tutor's upload is stored and then marked `failed` with a message saying video
-processing is not configured.
+So the pipeline now produces two fixed MP4 renditions instead of an HLS ladder:
+a small muted one for card previews and a larger one for the profile hero, both
+served from R2 and picked by where they are shown. `hls.js` is gone. Adaptive
+streaming would earn its keep on long video; these clips are 30-90 seconds.
 
-The `VideoPipeline` interface is what a hosted one plugs into: `probe` and
-`transcode`, returning keys for an HLS playlist, a preview MP4 and three
-thumbnails. My lean is **Cloudflare Stream**, because the files already live in
-R2 and it keeps the bill and the vendor list in one place; Mux has the better
-API and analytics if that matters more.
+`SPEC.md` §14's "Mux or Cloudflare Stream" line is superseded by that reasoning,
+and the reasoning is written into `src/lib/video/types.ts` so it is not
+rediscovered later.
 
-This is the same shape of decision as the payment provider (item 1) and worth
-making at the same time — both are accounts somebody has to open.
+Still open: **where the transcode runs in production.** Vercel has no ffmpeg, so
+a deployed environment currently stores the upload and marks it `failed` with a
+message. The options are a container that has ffmpeg (Fly, Railway, a small VPS)
+or a transcode-only API. This is now a smaller question than it was — no
+per-minute delivery bill either way.
 
 ## 14. Transcoding runs inline
 
-**Blocks:** nothing yet. **Default in place:** the upload's Server Action waits
-for the transcode.
+**Agreed: QStash before launch.** Recorded here as the standing decision; not
+yet built.
+
+**Default in place:** the upload's Server Action waits for the transcode.
 
 For a 90-second clip on a local ffmpeg that is a few seconds and perfectly fine.
 On a serverless function it would risk the execution timeout, and it holds a
@@ -189,11 +194,39 @@ doing at the same time as item 13 rather than before it.
 
 ## 15. Infinite scroll
 
-**Blocks:** nothing. **Default in place:** the grid shows the first 24 with a
-count of the rest.
+**Agreed: cursor on `(score, tutor_id)`.** Recorded as the standing decision;
+not yet built.
 
-`SPEC.md` §4 asks for an infinite scroll grid. With forty tutors that would be
-one page anyway, so it is a decision about when rather than whether — it needs
-a cursor rather than an offset to be correct under a feed that reorders nightly.
-Say the word and it goes in; otherwise it is worth waiting until there is enough
-supply to need it.
+**Default in place:** the grid shows the first 24 with a count of the rest. The
+compound cursor is what makes paging stable under a feed that reorders nightly —
+`score` alone is not unique, so ties would drop or repeat rows across pages.
+
+---
+
+## 16. How much open time counts as "fully available"?
+
+**Blocks:** nothing. **Default in place:** 20 hours a week
+(`DENSITY_TARGET_MINUTES` in `src/lib/availability/port.ts`).
+
+The `availability_density_next_7d` term of the ranking score is now real. It
+measures how much bookable time a student searching today would actually find,
+capped so that beyond the target a tutor is not scored as more findable — just
+emptier.
+
+Deliberately *not* "share of published time still free", which would have
+rewarded a tutor nobody books over a busy one. Twenty hours is a guess that
+reads sensibly against the seeded world; if your real tutors are mostly
+part-time it should come down.
+
+## 17. Weekly rules store both local and UTC
+
+**Settled in practice; flagging what the code now does.**
+
+Item 2 asked which copy is authoritative. The engine answers: **the local one**.
+`expandWeeklyRules` walks calendar days in the tutor's timezone and converts
+each one, which is what keeps a New York tutor's 5pm at 5pm across a DST change.
+
+The `start_time_utc` / `end_time_utc` columns `SPEC.md` §12 asks for are still
+written and still useful for coarse SQL filtering, but nothing reads them to
+decide availability. If that stays true they could be dropped; leaving them
+costs a little write amplification and keeps the spec's shape.

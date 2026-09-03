@@ -180,6 +180,9 @@ export type TutorDossier = {
   bio: string | null;
   hourlyCents: number;
   halfHourCents: number;
+  promoCents: number | null;
+  promoStartsAt: Date | null;
+  promoEndsAt: Date | null;
   commissionBps: number;
   offersTrial: boolean;
   trialMinutes: number;
@@ -191,8 +194,8 @@ export type TutorDossier = {
     id: string;
     status: string;
     durationS: number | null;
-    hlsUrl: string | null;
     previewUrl: string | null;
+    heroUrl: string | null;
     thumbnailUrl: string | null;
   } | null;
   subjects: { name: string; level: string; yearsExperience: number }[];
@@ -237,6 +240,9 @@ export async function loadTutorDossier(
       bio: tutorProfiles.bio,
       hourlyCents: tutorProfiles.hourlyCents,
       halfHourCents: tutorProfiles.halfHourCents,
+      promoCents: tutorProfiles.promoCents,
+      promoStartsAt: tutorProfiles.promoStartsAt,
+      promoEndsAt: tutorProfiles.promoEndsAt,
       commissionBps: tutorProfiles.commissionBps,
       offersTrial: tutorProfiles.offersTrial,
       trialMinutes: tutorProfiles.trialMinutes,
@@ -247,8 +253,8 @@ export async function loadTutorDossier(
       videoId: videos.id,
       videoStatus: videos.status,
       videoSeconds: videos.durationS,
-      videoHls: videos.hlsUrl,
       videoPreview: videos.previewUrl,
+      videoHero: videos.heroUrl,
       videoThumbnail: videos.thumbnailUrl,
     })
     .from(tutorProfiles)
@@ -313,6 +319,9 @@ export async function loadTutorDossier(
     bio: row.bio,
     hourlyCents: row.hourlyCents,
     halfHourCents: row.halfHourCents,
+    promoCents: row.promoCents,
+    promoStartsAt: row.promoStartsAt,
+    promoEndsAt: row.promoEndsAt,
     commissionBps: row.commissionBps,
     offersTrial: row.offersTrial,
     trialMinutes: row.trialMinutes,
@@ -325,8 +334,8 @@ export async function loadTutorDossier(
           id: row.videoId,
           status: row.videoStatus ?? 'missing',
           durationS: row.videoSeconds,
-          hlsUrl: row.videoHls,
           previewUrl: row.videoPreview,
+          heroUrl: row.videoHero,
           thumbnailUrl: row.videoThumbnail,
         }
       : null,

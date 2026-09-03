@@ -11,14 +11,16 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { getObjectStore } from '@/lib/storage';
 import {
+  HERO_HEIGHT,
   previewStartSeconds,
+  PREVIEW_HEIGHT,
   PREVIEW_SECONDS,
   thumbnailTimestamps,
   VideoPipelineError,
@@ -75,38 +77,9 @@ export class FfmpegVideoPipeline implements VideoPipeline {
       const base = `videos/${input.ownerId}/${input.videoId}`;
       const store = getObjectStore();
 
-      // --- HLS ladder -----------------------------------------------------
-      // One 720p rendition. A 90-second talking head does not need a ladder of
-      // five; more renditions would be cost for no benefit at this length.
-      // ffmpeg will not create the segment directory itself.
-      const hlsDir = join(workspace, 'hls');
-      await mkdir(hlsDir, { recursive: true });
-
-      await run(
-        this.ffmpeg,
-        [
-          '-hide_banner', '-loglevel', 'error', '-y',
-          '-i', sourcePath,
-          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
-          '-vf', 'scale=-2:min(720\\,ih)',
-          '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
-          '-hls_time', '4',
-          '-hls_playlist_type', 'vod',
-          '-hls_segment_filename', join(hlsDir, 'segment_%03d.ts'),
-          join(hlsDir, 'index.m3u8'),
-        ],
-        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
-      ).catch((error: unknown) => {
-        throw new VideoPipelineError('ffmpeg could not produce an HLS rendition', { cause: error });
-      });
-
-      for (const file of await readdir(hlsDir)) {
-        await this.push(store, `${base}/hls/${file}`, join(hlsDir, file), contentTypeFor(file));
-      }
-
       // --- Card preview ----------------------------------------------------
-      // Muted, because the feed autoplays it. Short, because SPEC.md §4 plays
-      // eight seconds. MP4 rather than HLS so a card needs no player library.
+      // Muted, because the feed autoplays it, and short because SPEC.md §4
+      // plays eight seconds. Small: this is the file that gets fetched most.
       const previewPath = join(workspace, 'preview.mp4');
       await run(
         this.ffmpeg,
@@ -116,8 +89,8 @@ export class FfmpegVideoPipeline implements VideoPipeline {
           '-i', sourcePath,
           '-t', String(PREVIEW_SECONDS),
           '-an',
-          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
-          '-vf', 'scale=-2:min(480\\,ih)',
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30',
+          '-vf', `scale=-2:min(${PREVIEW_HEIGHT}\\,ih)`,
           '-movflags', '+faststart',
           previewPath,
         ],
@@ -128,6 +101,29 @@ export class FfmpegVideoPipeline implements VideoPipeline {
 
       const previewKey = `${base}/preview.mp4`;
       await this.push(store, previewKey, previewPath, 'video/mp4');
+
+      // --- Profile hero ----------------------------------------------------
+      // The whole clip, with sound. `+faststart` puts the index at the front so
+      // playback can begin before the file has finished downloading.
+      const heroPath = join(workspace, 'hero.mp4');
+      await run(
+        this.ffmpeg,
+        [
+          '-hide_banner', '-loglevel', 'error', '-y',
+          '-i', sourcePath,
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+          '-vf', `scale=-2:min(${HERO_HEIGHT}\\,ih)`,
+          '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+          '-movflags', '+faststart',
+          heroPath,
+        ],
+        { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+      ).catch((error: unknown) => {
+        throw new VideoPipelineError('ffmpeg could not produce a profile rendition', { cause: error });
+      });
+
+      const heroKey = `${base}/hero.mp4`;
+      await this.push(store, heroKey, heroPath, 'video/mp4');
 
       // --- Thumbnail candidates -------------------------------------------
       const thumbnailKeys: string[] = [];
@@ -155,8 +151,8 @@ export class FfmpegVideoPipeline implements VideoPipeline {
       }
 
       return {
-        hlsKey: `${base}/hls/index.m3u8`,
         previewKey,
+        heroKey,
         thumbnailKeys,
         durationSeconds: probe.durationSeconds,
         width: probe.width,
@@ -221,10 +217,4 @@ export class FfmpegVideoPipeline implements VideoPipeline {
     }
     await store.put('public', key, new Uint8Array(body), contentType);
   }
-}
-
-function contentTypeFor(file: string): string {
-  if (file.endsWith('.m3u8')) return 'application/vnd.apple.mpegurl';
-  if (file.endsWith('.ts')) return 'video/mp2t';
-  return 'application/octet-stream';
 }

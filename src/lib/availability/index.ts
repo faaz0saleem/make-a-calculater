@@ -1,24 +1,27 @@
 /**
- * The availability port discovery reads from.
+ * The availability port discovery and booking read from.
  *
- * TODO(phase-3): swap `StubAvailability` for the real engine described in
- * SPEC.md §5. This function is the only place that needs to change.
+ * `DatabaseAvailability` is the real one (SPEC.md §5). `setAvailability` lets a
+ * test swap in `StubAvailability`, which knows nothing, to prove that callers
+ * behave when the calendar has no answer.
  */
 
+import { DatabaseAvailability } from './database';
 import type { AvailabilityPort } from './port';
-import { StubAvailability } from './stub';
 
 export * from './port';
 export { StubAvailability } from './stub';
+export { DatabaseAvailability } from './database';
+export * from './engine';
 
 let cached: AvailabilityPort | null = null;
 
 export function getAvailability(): AvailabilityPort {
-  cached ??= new StubAvailability();
+  cached ??= new DatabaseAvailability();
   return cached;
 }
 
-/** Lets tests and the ranking job run against a fake. */
+/** Lets tests and the ranking job run against a different implementation. */
 export function setAvailability(port: AvailabilityPort | null): void {
   cached = port;
 }

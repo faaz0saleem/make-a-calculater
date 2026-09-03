@@ -195,16 +195,16 @@ export function ProfileStep({
 
 export function VideoStep({
   status,
-  hlsUrl,
   previewUrl,
+  heroUrl,
   posterUrl,
   candidates,
   durationS,
   error,
 }: {
   status: 'missing' | 'uploading' | 'processing' | 'ready' | 'failed';
-  hlsUrl: string | null;
   previewUrl: string | null;
+  heroUrl: string | null;
   posterUrl: string | null;
   candidates: string[];
   durationS: number | null;
@@ -228,7 +228,7 @@ export function VideoStep({
           <video
             controls
             playsInline
-            src={hlsUrl ?? previewUrl}
+            src={heroUrl ?? previewUrl}
             poster={posterUrl ?? undefined}
             className="w-full max-w-md rounded-md border border-border"
           />

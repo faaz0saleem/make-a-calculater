@@ -3,68 +3,35 @@
 /**
  * The intro-video hero on a tutor's profile (SPEC.md §4).
  *
- * Plays the HLS rendition, because that is what the pipeline produces and what
- * behaves on a bad connection. Safari plays HLS natively; everywhere else
- * hls.js is loaded on demand, and only once the viewer presses play — a feed
- * visitor who never opens a profile never downloads it.
+ * A plain `<video>`. The pipeline produces two fixed MP4 renditions rather than
+ * an HLS ladder — see `src/lib/video/types.ts` for why — so there is no player
+ * library to load and nothing to fall back from.
  *
- * If HLS cannot be played at all, the short preview MP4 is used instead. A
- * tutor's profile should never show a broken player.
+ * It does not autoplay: this is a page someone chose to open, and starting
+ * sound unasked is rude. The card in the feed is where autoplay belongs.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 
 export function IntroPlayer({
-  hlsUrl,
+  heroUrl,
   previewUrl,
   posterUrl,
   name,
 }: {
-  hlsUrl: string | null;
+  heroUrl: string | null;
   previewUrl: string | null;
   posterUrl: string | null;
   name: string;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [started, setStarted] = useState(false);
-  const [failed, setFailed] = useState(false);
 
-  const attach = useCallback(async () => {
-    const video = videoRef.current;
-    if (!video || !hlsUrl) return;
+  // The hero is the full clip with sound; the preview is the fallback when a
+  // video predates the hero rendition.
+  const source = heroUrl ?? previewUrl;
 
-    // Safari and iOS play HLS directly; nothing else to load.
-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = hlsUrl;
-      return;
-    }
-
-    try {
-      const { default: Hls } = await import('hls.js');
-      if (!Hls.isSupported()) {
-        setFailed(true);
-        return;
-      }
-      const hls = new Hls({ enableWorker: true });
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) setFailed(true);
-      });
-      hls.loadSource(hlsUrl);
-      hls.attachMedia(video);
-    } catch {
-      setFailed(true);
-    }
-  }, [hlsUrl]);
-
-  useEffect(() => {
-    if (started) void attach();
-  }, [attach, started]);
-
-  // Only set a `src` when we are falling back to the MP4; hls.js drives the
-  // element itself, and giving it a `src` as well confuses playback.
-  const source = failed || !hlsUrl ? (previewUrl ?? undefined) : undefined;
-
-  if (!hlsUrl && !previewUrl) {
+  if (!source) {
     return (
       <div className="grid aspect-video w-full place-items-center rounded-lg bg-secondary text-sm text-muted-foreground">
         {name} has not added an intro video yet.
@@ -76,11 +43,11 @@ export function IntroPlayer({
     <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-black">
       <video
         ref={videoRef}
+        src={source}
         controls={started}
         playsInline
         preload="none"
         poster={posterUrl ?? undefined}
-        src={source}
         className="size-full object-contain"
         aria-label={`Intro video from ${name}`}
       />
@@ -90,8 +57,7 @@ export function IntroPlayer({
           type="button"
           onClick={() => {
             setStarted(true);
-            // Attach first, then play, so the source exists by the time it runs.
-            void attach().then(() => videoRef.current?.play().catch(() => setFailed(true)));
+            void videoRef.current?.play().catch(() => undefined);
           }}
           className="absolute inset-0 grid place-items-center bg-black/20 transition-colors hover:bg-black/30"
         >

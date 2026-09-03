@@ -22,6 +22,7 @@ import { z } from 'zod';
 
 import { db } from '@/db/client';
 import {
+  availabilityExceptions,
   availabilityRules,
   credentials,
   payoutMethods,
@@ -333,8 +334,8 @@ export async function attachIntroVideo(key: string): Promise<{ ok: boolean; erro
     await db
       .update(videos)
       .set({
-        hlsUrl: publicUrlFor(output.hlsKey),
         previewUrl: publicUrlFor(output.previewKey),
+        heroUrl: publicUrlFor(output.heroKey),
         thumbnailCandidates: output.thumbnailKeys.map(publicUrlFor),
         // Default to the middle candidate; the tutor can change it.
         thumbnailUrl: publicUrlFor(output.thumbnailKeys[Math.floor(output.thumbnailKeys.length / 2)]!),
@@ -650,6 +651,85 @@ export async function saveAvailability(formData: FormData): Promise<void> {
   });
 
   onwards('availability', 'payout');
+}
+
+/**
+ * Time off: a blocked range (a single afternoon, or a fortnight away), or a
+ * one-off extra window outside the weekly pattern (SPEC.md §5).
+ *
+ * Dates and times are entered in the tutor's own timezone and converted here,
+ * so "away from the 12th to the 20th" means their days, not UTC ones.
+ */
+export async function addAvailabilityException(formData: FormData): Promise<void> {
+  const { user } = await editableTutor('availability');
+
+  const [account] = await db
+    .select({ timezone: users.timezone })
+    .from(users)
+    .where(eq(users.id, user.id))
+    .limit(1);
+  const timezone = account?.timezone ?? 'UTC';
+
+  const kind = String(formData.get('kind') ?? 'block');
+  if (kind !== 'block' && kind !== 'extra') backTo('availability', 'Choose whether to block time or add it.');
+
+  const fromDate = String(formData.get('fromDate') ?? '').trim();
+  const toDate = String(formData.get('toDate') ?? '').trim() || fromDate;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate)) {
+    backTo('availability', 'Pick the dates this applies to.');
+  }
+
+  const parseTime = (value: string, fallback: [number, number]): [number, number] => {
+    const match = value.match(/^(\d{1,2}):(\d{2})$/);
+    return match ? [Number(match[1]), Number(match[2])] : fallback;
+  };
+
+  // No times means whole days, which is what vacation mode is.
+  const [fromHour, fromMinute] = parseTime(String(formData.get('fromTime') ?? ''), [0, 0]);
+  const hasToTime = /^\d{1,2}:\d{2}$/.test(String(formData.get('toTime') ?? ''));
+  const [toHour, toMinute] = parseTime(String(formData.get('toTime') ?? ''), [0, 0]);
+
+  const [fromYear, fromMonth, fromDay] = fromDate.split('-').map(Number) as [number, number, number];
+  const [toYear, toMonth, toDay] = toDate.split('-').map(Number) as [number, number, number];
+
+  const startUtc = zonedTimeToUtc(
+    { year: fromYear, month: fromMonth, day: fromDay, hour: fromHour, minute: fromMinute },
+    timezone,
+  );
+  const endUtc = zonedTimeToUtc(
+    hasToTime
+      ? { year: toYear, month: toMonth, day: toDay, hour: toHour, minute: toMinute }
+      : // Whole days: run to the start of the day after the last one.
+        { year: toYear, month: toMonth, day: toDay + 1, hour: 0, minute: 0 },
+    timezone,
+  );
+
+  if (endUtc <= startUtc) backTo('availability', 'That range ends before it starts.');
+
+  await db.insert(availabilityExceptions).values({
+    tutorId: user.id,
+    date: fromDate,
+    kind,
+    startUtc,
+    endUtc,
+    note: String(formData.get('note') ?? '').trim().slice(0, 200) || null,
+  });
+
+  revalidatePath(`${BASE}/availability`);
+  redirect(`${BASE}/availability?saved=1`);
+}
+
+export async function removeAvailabilityException(formData: FormData): Promise<void> {
+  const { user } = await editableTutor('availability');
+  const id = String(formData.get('exceptionId') ?? '');
+
+  // Scoped to the caller, so a tutor cannot delete somebody else's time off.
+  await db
+    .delete(availabilityExceptions)
+    .where(and(eq(availabilityExceptions.id, id), eq(availabilityExceptions.tutorId, user.id)));
+
+  revalidatePath(`${BASE}/availability`);
+  redirect(`${BASE}/availability`);
 }
 
 // ---------------------------------------------------------------------------

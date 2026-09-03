@@ -16,6 +16,7 @@ import { AvailabilityStep, PayoutStep, ReviewStep } from '@/components/onboardin
 import { StepShell } from '@/components/onboarding/step-shell';
 import { db } from '@/db/client';
 import {
+  availabilityExceptions,
   availabilityRules,
   credentials,
   payoutMethods,
@@ -95,8 +96,8 @@ export default async function WizardStepPage({
       const [video] = await db
         .select({
           status: videos.status,
-          hlsUrl: videos.hlsUrl,
           previewUrl: videos.previewUrl,
+          heroUrl: videos.heroUrl,
           thumbnailUrl: videos.thumbnailUrl,
           thumbnailCandidates: videos.thumbnailCandidates,
           durationS: videos.durationS,
@@ -111,8 +112,8 @@ export default async function WizardStepPage({
         <StepShell {...shell}>
           <VideoStep
             status={video?.status ?? 'missing'}
-            hlsUrl={video?.hlsUrl ?? null}
             previewUrl={video?.previewUrl ?? null}
+            heroUrl={video?.heroUrl ?? null}
             posterUrl={video?.thumbnailUrl ?? null}
             candidates={video?.thumbnailCandidates ?? []}
             durationS={video?.durationS ?? null}
@@ -193,7 +194,7 @@ export default async function WizardStepPage({
     }
 
     case 'availability': {
-      const [rules, profile] = await Promise.all([
+      const [rules, profile, exceptions] = await Promise.all([
         db
           .select({
             weekdayLocal: availabilityRules.weekdayLocal,
@@ -209,6 +210,17 @@ export default async function WizardStepPage({
           .where(eq(tutorProfiles.userId, user.id))
           .limit(1)
           .then((rows) => rows[0]),
+        db
+          .select({
+            id: availabilityExceptions.id,
+            kind: availabilityExceptions.kind,
+            startUtc: availabilityExceptions.startUtc,
+            endUtc: availabilityExceptions.endUtc,
+            note: availabilityExceptions.note,
+          })
+          .from(availabilityExceptions)
+          .where(eq(availabilityExceptions.tutorId, user.id))
+          .orderBy(asc(availabilityExceptions.startUtc)),
       ]);
 
       return (
@@ -217,6 +229,7 @@ export default async function WizardStepPage({
             timezone={snapshot.timezone ?? 'UTC'}
             bufferMinutes={profile?.bufferMinutes ?? 10}
             rules={rules}
+            exceptions={exceptions}
           />
         </StepShell>
       );

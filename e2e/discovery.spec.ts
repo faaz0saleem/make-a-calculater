@@ -131,19 +131,16 @@ test('the preview stops itself after eight seconds', async ({ page }) => {
   expect(elapsed).toBeLessThan(11_000);
 });
 
-test('the home rails are present, and the one that needs Phase 3 says so', async ({ page }) => {
+test('the home rails are present', async ({ page }) => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: 'Free trials' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'New tutors' })).toBeVisible();
 
-  // Availability does not exist yet, so this rail is honest rather than faked.
-  await expect(page.getByRole('heading', { name: 'Available in the next hour' })).toBeVisible();
-  await expect(page.getByText(/needs the booking calendar, which arrives in Phase 3/)).toBeVisible();
-
-  // And no card claims a next-free slot or an "Available today" badge.
-  await expect(page.getByText('Next free:')).toHaveCount(0);
-  await expect(page.getByText('Available today')).toHaveCount(0);
+  // "Available in the next hour" and the availability-dependent badges are
+  // covered by e2e/availability.spec.ts, which owns them now that the calendar
+  // is real. Until Checkpoint A they were placeholders asserted here.
+  await expect(page.getByText(/arrives in Phase 3/)).toHaveCount(0);
 });
 
 test('"Continue with your tutors" is built from real session history', async ({ page }) => {
