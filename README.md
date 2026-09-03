@@ -29,9 +29,9 @@ genuinely blocked on a human.
 | Auth | Auth.js v5 — email/password and Google |
 | UI | Tailwind v4 + shadcn/ui tokens |
 | Video | LiveKit Cloud *(phase 4)* |
-| Storage | Cloudflare R2 — private bucket for credentials *(phase 1)* |
+| Storage | Cloudflare R2 — private bucket for credentials, local filesystem in dev |
 | Email | Resend *(phase 7)* |
-| Tests | Vitest for money and scheduling, Playwright for the booking journey *(phase 3)* |
+| Tests | Vitest for the pure logic, Playwright for the journeys |
 | Hosting | Vercel |
 
 Payments are deliberately not tied to a provider. Everything goes through a
@@ -71,6 +71,11 @@ Every seeded account uses the password `tutorly-dev-2026`.
 | Admin | `admin@tutorly.test` |
 | Tutor (verified, Karachi) | `tutor@tutorly.test` |
 | Student (New York) | `student@tutorly.test` |
+| Tutor, empty draft | `newtutor@tutorly.test` |
+| Tutor, rejected with a reason | `rejected.tutor@tutorly.test` |
+
+Five more tutors sit in the admin verification queue with documents attached, so
+`/admin/verification` has something real to review.
 
 The seed also plants the payout boundary cases from `SPEC.md` §16:
 `payout.pending@tutorly.test` has a $100.00 request waiting for an admin,
@@ -86,7 +91,8 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm dev` | Next dev server |
 | `pnpm build` | Production build |
 | `pnpm typecheck` | `tsc --noEmit`, strict |
-| `pnpm test` | Vitest — money, scheduling, timezones, crypto |
+| `pnpm test` | Vitest — money, scheduling, timezones, crypto, storage. No services needed |
+| `pnpm e2e` | Reseed, then drive the real UI with Playwright |
 | `pnpm db:generate` | Generate a migration from `src/db/schema.ts` |
 | `pnpm db:migrate` | Apply migrations |
 | `pnpm db:reset` | Migrate, then re-seed |
@@ -95,6 +101,28 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm reconcile` | The nightly ledger check — exits non-zero on drift |
 
 ---
+
+## How files work
+
+Two buckets. `private` holds credential documents; `public` holds avatars and
+intro videos. In production both are Cloudflare R2 over the S3 API; with no R2
+configured the app writes to `.storage/` on disk instead, and the rest of the
+codebase cannot tell the difference.
+
+A credential document is never reachable by guessing a path. The admin review
+screen mints a URL carrying an expiry and an HMAC over the key, and
+`/api/files/[...key]` refuses anything without a valid, unexpired signature:
+
+- no signature, a tampered one, or one over 60 seconds old → **403**
+- valid signature, but the viewer is not an admin or the owning tutor → **404**,
+  not 403, so the endpoint cannot be used to discover that a document exists
+
+Reads are proxied through that route rather than handed out as presigned S3
+URLs. It costs a hop and buys two things: the bucket hostname never reaches a
+browser, and access is re-checked at the moment the file is opened — a presigned
+URL stays valid even after an admin's access is revoked.
+
+`src/app/api/files/route.test.ts` covers all of it, including the unsigned case.
 
 ## How the money works
 
@@ -162,22 +190,33 @@ These come from `SPEC.md` §13 and are not negotiable:
 ```
 src/
   app/                  routes — home, auth, dashboard, tutor, admin, api
+    tutor/onboarding/   the ten-step wizard and its server actions
+    admin/verification/ the review queue and the approve / reject screen
+    api/files/          private objects, behind a 60-second signature
   auth.ts               Auth.js: credentials + Google, Node runtime
   auth.config.ts        the edge-safe half, used by middleware
-  components/           UI, shadcn/ui-compatible primitives
+  components/           UI primitives and the wizard's step forms
   db/
     schema.ts           the whole schema from SPEC.md §12
     ledger.ts           the only writer of balance columns; reconciliation
+    tutors.ts           every query that decides who is visible
     seed.ts             the development world
+    seed-assets.ts      generated PNGs and PDFs, so no binaries are committed
     migrate.ts
   lib/
+    admin/audit.ts      the admin_audit writer
     auth/               password policy, roles, server-side guards
     bookings/status.ts  the booking state machine
     money/              cents, pricing, outcomes, ledger drafts, packs, payouts
+    storage/            object stores, keys, signed URLs, upload checks
+    tutors/             profile status machine, wizard model, visibility rules
     crypto.ts           AES-256-GCM for payout details
     time.ts             IANA timezone conversion
     rate-limit.ts
+e2e/                    Playwright journeys
 drizzle/                generated SQL migrations
 ```
 
-Tests sit next to what they test, as `*.test.ts`.
+Unit tests sit next to what they test, as `*.test.ts`. They are pure and need no
+database, so `pnpm test` runs anywhere. The journeys in `e2e/` need a database
+and a built app, and run with `pnpm e2e`.

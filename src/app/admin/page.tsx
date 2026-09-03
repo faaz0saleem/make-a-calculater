@@ -7,9 +7,11 @@
  */
 
 import { desc, eq, sql } from 'drizzle-orm';
+import Link from 'next/link';
 
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { db } from '@/db/client';
 import { payouts, tutorProfiles, users } from '@/db/schema';
@@ -142,8 +144,15 @@ export default async function AdminPage() {
         <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader>
-              <CardTitle>Verification queue</CardTitle>
-              <CardDescription>{totals.pending_verifications} waiting</CardDescription>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <CardTitle>Verification queue</CardTitle>
+                  <CardDescription>{totals.pending_verifications} waiting</CardDescription>
+                </div>
+                <Link href="/admin/verification">
+                  <Button size="sm">Open queue</Button>
+                </Link>
+              </div>
             </CardHeader>
             <CardContent>
               {verificationQueue.length === 0 ? (
@@ -197,8 +206,7 @@ export default async function AdminPage() {
         </div>
 
         <p className="text-sm text-muted-foreground">
-          {totals.active_tutors} verified tutors. Approve / reject buttons, the dispute queue and the audit
-          log arrive with phases 1 and 6.
+          {totals.active_tutors} verified tutors. The dispute queue and payout decisions arrive with Phase 6.
         </p>
       </main>
     </>

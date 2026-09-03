@@ -5,8 +5,8 @@ Phases follow `SPEC.md` §15.
 | Phase | Status |
 |---|---|
 | 0 — repo, schema, migrations, auth, seed | **Done** |
-| 1 — tutor onboarding wizard + admin verification queue | Not started |
-| 2 — discovery feed, search, filters, tutor profile | Not started |
+| 1 — tutor onboarding wizard + admin verification queue | **Done** |
+| 2 — discovery feed, search, filters, tutor profile | Partly started (see below) |
 | 3 — availability engine + booking + credits | Not started |
 | 4 — LiveKit calls + session state machine + settlement | Not started |
 | 5 — trials, messaging, reviews, follows | Not started |
@@ -15,75 +15,100 @@ Phases follow `SPEC.md` §15.
 
 ---
 
-## Phase 0 — done
+## Phase 1 — done
 
-### The money layer, written first and tested before any UI
+### The onboarding wizard
 
-- `src/lib/money/cents.ts` — integer-cent arithmetic. Every division lives here
-  with an explicit rounding rule. `assertInt` rejects floats outright.
-- `src/lib/money/pricing.ts` — `priceForBooking`, `applyCommission`,
-  `deriveHalfHourCents`, the $5–$200 hourly bounds, the 40%–70% half-hour band,
-  and promo handling that discounts the 30-minute rate by the same ratio.
-- `src/lib/money/outcomes.ts` — `resolveBookingOutcome(booking, attendance)`.
-  Every row of the cancellation and no-show table in `SPEC.md` §2 has a test,
-  plus the boundaries between rows (exactly 24h, exactly 2h, exactly 50%
-  attendance, exactly ten minutes of waiting).
-- `src/lib/money/ledger.ts` — the entry builders. Internal groups are asserted
-  to net to zero; purchases and paid payouts are marked external because value
-  crosses the system boundary.
-- `src/lib/money/payouts.ts` — the $100 threshold and the payout state machine.
-- `src/db/ledger.ts` — `appendLedger` (idempotent: a replayed key inserts
-  nothing and moves no balance) and `reconcileLedger`, the nightly job.
+Ten steps at `/tutor/onboarding`, matching `SPEC.md` §3. Every step is its own
+page with a server action behind it, so each submit is a draft save and closing
+the tab loses nothing.
 
-### Schema and migrations
+There is no `current_step` column. Which steps are finished is derived from the
+profile itself (`wizardProgress` in `src/lib/tutors/wizard.ts`), so the wizard
+cannot get stuck pointing at a step that is already done, and an admin editing a
+row does not desynchronise anything. `/tutor/onboarding` redirects to the first
+unfinished step.
 
-All 27 tables from `SPEC.md` §12, plus two additions noted in
-`DECISIONS_NEEDED.md`. Generated migration in `drizzle/`. The indexes that carry
-weight:
+Rules enforced server-side, not just in the browser: headline ≤ 80 characters,
+bio 150–2,000, at most 5 subjects, at least one credential, hourly rate
+$5–$200, 30-minute rate inside the 40–70% band, at least one availability rule.
+Payout details are the only optional step.
 
-- `booking_no_overlap` — partial unique on `(tutor_id, start_at_utc)` where
-  status is `pending_tutor`, `confirmed` or `in_progress`.
-- `one_trial_per_pair` — partial unique on `(student_id, tutor_id)` where
-  `is_trial = true`.
-- `ledger_entries_idempotency_key`, `credit_purchases_idempotency_key` — unique.
-- `users_email_lower_key` — unique on `lower(email)`.
+`tutor_profiles.status` moves through one function, `transitionTutor` — the same
+discipline as the booking state machine. `submitForReview` re-runs the whole
+completeness check on the server before it will move a profile into the queue.
 
-### Auth
+### Files and the private bucket
 
-Auth.js v5 with email/password (bcrypt cost 12, constant-time on a miss) and
-Google. Roles are a `user_role[]` set, so one account can be both a student and
-a tutor. Sessions are JWTs; roles are re-read from the database when the token
-does not carry them, so a suspension takes effect without waiting for expiry.
+Two buckets behind one interface (`src/lib/storage/`): R2 over the S3 API when
+it is configured, the local filesystem otherwise. Credentials go to `private`,
+avatars and intro videos to `public`.
 
-`/api/auth/register` will only ever grant `student` or `tutor`. `admin` is not
-self-assignable. Rate-limited to 5 attempts per minute per IP.
+Private objects are served by `/api/files/[...key]`, which requires **both**:
 
-### Seed
+1. a valid HMAC signature over the key, no more than 60 seconds old — anything
+   else is **403**
+2. an admin session, or the tutor the document belongs to — anything else is
+   **404**, so the endpoint cannot be used to discover a document exists
 
-`pnpm seed` truncates and rebuilds, deterministically:
+Uploads are checked for size, declared type, and — for PDF, JPEG and PNG — the
+magic bytes, because the browser's `Content-Type` is a claim rather than a fact.
+Object keys are validated before they reach any store, so a key cannot walk out
+of its bucket.
 
-- 40 verified tutors across 10 timezones, with varied rates, subjects,
-  availability patterns, ratings and commission rates
-- 5 tutors in `pending_review` with credentials waiting in the admin queue
-- 10 students with credit balances from settled mock purchases
-- 222 bookings — settled, cancelled, no-show, upcoming and pending trials
-- reviews on roughly two thirds of completed sessions
-- the three payout fixtures from `SPEC.md` §16
+### The admin verification queue
 
-Every balance is built by appending real ledger entries. The seed then asserts
-no balance is negative, that the ledger conserves (entries sum to purchases
-minus payouts), and runs the reconciler.
+`/admin/verification` lists what is waiting, oldest first.
+`/admin/verification/[tutorId]` puts the profile claims beside the documents,
+with the four-item legibility checklist from `SPEC.md` §10 under them.
 
-### Verified by hand against a running build
+Approving requires every box ticked; rejecting requires a reason of at least ten
+characters, which is shown to the tutor verbatim and can be fixed and
+resubmitted. Both decisions write an `admin_audit` row — actor, action, target,
+before, after, reason, IP — **inside the same transaction** as the status
+change, so a decision cannot exist without a record of who made it.
 
-- All three roles sign in; a wrong password produces no session.
-- Signed out, `/dashboard` and `/admin` redirect to sign-in. Signed in without
-  the role, they redirect to `/dashboard` rather than looping through sign-in.
-- Registration: 201 for a new student and a new tutor, 409 on a duplicate email,
-  400 on a weak password, 400 on `intent: "admin"`, 429 on the sixth attempt in
-  a minute from one IP.
-- Injecting `+137` into a wallet column makes `pnpm reconcile` fail and name the
-  balance, the ledger total and the drift. Removing it makes it pass again.
+### Visibility
+
+"An unverified tutor is invisible in search and the feed and cannot be booked"
+is one rule, in one place: `src/lib/tutors/visibility.ts`, applied by
+`findVisibleTutors` in `src/db/tutors.ts`. An unverified tutor's public profile
+404s for everyone except that tutor (previewing their own) and admins.
+
+The home page now has search over name, headline, bio and subject names.
+
+### Verified end to end
+
+`pnpm e2e` reseeds and drives the real UI with Playwright. Six specs:
+
+1. A draft tutor does not appear in the feed or in search.
+2. They can preview their own profile; a student and a signed-out visitor both
+   get **404**, not 403.
+3. They walk all ten steps, uploading a photo, a video and a PDF. Leaving
+   mid-wizard and returning to `/tutor/onboarding` resumes at the right step.
+4. An admin opens the review screen, the document link is signed and short-lived,
+   **stripping the signature returns 403**, approving without the checklist is
+   refused, and approving with it verifies the tutor.
+5. The tutor now appears in the feed, in search by name and by subject, and
+   their profile is publicly reachable.
+6. A rejected tutor is shown the reason and can resubmit.
+
+The audit row from that run:
+
+```
+action      | tutor.verify
+actor       | admin@tutorly.test
+before      | {"status": "pending_review"}
+after       | {"status": "verified", "checklist": {"notExpired": true, "documentLegible": true,
+               "nameMatchesDocument": true, "institutionPlausible": true}}
+ip          | 127.0.0.1
+```
+
+### Schema change
+
+One table added: `tutor_languages` (tutor, ISO 639-1 code, proficiency).
+`SPEC.md` §3 step 2 asks for spoken languages and §4 lists language as a search
+filter, so a joinable table beats a jsonb column. Migration `0001`.
 
 ---
 
@@ -93,14 +118,15 @@ Nothing is a `TODO` standing in for logic. These are pieces later phases own:
 
 | Piece | State |
 |---|---|
-| `PaymentProvider` | Not written yet. Purchases exist in the schema and the seed writes settled ones through the ledger; the interface and `MockProvider` land with Phase 3 checkout. |
-| Home feed | A plain grid of the 40 seeded tutors, ordered by the ranking table. No video, autoplay, rails, search or filters — that is Phase 2. |
-| `tutor_ranking` | Populated by the seed with the Bayesian rating only. The weighted score from `SPEC.md` §4 is Phase 2. |
-| Tutor onboarding | `/tutor` shows status, rates and balances. The 10-step wizard is Phase 1. |
-| Admin | Read-only: queues, metrics and the live reconciliation. Approve, reject and pay buttons — and their `admin_audit` rows — are phases 1 and 6. |
-| Intro videos, avatars, credential files | Seeded as URLs and object keys. R2 upload and signed URLs are Phase 1. |
+| Intro video | Uploaded, validated and stored, and the row is marked ready. No transcoding, no HLS ladder, no thumbnail candidates, and duration is unknown — so the 30–90 second rule is only enforced once a duration exists. Phase 2. |
+| Home feed | A grid with working search, ordered by the ranking table. No autoplay, no rails, no filters beyond the text query. Phase 2. |
+| Tutor profile page | Claims, qualifications and published hours. No video hero, no review breakdown, no booking calendar. Phases 2 and 3. |
+| Booking | The `Book session` button is disabled. `assertBookable` in `src/lib/tutors/visibility.ts` is the gate the Phase 3 booking mutation will call. |
+| `tutor_ranking` | Seeded with the Bayesian rating only. The weighted score from `SPEC.md` §4 is Phase 2. |
+| Rejection emails | The reason is stored and shown in the UI. Sending it is Phase 7, with Resend. |
+| Email verification | `users.email_verified_at` exists and the seed fills it in; nothing sends a verification email or blocks on it. See `DECISIONS_NEEDED.md` item 6. |
+| `PaymentProvider` | Not written yet. Phase 3 checkout. |
 | LiveKit, messaging, notifications | Schema only. Phases 4, 5 and 7. |
-| Playwright | Not set up. It arrives with the Phase 3 booking journey, which is the first thing worth driving end to end. |
 | Rate limiting | Real, but in-memory, so it is per instance. Needs a shared store before running on more than one node. |
 
 ---
@@ -118,18 +144,29 @@ pnpm typecheck && pnpm test && pnpm build
 pnpm reconcile
 
 pnpm dev                       # http://localhost:3000
+pnpm e2e                       # reseeds, then drives the UI
 ```
 
-Sign in with `admin@tutorly.test`, `tutor@tutorly.test` or `student@tutorly.test`,
-password `tutorly-dev-2026`.
+To walk Phase 1 by hand:
+
+1. Sign in as `newtutor@tutorly.test` (password `tutorly-dev-2026`) and go to
+   `/tutor`. The profile is an empty draft.
+2. Work through `/tutor/onboarding`. Leave halfway and come back — it resumes.
+3. Submit for review.
+4. Sign in as `admin@tutorly.test`, open `/admin/verification`, review the
+   documents and approve.
+5. Sign out and search for them on the home page. Before approval they were not
+   there, and their profile 404'd.
 
 ### Last full run
 
 ```
 pnpm typecheck   clean
-pnpm test        10 files, 143 tests passed
-pnpm build       compiled, 10 routes
-pnpm seed        56 users · 40 verified tutors · 5 pending · 222 bookings
-                 108 reviews · 1,559 ledger entries · zero drift
-pnpm reconcile   Ledger reconciled: 1559 entries, zero drift.
+pnpm test        19 files, 248 tests passed
+pnpm build       compiled, 17 routes
+pnpm seed        58 users · 40 verified · 5 pending · 1 draft · 1 rejected
+                 73 credential PDFs and 46 avatars written to the object store
+                 1,399 ledger entries · zero drift
+pnpm e2e         6 passed
+pnpm reconcile   Ledger reconciled: 1399 entries, zero drift.
 ```

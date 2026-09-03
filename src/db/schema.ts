@@ -61,6 +61,13 @@ export const credentialKindEnum = pgEnum('credential_kind', [
 
 export const credentialStatusEnum = pgEnum('credential_status', ['pending', 'approved', 'rejected']);
 
+export const languageProficiencyEnum = pgEnum('language_proficiency', [
+  'basic',
+  'conversational',
+  'fluent',
+  'native',
+]);
+
 export const subjectLevelEnum = pgEnum('subject_level', [
   'beginner',
   'intermediate',
@@ -286,6 +293,28 @@ export const credentials = pgTable(
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('credentials_tutor_idx').on(table.tutorId, table.status)],
+);
+
+/**
+ * Languages a tutor teaches in (SPEC.md §3 step 2).
+ *
+ * A table rather than a column on `tutor_profiles`, because SPEC.md §4 lists
+ * language as a search filter and a join is cheaper to index than a jsonb probe.
+ */
+export const tutorLanguages = pgTable(
+  'tutor_languages',
+  {
+    tutorId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** ISO 639-1, e.g. `en`, `ur`, `ar`. */
+    languageCode: varchar({ length: 8 }).notNull(),
+    proficiency: languageProficiencyEnum().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tutorId, table.languageCode] }),
+    index('tutor_languages_code_idx').on(table.languageCode),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -729,6 +758,11 @@ export const tutorProfilesRelations = relations(tutorProfiles, ({ one, many }) =
   introVideo: one(videos, { fields: [tutorProfiles.introVideoId], references: [videos.id] }),
   ranking: one(tutorRanking, { fields: [tutorProfiles.userId], references: [tutorRanking.tutorId] }),
   subjects: many(tutorSubjects),
+  languages: many(tutorLanguages),
+}));
+
+export const tutorLanguagesRelations = relations(tutorLanguages, ({ one }) => ({
+  tutor: one(tutorProfiles, { fields: [tutorLanguages.tutorId], references: [tutorProfiles.userId] }),
 }));
 
 export const tutorSubjectsRelations = relations(tutorSubjects, ({ one }) => ({

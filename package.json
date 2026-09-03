@@ -20,10 +20,13 @@
     "db:studio": "drizzle-kit studio",
     "seed": "tsx src/db/seed.ts",
     "reconcile": "tsx src/scripts/reconcile.ts",
-    "db:reset": "tsx src/db/migrate.ts && tsx src/db/seed.ts"
+    "db:reset": "tsx src/db/migrate.ts && tsx src/db/seed.ts",
+    "e2e": "tsx src/db/seed.ts && playwright test",
+    "e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",
+    "@aws-sdk/client-s3": "^3.1125.0",
     "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -38,6 +41,7 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^22.20.1",
     "@types/react": "^19.2.18",

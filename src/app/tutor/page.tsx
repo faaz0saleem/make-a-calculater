@@ -5,13 +5,18 @@
  */
 
 import { and, desc, eq, gte, inArray } from 'drizzle-orm';
+import Link from 'next/link';
 
+import { withdrawProfile } from '@/app/tutor/onboarding/actions';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { db } from '@/db/client';
 import { bookings, payouts, tutorProfiles, users } from '@/db/schema';
+import { loadWizardSnapshot } from '@/db/tutors';
 import { requireRole } from '@/lib/auth/guards';
+import { wizardProgress } from '@/lib/tutors/wizard';
 import { formatCents } from '@/lib/money/cents';
 import { canRequestPayout, PAYOUT_THRESHOLD_CENTS } from '@/lib/money/payouts';
 import { formatInTimeZone } from '@/lib/time';
@@ -44,13 +49,18 @@ export default async function TutorPage() {
           <Card>
             <CardHeader>
               <CardTitle>No tutor profile yet</CardTitle>
-              <CardDescription>The onboarding wizard arrives in Phase 1.</CardDescription>
+              <CardDescription>
+                Something went wrong when your account was created. Contact support.
+              </CardDescription>
             </CardHeader>
           </Card>
         </main>
       </>
     );
   }
+
+  const snapshot = await loadWizardSnapshot(user.id);
+  const progress = snapshot ? wizardProgress(snapshot) : null;
 
   const upcoming = await db
     .select({
@@ -93,6 +103,68 @@ export default async function TutorPage() {
           <Badge variant={profile.status === 'verified' ? 'success' : 'secondary'}>{profile.status}</Badge>
         </div>
         <p className="-mt-4 text-sm text-muted-foreground">{STATUS_COPY[profile.status]}</p>
+
+        {profile.status === 'rejected' && profile.rejectionReason ? (
+          <div className="rounded-md bg-destructive/10 px-4 py-3 text-sm">
+            <p className="font-medium text-destructive">Why your profile was not accepted</p>
+            <p className="mt-1 text-destructive">{profile.rejectionReason}</p>
+          </div>
+        ) : null}
+
+        {progress && profile.status !== 'verified' ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Your profile</CardTitle>
+              <CardDescription>
+                {progress.completedRequired} of {progress.totalRequired} steps done.
+                {progress.canSubmit ? ' Ready to submit.' : ` Next: ${progress.blocking[0]?.title ?? ''}.`}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap items-center gap-3">
+              <div className="h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-secondary">
+                <div
+                  className="h-full rounded-full bg-primary"
+                  style={{
+                    width: `${Math.round((progress.completedRequired / progress.totalRequired) * 100)}%`,
+                  }}
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {profile.status === 'pending_review' ? (
+                  <form action={withdrawProfile}>
+                    <Button type="submit" variant="outline" size="sm">
+                      Withdraw and keep editing
+                    </Button>
+                  </form>
+                ) : (
+                  <Link href="/tutor/onboarding">
+                    <Button size="sm">
+                      {progress.completedRequired === 0 ? 'Start your profile' : 'Continue where you left off'}
+                    </Button>
+                  </Link>
+                )}
+                <Link
+                  href={`/tutors/${user.id}`}
+                  className="text-sm text-muted-foreground underline underline-offset-4"
+                >
+                  Preview public profile
+                </Link>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {profile.status === 'verified' ? (
+          <p className="-mt-2 text-sm">
+            <Link href={`/tutors/${user.id}`} className="underline underline-offset-4">
+              View your public profile
+            </Link>
+            {' · '}
+            <Link href="/tutor/onboarding" className="underline underline-offset-4">
+              Review your details
+            </Link>
+          </p>
+        ) : null}
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card>

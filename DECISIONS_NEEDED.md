@@ -65,15 +65,14 @@ table for it. Three workable readings:
 
 The first needs no schema change. Phase 4 settles it.
 
-## 5. Two tables beyond SPEC.md §12 — confirm you are happy
+## 5. Tables beyond SPEC.md §12
 
-**Default in place:** both exist.
+**Settled:** you approved `platform_accounts` and `credit_packs` after Phase 0.
 
-- `platform_accounts` — `platform_revenue` had no materialised home. Without it
-  the reconciler cannot check the platform's own balance, only everyone else's.
-- `credit_packs` — §2 says packs are "configurable in admin" and
-  `credit_purchases.pack_id` implies a row to point at. Seeded from the
-  constants in `src/lib/money/packs.ts`.
+Phase 1 adds one more, `tutor_languages` (tutor, ISO 639-1 code, proficiency).
+§3 step 2 asks for spoken languages with proficiency and §4 lists language as a
+search filter, so a joinable table beats a jsonb column. Say if you would rather
+it were a column on `tutor_profiles`.
 
 ## 6. Email verification: gate or nudge?
 
@@ -105,9 +104,10 @@ for jobs; the same instance can back this. The interface in
 `src/lib/rate-limit.ts` does not change. Needs doing before launch, not before
 Phase 1.
 
-## 9. Rounding calls I made — say if you disagree
+## 9. Rounding calls
 
-None of these are in the spec, and all are testable one-liners to change:
+**Settled:** you kept all of these after Phase 0. Restated here so they stay
+visible:
 
 - **The commission remainder goes to the tutor.** 20% of $9.99 is $1.998; the
   platform takes $1.99 and the tutor keeps $8.00.
@@ -120,3 +120,49 @@ None of these are in the spec, and all are testable one-liners to change:
   preserving whatever relationship the tutor chose, then rounds to 50c.
 - **The hold between `pending` and `available` is zero hours**, as §2 says. The
   two accounts are separate so a hold can be added later without a migration.
+
+---
+
+## 10. Should a verified tutor's edits go back through review?
+
+**Blocks:** nothing yet. **Default in place:** a verified profile is read-only in
+the wizard; only `draft` and `rejected` can be edited.
+
+That is safe but blunt: a verified tutor cannot fix a typo in their bio without
+an admin. The status machine allows `verified → suspended` and nothing else, on
+purpose, so the choice is yours:
+
+- let verified tutors edit freely, and re-review only when a *credential*
+  changes (my recommendation — the risky field is the document, not the bio)
+- let them edit everything and drop back to `pending_review`, losing feed
+  visibility until an admin looks again
+- keep it as it is, and add an admin "unlock for editing" action
+
+## 11. Intro video length is not enforced yet
+
+**Blocks:** nothing. **Default in place:** the 30–90 second rule is checked only
+once a duration is known, and nothing measures one yet.
+
+Phase 1 stores the uploaded file and marks it ready; Phase 2 transcodes it and
+will fill in `videos.duration_s`, at which point the rule starts biting. A tutor
+verified in the meantime could have a 5-second or a 10-minute intro.
+
+If that matters before Phase 2, the cheap fix is a client-side duration check on
+upload — easy to bypass, but it catches honest mistakes. The real fix is the
+transcode step. Tell me if you want the stopgap.
+
+## 12. Credential files are proxied, not presigned
+
+**Blocks:** nothing. **Default in place:** proxied through `/api/files`.
+
+`SPEC.md` §13.5 says "signed URLs expire in 60 seconds", which R2 can do natively
+with a presigned S3 URL. I proxy instead: our route checks our own signature and
+then re-checks the session before streaming the bytes.
+
+The trade: one extra hop and our bandwidth, in exchange for the bucket hostname
+never reaching a browser and access being re-checked at the moment the file is
+opened. A presigned URL stays valid for its full 60 seconds even if you revoke
+the admin's access a second after issuing it.
+
+At credential-review volumes the cost is nil. If you would rather presign, it is
+a contained change — `objectUrl` for the private bucket, and the route goes away.

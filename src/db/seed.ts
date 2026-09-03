@@ -21,6 +21,7 @@
 import '@/scripts/bootstrap';
 
 import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { sql } from 'drizzle-orm';
 
 import { db } from './client';
@@ -37,12 +38,14 @@ import {
   reviews,
   studentWallets,
   subjects,
+  tutorLanguages,
   tutorProfiles,
   tutorRanking,
   tutorSubjects,
   users,
   videos,
 } from './schema';
+import { colourFor, simplePdf, solidPng } from './seed-assets';
 import { hashPassword } from '@/lib/auth/password';
 import type { UserRole } from '@/lib/auth/roles';
 import { encryptSecret, last4 } from '@/lib/crypto';
@@ -56,6 +59,8 @@ import {
 import { CREDIT_PACKS, type CreditPack } from '@/lib/money/packs';
 import { resolveBookingOutcome, type Attendance, type BookingForOutcome } from '@/lib/money/outcomes';
 import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
+import { avatarKey, credentialKey, getObjectStore } from '@/lib/storage';
+import { LANGUAGES } from '@/lib/tutors/languages';
 import { clockToString, getLocalParts, zonedTimeToUtc } from '@/lib/time';
 
 // ---------------------------------------------------------------------------
@@ -266,11 +271,21 @@ async function reset(): Promise<void> {
       payouts, payout_methods, credit_purchases, credit_packs,
       follows, messages, threads, reports, admin_audit,
       availability_exceptions, availability_rules,
-      tutor_subjects, tutor_ranking, credentials, tutor_profiles,
+      tutor_subjects, tutor_languages, tutor_ranking, credentials, tutor_profiles,
       student_wallets, platform_accounts, videos, subjects,
       accounts, sessions, verification_tokens, users
     restart identity cascade
   `);
+}
+
+/**
+ * Clears the development object store so re-seeding does not leave orphaned
+ * files behind. Only ever touches the local directory — R2 is left alone.
+ */
+async function resetLocalStorage(): Promise<void> {
+  if (process.env.R2_ACCOUNT_ID) return;
+  const directory = process.env.LOCAL_STORAGE_DIR ?? '.storage';
+  await rm(directory, { recursive: true, force: true });
 }
 
 async function seedCreditPacks(): Promise<void> {
@@ -420,6 +435,16 @@ function availabilityPatternFor(index: number): { weekdays: number[]; startHour:
   }
 }
 
+/**
+ * Which profile status each seeded tutor gets, by position:
+ * 0-39 verified, 40-44 waiting in the queue, 45 a blank draft, 46 rejected.
+ */
+function statusForIndex(index: number): 'verified' | 'pending_review' | 'draft' | 'rejected' {
+  if (index < 40) return 'verified';
+  if (index < 45) return 'pending_review';
+  return index === 45 ? 'draft' : 'rejected';
+}
+
 async function seedTutors(subjectIds: Map<string, string>, passwordHash: string): Promise<{
   verified: SeededTutor[];
   pending: SeededTutor[];
@@ -427,7 +452,9 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
   const verified: SeededTutor[] = [];
   const pending: SeededTutor[] = [];
 
-  const total = 45; // 40 verified + 5 awaiting review
+  // 40 verified, 5 awaiting review, then one draft and one rejected so the
+  // wizard and the rejection path both have a real account to walk through.
+  const total = 47;
   for (let index = 0; index < total; index += 1) {
     const isVerified = index < 40;
     const locale = LOCALES[index % LOCALES.length]!;
@@ -453,6 +480,18 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
 
     (isVerified ? verified : pending).push(tutor);
   }
+
+  // The two accounts used to demonstrate the onboarding journey by hand.
+  const draftTutor = pending[5]!;
+  draftTutor.email = 'newtutor@tutorly.test';
+  draftTutor.name = 'Amara Nwosu';
+  draftTutor.timezone = 'Africa/Lagos';
+  draftTutor.subjectSlugs = [];
+
+  const rejectedTutor = pending[6]!;
+  rejectedTutor.email = 'rejected.tutor@tutorly.test';
+  rejectedTutor.name = 'Tomas Varga';
+  rejectedTutor.timezone = 'Europe/Berlin';
 
   // Three fixed tutors for the payout boundary cases in SPEC.md §16. Their rates
   // are chosen so a single completed 60-minute session lands the balance exactly
@@ -482,6 +521,17 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
 
   const all = [...verified, ...pending];
 
+  // Real bytes in the object store, so the app never renders a broken image.
+  const store = getObjectStore();
+  const avatarUrls = new Map<string, string>();
+
+  for (const [index, tutor] of all.entries()) {
+    if (statusForIndex(index) === 'draft') continue; // the draft account uploads its own
+    const key = avatarKey(tutor.id, 'seed', 'png');
+    await store.put('public', key, solidPng(96, 96, colourFor(tutor.id)), 'image/png');
+    avatarUrls.set(tutor.id, `/api/public-files/${key}`);
+  }
+
   await db.insert(users).values(
     all.map((tutor, index) => {
       const locale = LOCALES[index % LOCALES.length]!;
@@ -494,7 +544,7 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
         timezone: tutor.timezone,
         country: locale.country,
         city: locale.city,
-        image: `https://avatars.tutorly.test/${tutor.id}.jpg`,
+        image: avatarUrls.get(tutor.id) ?? null,
         emailVerified: NOW,
       };
     }),
@@ -503,33 +553,44 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
   // Tutors can take lessons too, so they get a wallet as well.
   await db.insert(studentWallets).values(all.map((tutor) => ({ userId: tutor.id })));
 
-  const videoRows = all.map((tutor) => ({
-    id: randomUUID(),
-    ownerId: tutor.id,
-    hlsUrl: `https://videos.tutorly.test/${tutor.id}/master.m3u8`,
-    thumbnailUrl: `https://videos.tutorly.test/${tutor.id}/thumb-1.jpg`,
-    thumbnailCandidates: [1, 2, 3].map((n) => `https://videos.tutorly.test/${tutor.id}/thumb-${n}.jpg`),
-    durationS: randInt(30, 90),
-    status: 'ready' as const,
-  }));
+  // No video bytes are seeded — a placeholder MP4 per tutor would bloat the repo
+  // and Phase 2 replaces this with a real transcode anyway. The row exists and is
+  // marked ready so the wizard treats the step as done.
+  const videoRows = all
+    .filter((_, index) => statusForIndex(index) !== 'draft')
+    .map((tutor) => ({
+      id: randomUUID(),
+      ownerId: tutor.id,
+      hlsUrl: null,
+      thumbnailUrl: null,
+      durationS: randInt(30, 90),
+      status: 'ready' as const,
+    }));
   await db.insert(videos).values(videoRows);
   const videoByTutor = new Map(videoRows.map((row) => [row.ownerId, row.id]));
 
   await db.insert(tutorProfiles).values(
     all.map((tutor, index) => {
       const isVerified = index < 40;
-      const primarySubject = SUBJECTS.find((subject) => subject.slug === tutor.subjectSlugs[0])!;
+      const status = statusForIndex(index);
+      const isBlank = status === 'draft';
+      const primarySubject =
+        SUBJECTS.find((subject) => subject.slug === tutor.subjectSlugs[0]) ?? SUBJECTS[0]!;
       const promoActive = isVerified && index % 11 === 0;
 
       return {
         userId: tutor.id,
-        status: isVerified ? ('verified' as const) : ('pending_review' as const),
-        headline: pick(HEADLINES).replace('{subject}', primarySubject.name).slice(0, 80),
-        bio: pickMany(BIO_PARTS, 4)
-          .join(' ')
-          .replace('{years}', String(randInt(2, 15)))
-          .replace('{subject}', primarySubject.name),
-        introVideoId: videoByTutor.get(tutor.id) ?? null,
+        status,
+        // The draft account starts genuinely empty, so the wizard has something
+        // to actually fill in.
+        headline: isBlank ? null : pick(HEADLINES).replace('{subject}', primarySubject.name).slice(0, 80),
+        bio: isBlank
+          ? null
+          : pickMany(BIO_PARTS, 4)
+              .join(' ')
+              .replace('{years}', String(randInt(2, 15)))
+              .replace('{subject}', primarySubject.name),
+        introVideoId: isBlank ? null : (videoByTutor.get(tutor.id) ?? null),
         hourlyCents: tutor.hourlyCents,
         halfHourCents: tutor.halfHourCents,
         promoCents: promoActive ? Math.max(500, Math.round(tutor.hourlyCents * 0.8)) : null,
@@ -544,7 +605,11 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
         bookingHorizonDays: 30,
         minLeadMinutes: 60,
         verifiedAt: isVerified ? daysFromNow(-randInt(30, 300), 9) : null,
-        submittedAt: daysFromNow(-randInt(1, 320), 9),
+        submittedAt: status === 'draft' ? null : daysFromNow(-randInt(1, 320), 9),
+        rejectionReason:
+          status === 'rejected'
+            ? 'The name on your teaching licence does not match the name on your profile. Upload a document in the same name, or update your profile to match your documents.'
+            : null,
         strikes: isVerified && chance(0.1) ? 1 : 0,
         responseMedianSeconds: randInt(240, 14_400),
       };
@@ -562,28 +627,69 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
     ),
   );
 
-  // Credentials: verified tutors have approved ones, the pending five have a
-  // document sitting in the admin queue.
-  await db.insert(credentials).values(
+  // Languages (SPEC.md §3 step 2). Everyone teaches in English plus, usually,
+  // one more; the blank draft account has none.
+  await db.insert(tutorLanguages).values(
     all.flatMap((tutor, index) => {
-      const isVerified = index < 40;
-      const templates = pickMany(CREDENTIAL_TEMPLATES, isVerified ? randInt(1, 2) : 2);
-      return templates.map((template) => ({
+      if (statusForIndex(index) === 'draft') return [];
+      const extras = pickMany(
+        LANGUAGES.filter((language) => language.code !== 'en'),
+        randInt(0, 2),
+      );
+      return [
+        { tutorId: tutor.id, languageCode: 'en', proficiency: pick(['fluent', 'native'] as const) },
+        ...extras.map((language) => ({
+          tutorId: tutor.id,
+          languageCode: language.code,
+          proficiency: pick(['conversational', 'fluent', 'native'] as const),
+        })),
+      ];
+    }),
+  );
+
+  // Credentials: verified tutors have approved ones, the pending five have
+  // documents sitting in the admin queue. The blank draft account has none.
+  const credentialRows: (typeof credentials.$inferInsert)[] = [];
+
+  for (const [index, tutor] of all.entries()) {
+    const status = statusForIndex(index);
+    if (status === 'draft') continue;
+
+    const isVerified = status === 'verified';
+    const templates = pickMany(CREDENTIAL_TEMPLATES, isVerified ? randInt(1, 2) : 2);
+
+    for (const template of templates) {
+      const credentialId = randomUUID();
+      const year = randInt(2005, 2024);
+      // Private bucket. Only ever reached through a 60-second signed URL.
+      const key = credentialKey(tutor.id, credentialId, 'pdf');
+
+      await store.put(
+        'private',
+        key,
+        simplePdf([template.title, template.institution, String(year), tutor.name]),
+        'application/pdf',
+      );
+
+      credentialRows.push({
+        id: credentialId,
         tutorId: tutor.id,
         kind: template.kind,
         title: template.title,
         institution: template.institution,
-        year: randInt(2005, 2024),
-        // Private R2 bucket. Only ever reached through a 60-second signed URL.
-        fileKey: `credentials/${tutor.id}/${randomUUID()}.pdf`,
-        status: isVerified ? ('approved' as const) : ('pending' as const),
+        year,
+        fileKey: key,
+        status: isVerified ? 'approved' : 'pending',
         reviewedAt: isVerified ? daysFromNow(-randInt(30, 300), 10) : null,
-      }));
-    }),
-  );
+      });
+    }
+  }
+
+  await db.insert(credentials).values(credentialRows);
 
   await db.insert(availabilityRules).values(
     all.flatMap((tutor, index) => {
+      if (statusForIndex(index) === 'draft') return [];
       const pattern = availabilityPatternFor(index);
       return pattern.weekdays.map((weekdayLocal) => {
         // Convert the tutor's local window to UTC using a reference week, then
@@ -1125,6 +1231,7 @@ async function main() {
   console.log('Seeding Tutorly ...\n');
 
   await reset();
+  await resetLocalStorage();
 
   // One hash, reused: every seeded account shares the same password, and bcrypt
   // at cost 12 is deliberately slow.
@@ -1148,6 +1255,9 @@ async function main() {
       (select count(*) from users)::int as users,
       (select count(*) from tutor_profiles where status = 'verified')::int as verified_tutors,
       (select count(*) from tutor_profiles where status = 'pending_review')::int as pending_tutors,
+      (select count(*) from tutor_profiles where status = 'draft')::int as draft_tutors,
+      (select count(*) from tutor_profiles where status = 'rejected')::int as rejected_tutors,
+      (select count(*) from credentials)::int as credential_documents,
       (select count(*) from bookings)::int as bookings,
       (select count(*) from reviews)::int as reviews,
       (select count(*) from ledger_entries)::int as ledger_entries,
@@ -1162,6 +1272,9 @@ async function main() {
   console.log(`  users                    ${totals.users}`);
   console.log(`  verified tutors          ${totals.verified_tutors}`);
   console.log(`  tutors awaiting review   ${totals.pending_tutors}`);
+  console.log(`  tutors in draft          ${totals.draft_tutors}`);
+  console.log(`  tutors rejected          ${totals.rejected_tutors}`);
+  console.log(`  credential documents     ${totals.credential_documents}`);
   console.log(`  students                 ${students.length}`);
   console.log(`  subjects                 ${SUBJECTS.length}`);
   console.log('');
@@ -1196,6 +1309,12 @@ async function main() {
 
   const report = await reconcileLedger(db);
   console.log(formatReconciliationReport(report));
+  console.log('');
+
+  console.log('Onboarding fixtures (Phase 1)');
+  console.log('  newtutor@tutorly.test        draft, empty profile — walk the whole wizard');
+  console.log('  rejected.tutor@tutorly.test  rejected with a reason — fix and resubmit');
+  console.log(`  ${totals.pending_tutors} tutors sitting in the admin verification queue with documents`);
   console.log('');
 
   console.log('Sign in with any of these — the password is the same for all seeded accounts.');
