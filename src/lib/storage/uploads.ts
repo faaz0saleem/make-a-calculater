@@ -17,17 +17,21 @@ export type UploadRule = {
 };
 
 export const UPLOAD_RULES: Record<UploadKind, UploadRule> = {
+  // Credentials and avatars still travel through a Server Action, so they are
+  // capped below the 4.5 MB a Vercel function will accept as a request body.
+  // If either needs to grow, it moves to the direct-upload path the intro video
+  // already uses.
   credential: {
-    maxBytes: 10 * 1024 * 1024,
+    maxBytes: 4 * 1024 * 1024,
     contentTypes: ['application/pdf', 'image/jpeg', 'image/png'],
     extensionFor: { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png' },
-    label: 'a PDF, JPEG or PNG up to 10 MB',
+    label: 'a PDF, JPEG or PNG up to 4 MB',
   },
   avatar: {
-    maxBytes: 5 * 1024 * 1024,
+    maxBytes: 4 * 1024 * 1024,
     contentTypes: ['image/jpeg', 'image/png', 'image/webp'],
     extensionFor: { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' },
-    label: 'a JPEG, PNG or WebP up to 5 MB',
+    label: 'a JPEG, PNG or WebP up to 4 MB',
   },
   introVideo: {
     maxBytes: 200 * 1024 * 1024,

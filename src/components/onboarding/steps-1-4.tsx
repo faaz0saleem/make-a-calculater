@@ -10,16 +10,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Field, Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { saveIdentity, saveProfile, uploadIntroVideo } from '@/app/tutor/onboarding/actions';
+import { saveIdentity, saveProfile, selectThumbnail } from '@/app/tutor/onboarding/actions';
+import { VideoUploader } from '@/components/onboarding/video-uploader';
 import { LANGUAGES, LANGUAGE_PROFICIENCIES, PROFICIENCY_LABELS } from '@/lib/tutors/languages';
-import {
-  BIO_MAX,
-  BIO_MIN,
-  HEADLINE_MAX,
-  INTRO_VIDEO_MAX_SECONDS,
-  INTRO_VIDEO_MIN_SECONDS,
-} from '@/lib/tutors/wizard';
+import { BIO_MAX, BIO_MIN, HEADLINE_MAX } from '@/lib/tutors/wizard';
 import { UPLOAD_RULES } from '@/lib/storage/uploads';
+import { cn } from '@/lib/utils';
 
 /** A short list of the zones tutors actually pick, plus whatever they already have. */
 const COMMON_TIMEZONES = [
@@ -198,42 +194,93 @@ export function ProfileStep({
 }
 
 export function VideoStep({
-  hasVideo,
-  videoUrl,
+  status,
+  hlsUrl,
+  previewUrl,
+  posterUrl,
+  candidates,
   durationS,
+  error,
 }: {
-  hasVideo: boolean;
-  videoUrl: string | null;
+  status: 'missing' | 'uploading' | 'processing' | 'ready' | 'failed';
+  hlsUrl: string | null;
+  previewUrl: string | null;
+  posterUrl: string | null;
+  candidates: string[];
   durationS: number | null;
+  error: string | null;
 }) {
   return (
-    <form action={uploadIntroVideo} className="flex flex-col gap-5">
-      {hasVideo && videoUrl ? (
-        <div className="flex flex-col gap-2">
-          <video controls src={videoUrl} className="w-full max-w-md rounded-md border border-border" />
+    <div className="flex flex-col gap-6">
+      <p className="text-sm text-muted-foreground">
+        A short clip of you talking to camera — who you teach, what a lesson is like, why you. It is the
+        first thing anyone sees, and it is the only video we store: lessons themselves are live.
+      </p>
+
+      {status === 'failed' && error ? (
+        <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
+
+      {status === 'ready' && previewUrl ? (
+        <div className="flex flex-col gap-4">
+          <video
+            controls
+            playsInline
+            src={hlsUrl ?? previewUrl}
+            poster={posterUrl ?? undefined}
+            className="w-full max-w-md rounded-md border border-border"
+          />
           <p className="text-xs text-muted-foreground">
-            {durationS ? `${durationS} seconds.` : 'Length is measured when transcoding lands in Phase 2.'}{' '}
-            Uploading another file replaces this one.
+            {durationS ? `${durationS} seconds.` : 'Length unknown.'} Uploading another file replaces this one.
           </p>
+
+          {candidates.length > 0 ? (
+            <form action={selectThumbnail} className="flex flex-col gap-3">
+              <p className="text-sm font-medium">Pick your thumbnail</p>
+              <p className="text-xs text-muted-foreground">
+                This is the still students see in the feed before the preview starts playing.
+              </p>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                {candidates.map((candidate, index) => (
+                  <label
+                    key={candidate}
+                    className={cn(
+                      'cursor-pointer overflow-hidden rounded-md border-2 transition-colors',
+                      candidate === posterUrl ? 'border-primary' : 'border-border hover:border-muted-foreground',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="thumbnailUrl"
+                      value={candidate}
+                      defaultChecked={candidate === posterUrl}
+                      aria-label={`Thumbnail option ${index + 1}`}
+                      className="sr-only"
+                    />
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={candidate} alt={`Thumbnail option ${index + 1}`} className="aspect-video w-full object-cover" />
+                  </label>
+                ))}
+              </div>
+
+              <Button type="submit" variant="outline" className="self-start">
+                Use this thumbnail
+              </Button>
+            </form>
+          ) : null}
         </div>
       ) : null}
 
-      <Field
-        label="Intro video"
-        htmlFor="video"
-        hint={`${INTRO_VIDEO_MIN_SECONDS}–${INTRO_VIDEO_MAX_SECONDS} seconds. Upload ${UPLOAD_RULES.introVideo.label}.`}
-      >
-        <Input id="video" name="video" type="file" accept={UPLOAD_RULES.introVideo.contentTypes.join(',')} required />
-      </Field>
+      {status === 'processing' ? (
+        <p className="rounded-md bg-secondary px-3 py-2 text-sm">
+          Processing your clip. Reload this page in a moment.
+        </p>
+      ) : null}
 
-      <p className="text-sm text-muted-foreground">
-        Say who you teach, what a lesson looks like, and why a student should pick you. This is the first
-        thing anyone sees.
-      </p>
-
-      <Button type="submit" className="self-start">
-        Upload and continue
-      </Button>
-    </form>
+      <VideoUploader replacing={status === 'ready'} />
+    </div>
   );
 }

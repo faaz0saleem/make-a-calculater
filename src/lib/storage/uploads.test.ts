@@ -70,4 +70,14 @@ describe('avatar and video uploads', () => {
     expect(UPLOAD_RULES.introVideo.maxBytes).toBe(200 * 1024 * 1024);
     expect(checkUpload('introVideo', { size: 201 * 1024 * 1024, type: 'video/mp4' }).ok).toBe(false);
   });
+
+  it('keeps the Server Action uploads under what a serverless function accepts', () => {
+    // Vercel refuses a request body over 4.5 MB, and credentials and avatars
+    // still POST through a Server Action.
+    const serverlessLimit = 4.5 * 1024 * 1024;
+    expect(UPLOAD_RULES.credential.maxBytes).toBeLessThan(serverlessLimit);
+    expect(UPLOAD_RULES.avatar.maxBytes).toBeLessThan(serverlessLimit);
+    // The video does not, because it uploads directly to the bucket.
+    expect(UPLOAD_RULES.introVideo.maxBytes).toBeGreaterThan(serverlessLimit);
+  });
 });

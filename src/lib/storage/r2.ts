@@ -41,6 +41,15 @@ export class R2ObjectStore implements ObjectStore {
     this.buckets = { private: config.privateBucket, public: config.publicBucket };
   }
 
+  /** Exposed so uploads can be presigned against the same client and bucket. */
+  clientFor(): S3Client {
+    return this.client;
+  }
+
+  bucketName(bucket: Bucket): string {
+    return this.buckets[bucket];
+  }
+
   async put(bucket: Bucket, key: string, body: Uint8Array, contentType: string): Promise<void> {
     assertValidObjectKey(key);
     await this.client.send(

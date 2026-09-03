@@ -11,7 +11,7 @@
 
 import { expect, test } from '@playwright/test';
 
-import { ACCOUNTS, mp4Bytes, pdfBytes, pngBytes, signIn, signOut } from './helpers';
+import { ACCOUNTS, introVideoBytes, pdfBytes, pngBytes, signIn, signOut } from './helpers';
 
 const NEW_TUTOR_NAME = 'Amara Nwosu';
 const BIO = `I have taught secondary and university mathematics for eleven years, mostly to students who had decided they were "bad at maths" long before they met me. We work from your syllabus and your past papers rather than a generic curriculum, and every session ends with a short written summary and a handful of practice problems you keep. Book the free trial first — I would rather you found the right tutor than the first one.`;
@@ -91,13 +91,30 @@ test('the tutor walks the whole wizard and it saves at every step', async ({ pag
   await expect(page).toHaveURL(/\/video\?saved=1$/);
 
   // ---- Step 4: intro video ---------------------------------------------
+  // A real clip: the pipeline probes it, enforces the 30-90 second rule, and
+  // transcodes it to HLS with three thumbnail candidates.
   await page.getByLabel('Intro video').setInputFiles({
     name: 'intro.mp4',
     mimeType: 'video/mp4',
-    buffer: mp4Bytes(),
+    buffer: await introVideoBytes(35),
   });
-  await page.getByRole('button', { name: 'Upload and continue' }).click();
-  await expect(page).toHaveURL(/\/subjects\?saved=1$/);
+  await page.getByRole('button', { name: 'Upload video' }).click();
+
+  // Three candidates to pick from, one of them already chosen.
+  const thumbnails = page.getByRole('radio');
+  await expect(thumbnails).toHaveCount(3, { timeout: 90_000 });
+  await expect(page.getByText('35 seconds.')).toBeVisible();
+
+  // Pick a different one and save it. The radio itself is visually hidden, so
+  // click the thumbnail the way a person would.
+  await page.locator('label:has(input[name="thumbnailUrl"])').first().click();
+  await expect(thumbnails.first()).toBeChecked();
+
+  await page.getByRole('button', { name: 'Use this thumbnail' }).click();
+  await expect(page).toHaveURL(/\/video\?saved=1$/);
+  await expect(thumbnails.first()).toBeChecked();
+
+  await page.goto('/tutor/onboarding/subjects');
 
   // ---- Step 5: subjects -------------------------------------------------
   await page.getByRole('checkbox', { name: 'Math' }).check();
@@ -196,8 +213,12 @@ test('an admin reads the documents and approves', async ({ page }) => {
 });
 
 test('the verified tutor is now in the feed, in search, and publicly visible', async ({ page }) => {
+  // Scoped to the ranked grid: a newly verified tutor who offers a trial also
+  // turns up in the rails, and an unscoped locator would match twice.
+  const grid = () => page.locator('section', { has: page.getByRole('heading', { name: 'All tutors' }) });
+
   await page.goto('/');
-  await expect(page.getByRole('link', { name: new RegExp(NEW_TUTOR_NAME) })).toBeVisible();
+  await expect(grid().getByRole('link', { name: new RegExp(NEW_TUTOR_NAME) })).toBeVisible();
 
   await page.goto(`/?q=${encodeURIComponent('Amara')}`);
   await expect(page.getByRole('link', { name: new RegExp(NEW_TUTOR_NAME) })).toBeVisible();
@@ -209,9 +230,10 @@ test('the verified tutor is now in the feed, in search, and publicly visible', a
   // A signed-out visitor can now open the profile.
   const response = await page.goto(`/tutors/${tutorId}`);
   expect(response?.status()).toBe(200);
-  await expect(page.getByText('Verified')).toBeVisible();
+  // Exact, because the qualifications panel also explains what "verified" means.
+  await expect(page.getByText('Verified', { exact: true })).toBeVisible();
   await expect(page.getByText('BSc Mathematics — University of Lagos, 2013')).toBeVisible();
-  await expect(page.getByText('$30.00')).toBeVisible();
+  await expect(page.getByText('$30.00').first()).toBeVisible();
 });
 
 test('a rejected tutor sees why, and can fix it and resubmit', async ({ page }) => {

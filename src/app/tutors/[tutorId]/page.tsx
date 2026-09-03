@@ -14,6 +14,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { SiteHeader } from '@/components/site-header';
+import { IntroPlayer } from '@/components/video/intro-player';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -76,7 +77,12 @@ export default async function TutorProfilePage({ params }: { params: Promise<{ t
           </div>
         </header>
 
-        <div className="aspect-video w-full rounded-lg bg-secondary" aria-hidden />
+        <IntroPlayer
+          hlsUrl={tutor.video?.hlsUrl ?? null}
+          previewUrl={tutor.video?.previewUrl ?? null}
+          posterUrl={tutor.video?.thumbnailUrl ?? null}
+          name={tutor.name}
+        />
 
         <Card>
           <CardHeader>
@@ -122,7 +128,10 @@ export default async function TutorProfilePage({ params }: { params: Promise<{ t
           <Card>
             <CardHeader>
               <CardTitle>Qualifications</CardTitle>
-              <CardDescription>Checked by our review team. Documents are never public.</CardDescription>
+              <CardDescription>
+                Verified by our review team. We show the institution and the year — never the document
+                itself.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               {tutor.credentials.filter((document) => document.status === 'approved').length === 0 ? (

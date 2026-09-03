@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canTransitionTutor,
+  credentialChangeTriggersReview,
   isAwaitingReview,
   isEditable,
   transitionTutor,
@@ -33,6 +34,10 @@ describe('tutor status machine', () => {
     expect(transitionTutor('suspended', 'verified')).toBe('verified');
   });
 
+  it('sends a verified tutor back for review when a credential changes', () => {
+    expect(transitionTutor('verified', 'pending_review')).toBe('pending_review');
+  });
+
   it('lets a tutor withdraw a submission to keep editing', () => {
     expect(transitionTutor('pending_review', 'draft')).toBe('draft');
   });
@@ -43,12 +48,20 @@ describe('tutor status machine', () => {
     }
   });
 
-  it('knows who may still edit', () => {
+  it('lets a verified tutor keep editing, but not one under review', () => {
     expect(isEditable('draft')).toBe(true);
     expect(isEditable('rejected')).toBe(true);
+    expect(isEditable('verified')).toBe(true);
+    // An admin is reading this one right now.
     expect(isEditable('pending_review')).toBe(false);
-    expect(isEditable('verified')).toBe(false);
     expect(isEditable('suspended')).toBe(false);
+  });
+
+  it('re-reviews only on a credential change, and only for a verified profile', () => {
+    expect(credentialChangeTriggersReview('verified')).toBe(true);
+    expect(credentialChangeTriggersReview('draft')).toBe(false);
+    expect(credentialChangeTriggersReview('rejected')).toBe(false);
+    expect(credentialChangeTriggersReview('pending_review')).toBe(false);
   });
 
   it('knows what is in the admin queue', () => {

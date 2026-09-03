@@ -93,8 +93,10 @@ export function SubjectsStep({
 
 export function CredentialsStep({
   documents,
+  isVerified,
 }: {
   documents: { id: string; kind: string; title: string; institution: string; year: number | null; status: string }[];
+  isVerified: boolean;
 }) {
   const currentYear = new Date().getFullYear();
 
@@ -104,6 +106,14 @@ export function CredentialsStep({
         At least one document. Files go straight to a private bucket — students never see them, and our
         review team opens each one through a link that expires after 60 seconds.
       </p>
+
+      {isVerified ? (
+        <p className="rounded-md bg-secondary px-3 py-2 text-sm">
+          You are verified, so you can edit the rest of your profile freely. Adding or removing a{' '}
+          <strong>document</strong> is different: it sends your profile back for review, and you will be
+          hidden from the feed until an admin looks again — usually within a day.
+        </p>
+      ) : null}
 
       {documents.length > 0 ? (
         <ul className="flex flex-col divide-y divide-border rounded-md border border-border">

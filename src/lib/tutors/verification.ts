@@ -13,6 +13,7 @@ import { db } from '@/db/client';
 import { credentials, tutorProfiles } from '@/db/schema';
 import { loadWizardSnapshot } from '@/db/tutors';
 import { writeAudit } from '@/lib/admin/audit';
+import { recomputeTutorRankingFor } from '@/db/ranking';
 import { transitionTutor, type TutorStatus } from './status';
 import { wizardProgress } from './wizard';
 
@@ -141,6 +142,10 @@ export async function approveTutor(params: {
       ip: params.ip ?? null,
     });
   });
+
+  // Score them now, so a newly verified tutor is discoverable straight away
+  // instead of waiting for the nightly job.
+  await recomputeTutorRankingFor(params.tutorId);
 }
 
 /**

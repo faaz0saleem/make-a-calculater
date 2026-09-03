@@ -20,12 +20,17 @@
 
 import '@/scripts/bootstrap';
 
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { sql } from 'drizzle-orm';
 
 import { db } from './client';
 import { appendLedger, formatReconciliationReport, reconcileLedger } from './ledger';
+import { formatRankingRun, recomputeTutorRanking } from './ranking';
 import {
   availabilityRules,
   bookings,
@@ -59,7 +64,8 @@ import {
 import { CREDIT_PACKS, type CreditPack } from '@/lib/money/packs';
 import { resolveBookingOutcome, type Attendance, type BookingForOutcome } from '@/lib/money/outcomes';
 import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
-import { avatarKey, credentialKey, getObjectStore } from '@/lib/storage';
+import { avatarKey, credentialKey, getObjectStore, publicUrlFor } from '@/lib/storage';
+import { getVideoPipeline, isVideoPipelineAvailable } from '@/lib/video';
 import { LANGUAGES } from '@/lib/tutors/languages';
 import { clockToString, getLocalParts, zonedTimeToUtc } from '@/lib/time';
 
@@ -288,6 +294,81 @@ async function resetLocalStorage(): Promise<void> {
   await rm(directory, { recursive: true, force: true });
 }
 
+const runCommand = promisify(execFile);
+
+/**
+ * Intro videos for the seeded world.
+ *
+ * Four synthetic clips are generated with ffmpeg and pushed through the real
+ * pipeline — the same code path a tutor's upload takes — then shared across the
+ * seeded tutors. Forty-six separate transcodes would take seven minutes and
+ * several hundred megabytes to produce forty-six near-identical test patterns;
+ * four takes half a minute and exercises exactly the same code.
+ *
+ * With no ffmpeg on the machine the seed says so and leaves the videos without
+ * media, rather than failing.
+ */
+const SEED_CLIP_SOURCES = [
+  { source: 'testsrc2=size=640x360:rate=24', seconds: 34 },
+  { source: 'smptebars=size=640x360:rate=24', seconds: 48 },
+  { source: 'rgbtestsrc=size=640x360:rate=24', seconds: 62 },
+  { source: 'testsrc=size=640x360:rate=24', seconds: 81 },
+];
+
+type SeedClip = {
+  hlsUrl: string;
+  previewUrl: string;
+  thumbnailUrls: string[];
+  durationS: number;
+  width: number;
+  height: number;
+};
+
+async function buildSeedClips(): Promise<SeedClip[] | null> {
+  if (!(await isVideoPipelineAvailable())) return null;
+
+  const pipeline = getVideoPipeline();
+  const store = getObjectStore();
+  const workspace = await mkdtemp(join(tmpdir(), 'tutorly-seed-video-'));
+  const clips: SeedClip[] = [];
+
+  try {
+    for (const [index, clip] of SEED_CLIP_SOURCES.entries()) {
+      const path = join(workspace, `clip-${index}.mp4`);
+      await runCommand(
+        'ffmpeg',
+        [
+          '-hide_banner', '-loglevel', 'error', '-y',
+          '-f', 'lavfi', '-i', `${clip.source}:duration=${clip.seconds}`,
+          '-f', 'lavfi', '-i', `sine=frequency=${220 + index * 110}:duration=${clip.seconds}`,
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30',
+          '-c:a', 'aac', '-b:a', '64k', '-shortest',
+          path,
+        ],
+        { timeout: 120_000 },
+      );
+
+      const sourceKey = `videos/seed/${index}/source.mp4`;
+      await store.put('public', sourceKey, new Uint8Array(await readFile(path)), 'video/mp4');
+
+      const output = await pipeline.transcode({ sourceKey, ownerId: 'seed', videoId: String(index) });
+
+      clips.push({
+        hlsUrl: publicUrlFor(output.hlsKey),
+        previewUrl: publicUrlFor(output.previewKey),
+        thumbnailUrls: output.thumbnailKeys.map(publicUrlFor),
+        durationS: Math.round(output.durationSeconds),
+        width: output.width,
+        height: output.height,
+      });
+    }
+
+    return clips;
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
 async function seedCreditPacks(): Promise<void> {
   await db.insert(creditPacks).values(
     CREDIT_PACKS.map((pack) => ({
@@ -445,7 +526,11 @@ function statusForIndex(index: number): 'verified' | 'pending_review' | 'draft' 
   return index === 45 ? 'draft' : 'rejected';
 }
 
-async function seedTutors(subjectIds: Map<string, string>, passwordHash: string): Promise<{
+async function seedTutors(
+  subjectIds: Map<string, string>,
+  passwordHash: string,
+  clips: SeedClip[] | null,
+): Promise<{
   verified: SeededTutor[];
   pending: SeededTutor[];
 }> {
@@ -553,19 +638,25 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
   // Tutors can take lessons too, so they get a wallet as well.
   await db.insert(studentWallets).values(all.map((tutor) => ({ userId: tutor.id })));
 
-  // No video bytes are seeded — a placeholder MP4 per tutor would bloat the repo
-  // and Phase 2 replaces this with a real transcode anyway. The row exists and is
-  // marked ready so the wizard treats the step as done.
   const videoRows = all
     .filter((_, index) => statusForIndex(index) !== 'draft')
-    .map((tutor) => ({
-      id: randomUUID(),
-      ownerId: tutor.id,
-      hlsUrl: null,
-      thumbnailUrl: null,
-      durationS: randInt(30, 90),
-      status: 'ready' as const,
-    }));
+    .map((tutor, index) => {
+      const clip = clips ? clips[index % clips.length]! : null;
+      return {
+        id: randomUUID(),
+        ownerId: tutor.id,
+        hlsUrl: clip?.hlsUrl ?? null,
+        previewUrl: clip?.previewUrl ?? null,
+        // Rotate which candidate is chosen, so the feed is not a wall of the
+        // same still.
+        thumbnailUrl: clip ? (clip.thumbnailUrls[index % clip.thumbnailUrls.length] ?? null) : null,
+        thumbnailCandidates: clip?.thumbnailUrls ?? [],
+        durationS: clip?.durationS ?? randInt(30, 90),
+        width: clip?.width ?? null,
+        height: clip?.height ?? null,
+        status: 'ready' as const,
+      };
+    });
   await db.insert(videos).values(videoRows);
   const videoByTutor = new Map(videoRows.map((row) => [row.ownerId, row.id]));
 
@@ -604,7 +695,10 @@ async function seedTutors(subjectIds: Map<string, string>, passwordHash: string)
         maxSessionsPerDay: randInt(4, 10),
         bookingHorizonDays: 30,
         minLeadMinutes: 60,
-        verifiedAt: isVerified ? daysFromNow(-randInt(30, 300), 9) : null,
+        // A handful were verified in the last fortnight, so the exploration
+        // slot in the ranking score — and the "New tutors" rail — have someone
+        // to show.
+        verifiedAt: isVerified ? daysFromNow(-(index % 9 === 4 ? randInt(1, 14) : randInt(35, 300)), 9) : null,
         submittedAt: status === 'draft' ? null : daysFromNow(-randInt(1, 320), 9),
         rejectionReason:
           status === 'rejected'
@@ -1118,63 +1212,6 @@ async function seedPayoutFixtures(
   return { pendingPayoutId: payoutId, amounts };
 }
 
-/** Placeholder ranking rows so the feed has something to order by in Phase 2. */
-async function seedRanking(tutors: SeededTutor[]): Promise<void> {
-  const rows = await db.execute<{
-    tutor_id: string;
-    review_count: number;
-    rating_sum: number;
-    session_count: number;
-  }>(sql`
-    select t.user_id as tutor_id,
-           coalesce(r.review_count, 0)::int as review_count,
-           coalesce(r.rating_sum, 0)::int as rating_sum,
-           coalesce(b.session_count, 0)::int as session_count
-    from tutor_profiles t
-    left join (
-      select tutor_id, count(*) as review_count, sum(rating) as rating_sum
-      from reviews where hidden_at is null group by tutor_id
-    ) r on r.tutor_id = t.user_id
-    left join (
-      select tutor_id, count(*) as session_count
-      from bookings where status = 'settled' group by tutor_id
-    ) b on b.tutor_id = t.user_id
-  `);
-
-  const PRIOR_MEAN_MILLI = 4_300; // m = 4.3
-  const PRIOR_WEIGHT = 5; // C = 5
-
-  const tutorIds = new Set(tutors.map((tutor) => tutor.id));
-
-  const values = [...(rows as unknown as {
-    tutor_id: string;
-    review_count: number;
-    rating_sum: number;
-    session_count: number;
-  }[])].map((row) => {
-    const reviewCount = Number(row.review_count);
-    const ratingSum = Number(row.rating_sum);
-    // Bayesian average, in thousandths so it stays an integer.
-    const bayesianRatingMilli = Math.round(
-      (PRIOR_WEIGHT * PRIOR_MEAN_MILLI + ratingSum * 1_000) / (PRIOR_WEIGHT + reviewCount),
-    );
-
-    return {
-      tutorId: row.tutor_id,
-      // Phase 2 replaces this with the weighted score from SPEC.md §4.
-      score: bayesianRatingMilli * 10 + (tutorIds.has(row.tutor_id) ? 0 : -100_000),
-      bayesianRatingMilli,
-      reviewCount,
-      sessionCount: Number(row.session_count),
-      computedAt: NOW,
-    };
-  });
-
-  if (values.length > 0) {
-    await db.insert(tutorRanking).values(values);
-  }
-}
-
 /**
  * Nobody may hold a negative balance. A negative wallet would mean the seed let
  * a student spend credits they never bought, which the booking flow forbids.
@@ -1243,10 +1280,13 @@ async function main() {
   const subjectIds = await seedSubjects();
   await seedAdmin(passwordHash);
   const students = await seedStudents(passwordHash, wallets);
-  const { verified, pending } = await seedTutors(subjectIds, passwordHash);
+  process.stdout.write('Building intro videos ... ');
+  const clips = await buildSeedClips();
+  console.log(clips ? `${clips.length} clips transcoded.` : 'skipped (no ffmpeg on this machine).');
+
+  const { verified, pending } = await seedTutors(subjectIds, passwordHash, clips);
   const counts = await seedHistory(students, verified, subjectIds, wallets);
   const payoutFixtures = await seedPayoutFixtures(verified, students, subjectIds, wallets);
-  await seedRanking([...verified, ...pending]);
   await assertNoNegativeBalances();
   await assertLedgerConservation();
 
@@ -1305,6 +1345,12 @@ async function main() {
   console.log(
     `  payout.short@tutorly.test    ${formatCents(payoutFixtures.amounts['payout.short@tutorly.test'] ?? 0)} available — may not`,
   );
+  console.log('');
+
+  const ranking = await recomputeTutorRanking(db);
+  console.log('Discovery');
+  console.log(`  ${formatRankingRun(ranking)}`);
+  console.log(`  intro videos             ${clips ? `${clips.length} transcoded clips shared across tutors` : 'none (ffmpeg not available)'}`);
   console.log('');
 
   const report = await reconcileLedger(db);

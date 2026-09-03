@@ -34,7 +34,12 @@ import {
 import { requireRole } from '@/lib/auth/guards';
 import { encryptSecret, last4 } from '@/lib/crypto';
 import { isProficiency, isLanguageCode } from '@/lib/tutors/languages';
-import { isEditable, type TutorStatus } from '@/lib/tutors/status';
+import {
+  credentialChangeTriggersReview,
+  isEditable,
+  transitionTutor,
+  type TutorStatus,
+} from '@/lib/tutors/status';
 import { submitForReview, withdrawSubmission, VerificationError } from '@/lib/tutors/verification';
 import {
   BIO_MAX,
@@ -50,7 +55,20 @@ import {
   assertValidHourlyCents,
   deriveHalfHourCents,
 } from '@/lib/money/pricing';
-import { avatarKey, credentialKey, getObjectStore, introVideoKey } from '@/lib/storage';
+import {
+  avatarKey,
+  createUploadTarget,
+  credentialKey,
+  getObjectStore,
+  introVideoKey,
+  publicUrlFor,
+} from '@/lib/storage';
+import {
+  checkIntroLength,
+  getVideoPipeline,
+  isVideoPipelineAvailable,
+  VIDEO_PIPELINE_UNAVAILABLE_MESSAGE,
+} from '@/lib/video';
 import { checkUpload, type UploadKind } from '@/lib/storage/uploads';
 import { clockToString, getLocalParts, isValidTimeZone, zonedTimeToUtc } from '@/lib/time';
 
@@ -84,7 +102,7 @@ async function editableTutor(step: WizardStepSlug) {
     backTo(step, 'Your profile is being reviewed. Withdraw it first if you need to make changes.');
   }
 
-  return { user, profile };
+  return { user, profile: { ...profile, status: profile.status as TutorStatus } };
 }
 
 /** Reads an uploaded file, checks it, and puts it in the right bucket. */
@@ -213,46 +231,161 @@ export async function saveProfile(formData: FormData): Promise<void> {
 // ---------------------------------------------------------------------------
 // Step 4 — intro video
 //
-// Phase 1 stores the file and marks it ready. Phase 2 replaces this with an
-// upload to Mux or Cloudflare Stream, an HLS ladder, three thumbnail candidates
-// and a real duration.
+// A 30-90 second marketing clip, and the only video Tutorly stores. Teaching
+// itself is live, so nothing here is a lesson recording.
+//
+// Upload -> probe -> HLS ladder + card preview + three thumbnail candidates ->
+// the tutor picks one. The transcode runs inline, which is fine for a 90-second
+// clip in development; production should hand it to a queue (SPEC.md §14).
 // ---------------------------------------------------------------------------
 
-export async function uploadIntroVideo(formData: FormData): Promise<void> {
+export type UploadTicket =
+  | { ok: true; url: string; key: string; headers: Record<string, string> }
+  | { ok: false; error: string };
+
+/**
+ * Step one of the video upload: ask for somewhere to put the file.
+ *
+ * The browser then PUTs the bytes straight there and calls `attachIntroVideo`
+ * with the key. The file never passes through a Server Action, which could not
+ * carry it (see src/lib/storage/direct-upload.ts).
+ */
+export async function requestIntroVideoUpload(input: {
+  contentType: string;
+  size: number;
+}): Promise<UploadTicket> {
+  const { user } = await editableTutor('video');
+
+  const check = checkUpload('introVideo', { size: input.size, type: input.contentType });
+  if (!check.ok) return { ok: false, error: check.reason };
+
+  const key = introVideoKey(user.id, randomUUID(), check.extension);
+  const target = await createUploadTarget('public', key, check.contentType);
+
+  return { ok: true, url: target.url, key: target.key, headers: target.headers };
+}
+
+/**
+ * Step two: the bytes are in the bucket, so probe and transcode them.
+ *
+ * The transcode runs inline, which is fine for a 90-second clip in development.
+ * Production should hand it to a queue (SPEC.md §14) — see DECISIONS_NEEDED.md.
+ */
+export async function attachIntroVideo(key: string): Promise<{ ok: boolean; error?: string }> {
   const { user, profile } = await editableTutor('video');
 
-  const file = formData.get('video');
-  if (!(file instanceof File) || file.size === 0) backTo('video', 'Choose a video file to upload.');
+  // The key came from the browser, so it has to be one this tutor could own.
+  if (!key.startsWith(`videos/${user.id}/`)) {
+    return { ok: false, error: 'That upload does not belong to your account.' };
+  }
+
+  const uploaded = await getObjectStore().get('public', key);
+  if (!uploaded) {
+    return { ok: false, error: 'We did not receive that file. Try uploading it again.' };
+  }
 
   const videoId = randomUUID();
-  const stored = await storeUpload('introVideo', file, (extension) =>
-    introVideoKey(user.id, videoId, extension),
-  );
-  if ('error' in stored) backTo('video', stored.error);
 
-  await db.transaction(async (tx) => {
-    await tx.insert(videos).values({
-      id: videoId,
-      ownerId: user.id,
-      // Until transcoding exists the stored file is served directly.
-      hlsUrl: `/api/public-files/${stored.key}`,
-      thumbnailUrl: null,
-      durationS: null,
-      status: 'ready',
-    });
-
-    await tx
-      .update(tutorProfiles)
-      .set({ introVideoId: videoId, updatedAt: new Date() })
-      .where(eq(tutorProfiles.userId, user.id));
-
-    // Replacing a video leaves the old row orphaned; drop it.
-    if (profile.introVideoId) {
-      await tx.delete(videos).where(eq(videos.id, profile.introVideoId));
-    }
+  await db.insert(videos).values({
+    id: videoId,
+    ownerId: user.id,
+    sourceKey: key,
+    status: 'processing',
   });
 
-  onwards('video', 'subjects');
+  const previousVideoId = profile.introVideoId;
+  await db
+    .update(tutorProfiles)
+    .set({ introVideoId: videoId, updatedAt: new Date() })
+    .where(eq(tutorProfiles.userId, user.id));
+
+  if (previousVideoId) {
+    await db.delete(videos).where(eq(videos.id, previousVideoId));
+  }
+
+  const cleanUp = async () => {
+    await db.update(tutorProfiles).set({ introVideoId: null }).where(eq(tutorProfiles.userId, user.id));
+    await db.delete(videos).where(eq(videos.id, videoId));
+    await getObjectStore().delete('public', key);
+  };
+
+  if (!(await isVideoPipelineAvailable())) {
+    await db
+      .update(videos)
+      .set({ status: 'failed', error: VIDEO_PIPELINE_UNAVAILABLE_MESSAGE, updatedAt: new Date() })
+      .where(eq(videos.id, videoId));
+    return { ok: false, error: VIDEO_PIPELINE_UNAVAILABLE_MESSAGE };
+  }
+
+  const pipeline = getVideoPipeline();
+
+  try {
+    const probe = await pipeline.probe(key);
+    const length = checkIntroLength(probe.durationSeconds);
+    if (!length.ok) {
+      // The wrong clip, not a broken pipeline: leave the step simply unfinished.
+      await cleanUp();
+      return { ok: false, error: length.reason };
+    }
+
+    const output = await pipeline.transcode({ sourceKey: key, ownerId: user.id, videoId });
+
+    await db
+      .update(videos)
+      .set({
+        hlsUrl: publicUrlFor(output.hlsKey),
+        previewUrl: publicUrlFor(output.previewKey),
+        thumbnailCandidates: output.thumbnailKeys.map(publicUrlFor),
+        // Default to the middle candidate; the tutor can change it.
+        thumbnailUrl: publicUrlFor(output.thumbnailKeys[Math.floor(output.thumbnailKeys.length / 2)]!),
+        durationS: Math.round(output.durationSeconds),
+        width: output.width,
+        height: output.height,
+        status: 'ready',
+        error: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(videos.id, videoId));
+  } catch (error) {
+    console.error('intro video transcode failed', error);
+    const message = 'We could not process that clip. Try exporting it again as an MP4.';
+    await db
+      .update(videos)
+      .set({ status: 'failed', error: message, updatedAt: new Date() })
+      .where(eq(videos.id, videoId));
+    return { ok: false, error: message };
+  }
+
+  revalidatePath(`${BASE}/video`);
+  return { ok: true };
+}
+
+/** The tutor picks which of the three stills becomes their poster. */
+export async function selectThumbnail(formData: FormData): Promise<void> {
+  const { user } = await editableTutor('video');
+
+  const chosen = String(formData.get('thumbnailUrl') ?? '');
+
+  const [video] = await db
+    .select({ id: videos.id, candidates: videos.thumbnailCandidates })
+    .from(videos)
+    .innerJoin(tutorProfiles, eq(tutorProfiles.introVideoId, videos.id))
+    .where(eq(tutorProfiles.userId, user.id))
+    .limit(1);
+
+  // Only one of this tutor's own candidates is acceptable — the value came from
+  // a form, so it is not trusted as a URL to store.
+  if (!video || !video.candidates.includes(chosen)) {
+    backTo('video', 'Pick one of the three thumbnails.');
+  }
+
+  await db
+    .update(videos)
+    .set({ thumbnailUrl: chosen, updatedAt: new Date() })
+    .where(eq(videos.id, video.id));
+
+  revalidatePath(`${BASE}/video`);
+  redirect(`${BASE}/video?saved=1`);
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +432,7 @@ const credentialSchema = z.object({
 });
 
 export async function addCredential(formData: FormData): Promise<void> {
-  const { user } = await editableTutor('credentials');
+  const { user, profile } = await editableTutor('credentials');
 
   const yearRaw = String(formData.get('year') ?? '').trim();
   const parsed = credentialSchema.safeParse({
@@ -319,23 +452,51 @@ export async function addCredential(formData: FormData): Promise<void> {
   );
   if ('error' in stored) backTo('credentials', stored.error);
 
-  await db.insert(credentials).values({
-    id: credentialId,
-    tutorId: user.id,
-    kind: parsed.data.kind,
-    title: parsed.data.title,
-    institution: parsed.data.institution,
-    year: parsed.data.year ?? null,
-    fileKey: stored.key,
-    status: 'pending',
+  await db.transaction(async (tx) => {
+    await tx.insert(credentials).values({
+      id: credentialId,
+      tutorId: user.id,
+      kind: parsed.data.kind,
+      title: parsed.data.title,
+      institution: parsed.data.institution,
+      year: parsed.data.year ?? null,
+      fileKey: stored.key,
+      status: 'pending',
+    });
+
+    await sendBackForReviewIfVerified(tx, user.id, profile.status);
   });
 
   revalidatePath(`${BASE}/credentials`);
   redirect(`${BASE}/credentials?saved=1`);
 }
 
+/**
+ * A verified tutor who changes a document goes back into the queue.
+ *
+ * The document is the claim an admin actually checked, so changing one
+ * invalidates that check. Everything else on the profile — bio, rates, hours —
+ * a verified tutor edits freely without losing their place in the feed.
+ */
+async function sendBackForReviewIfVerified(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  tutorId: string,
+  status: TutorStatus,
+): Promise<void> {
+  if (!credentialChangeTriggersReview(status)) return;
+
+  await tx
+    .update(tutorProfiles)
+    .set({
+      status: transitionTutor(status, 'pending_review'),
+      submittedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(tutorProfiles.userId, tutorId));
+}
+
 export async function removeCredential(formData: FormData): Promise<void> {
-  const { user } = await editableTutor('credentials');
+  const { user, profile } = await editableTutor('credentials');
   const credentialId = String(formData.get('credentialId') ?? '');
 
   // Scoped to the caller: a tutor cannot delete somebody else's document.
@@ -346,7 +507,12 @@ export async function removeCredential(formData: FormData): Promise<void> {
     .limit(1);
 
   if (row) {
-    await db.delete(credentials).where(and(eq(credentials.id, credentialId), eq(credentials.tutorId, user.id)));
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(credentials)
+        .where(and(eq(credentials.id, credentialId), eq(credentials.tutorId, user.id)));
+      await sendBackForReviewIfVerified(tx, user.id, profile.status);
+    });
     await getObjectStore().delete('private', row.fileKey);
   }
 

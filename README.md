@@ -28,7 +28,8 @@ genuinely blocked on a human.
 | ORM | Drizzle + drizzle-kit migrations |
 | Auth | Auth.js v5 — email/password and Google |
 | UI | Tailwind v4 + shadcn/ui tokens |
-| Video | LiveKit Cloud *(phase 4)* |
+| Live video | LiveKit Cloud *(phase 4)* |
+| Intro video transcode | ffmpeg locally; Mux or Cloudflare Stream in production *(undecided — see DECISIONS_NEEDED.md)* |
 | Storage | Cloudflare R2 — private bucket for credentials, local filesystem in dev |
 | Email | Resend *(phase 7)* |
 | Tests | Vitest for the pure logic, Playwright for the journeys |
@@ -99,8 +100,43 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm db:studio` | Drizzle Studio |
 | `pnpm seed` | Truncate and rebuild the development world |
 | `pnpm reconcile` | The nightly ledger check — exits non-zero on drift |
+| `pnpm rank` | The nightly ranking job — recomputes `tutor_ranking` |
 
 ---
+
+## Video, and what this product is not
+
+There is exactly one kind of video in Tutorly: a tutor's **intro clip**, 30 to
+90 seconds, which is marketing. Every lesson is live, one to one, over video or
+voice.
+
+There are no recorded lessons, no course content, and no library. If a change
+starts pulling in that direction it is the wrong change — the product is a
+marketplace for someone's time, not a catalogue of videos.
+
+The pipeline turns one upload into three things: an HLS ladder for the profile
+hero, a short muted MP4 for the card that autoplays in the feed, and three
+thumbnail candidates the tutor picks from. `pnpm seed` runs real clips through
+it, so the development feed has real media in it.
+
+Uploads go **straight to the bucket**, not through the app. A Server Action
+caps its body at 1 MB and a Vercel function at 4.5 MB, so a video posted to us
+could never arrive; the browser gets a presigned PUT (or, with no R2 configured,
+a signed path to our own upload route) and only hands the server the key.
+
+## How discovery works
+
+The feed orders by `tutor_ranking.score`, which a nightly job writes. Nothing
+computes a ranking while a page is being rendered — that is the rule the job
+exists to keep. The score is the weighted sum from `SPEC.md` §4, in basis points,
+in `src/lib/ranking/score.ts`.
+
+Availability does not exist until Phase 3, and discovery does not pretend
+otherwise. "Available today", "Next free: …" and the "Available in the next
+hour" rail all go through `src/lib/availability/`, whose only implementation
+today answers **unknown** — so the badge is absent rather than wrong, and the
+rail says what it is waiting for. A wrong "Next free: Today 6:30 PM" costs more
+trust than a missing one.
 
 ## How files work
 
@@ -193,12 +229,16 @@ src/
     tutor/onboarding/   the ten-step wizard and its server actions
     admin/verification/ the review queue and the approve / reject screen
     api/files/          private objects, behind a 60-second signature
+    api/uploads/        signed direct uploads (development stand-in for R2)
+    api/cron/           the nightly ranking and reconciliation jobs
   auth.ts               Auth.js: credentials + Google, Node runtime
   auth.config.ts        the edge-safe half, used by middleware
   components/           UI primitives and the wizard's step forms
   db/
     schema.ts           the whole schema from SPEC.md §12
     ledger.ts           the only writer of balance columns; reconciliation
+    discovery.ts        the feed, search, filters and the rails
+    ranking.ts          the nightly ranking job
     tutors.ts           every query that decides who is visible
     seed.ts             the development world
     seed-assets.ts      generated PNGs and PDFs, so no binaries are committed
@@ -207,9 +247,12 @@ src/
     admin/audit.ts      the admin_audit writer
     auth/               password policy, roles, server-side guards
     bookings/status.ts  the booking state machine
+    availability/       the port discovery reads; stubbed until Phase 3
     money/              cents, pricing, outcomes, ledger drafts, packs, payouts
-    storage/            object stores, keys, signed URLs, upload checks
-    tutors/             profile status machine, wizard model, visibility rules
+    ranking/            the §4 score, pure and tested
+    storage/            object stores, keys, signed URLs, direct uploads
+    tutors/             profile status machine, wizard model, visibility, badges
+    video/              intro-video pipeline: probe, HLS, preview, thumbnails
     crypto.ts           AES-256-GCM for payout details
     time.ts             IANA timezone conversion
     rate-limit.ts

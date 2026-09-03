@@ -21,6 +21,12 @@ export const SIGNED_URL_TTL_SECONDS = 60;
 
 const DERIVATION_LABEL = 'tutorly:file-url:v1';
 
+/**
+ * What a signature authorises. A URL signed to read a file must not also be
+ * usable to overwrite it, so the operation is part of what gets signed.
+ */
+export type SignedOperation = 'get' | 'put';
+
 export type SignatureFailure = 'missing' | 'malformed' | 'expired' | 'invalid';
 
 export type SignatureCheck = { ok: true } | { ok: false; reason: SignatureFailure };
@@ -29,8 +35,10 @@ function signingKey(): Buffer {
   return createHmac('sha256', getEnv().AUTH_SECRET).update(DERIVATION_LABEL).digest();
 }
 
-function computeSignature(key: string, expiresAt: number): string {
-  return createHmac('sha256', signingKey()).update(`${key}|${expiresAt}`).digest('base64url');
+function computeSignature(key: string, expiresAt: number, operation: SignedOperation): string {
+  // `get` is unprefixed so signatures minted before uploads existed still verify.
+  const scope = operation === 'get' ? '' : `${operation}|`;
+  return createHmac('sha256', signingKey()).update(`${scope}${key}|${expiresAt}`).digest('base64url');
 }
 
 /**
@@ -43,10 +51,29 @@ export function signObjectPath(key: string, ttlSeconds = SIGNED_URL_TTL_SECONDS,
   assertValidObjectKey(key);
 
   const expiresAt = Math.floor(now / 1000) + ttlSeconds;
-  const signature = computeSignature(key, expiresAt);
+  const signature = computeSignature(key, expiresAt, 'get');
   const encodedKey = key.split('/').map(encodeURIComponent).join('/');
 
   return `/api/files/${encodedKey}?exp=${expiresAt}&sig=${signature}`;
+}
+
+/** How long a browser has to finish a direct upload. */
+export const UPLOAD_URL_TTL_SECONDS = 15 * 60;
+
+/**
+ * A path the browser may PUT one specific object to.
+ *
+ * Used only when there is no R2 to presign against — see
+ * `src/lib/storage/direct-upload.ts`.
+ */
+export function signUploadPath(key: string, ttlSeconds = UPLOAD_URL_TTL_SECONDS, now = Date.now()): string {
+  assertValidObjectKey(key);
+
+  const expiresAt = Math.floor(now / 1000) + ttlSeconds;
+  const signature = computeSignature(key, expiresAt, 'put');
+  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+
+  return `/api/uploads/${encodedKey}?exp=${expiresAt}&sig=${signature}`;
 }
 
 /**
@@ -59,6 +86,7 @@ export function verifyObjectSignature(
   expiresAtRaw: string | null,
   signature: string | null,
   now = Date.now(),
+  operation: SignedOperation = 'get',
 ): SignatureCheck {
   if (!expiresAtRaw || !signature) return { ok: false, reason: 'missing' };
   if (!isValidObjectKey(key)) return { ok: false, reason: 'malformed' };
@@ -66,7 +94,7 @@ export function verifyObjectSignature(
   if (!/^\d{1,15}$/.test(expiresAtRaw)) return { ok: false, reason: 'malformed' };
   const expiresAt = Number(expiresAtRaw);
 
-  const expected = computeSignature(key, expiresAt);
+  const expected = computeSignature(key, expiresAt, operation);
   const provided = Buffer.from(signature, 'utf8');
   const expectedBytes = Buffer.from(expected, 'utf8');
 

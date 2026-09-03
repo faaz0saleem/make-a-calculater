@@ -200,18 +200,36 @@ export const studentWallets = pgTable('student_wallets', {
   updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Intro videos (SPEC.md §3 step 4).
+ *
+ * The only video Tutorly stores. A 30-90 second marketing clip per tutor —
+ * teaching itself is live, so there are no recorded lessons here and no course
+ * content.
+ */
 export const videos = pgTable('videos', {
   id: uuid().primaryKey().defaultRandom(),
   ownerId: uuid()
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
+  /** The tutor's original upload, kept so a failed transcode can be retried. */
+  sourceKey: text(),
+  /** HLS master playlist. Played by the profile page hero. */
   hlsUrl: text(),
+  /** Short muted MP4. Played by the feed card on hover, so no player library. */
+  previewUrl: text(),
+  /** The candidate the tutor picked. Becomes the card and hero poster. */
   thumbnailUrl: text(),
-  /** The two thumbnails the tutor did not pick, kept so they can change their mind. */
+  /** All three candidates, kept so the tutor can change their mind. */
   thumbnailCandidates: jsonb().$type<string[]>().notNull().default(sql`'[]'::jsonb`),
   durationS: integer(),
+  width: integer(),
+  height: integer(),
   status: videoStatusEnum().notNull().default('uploading'),
+  /** Why processing failed, shown to the tutor verbatim. */
+  error: text(),
   createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 });
 
 export const tutorProfiles = pgTable(

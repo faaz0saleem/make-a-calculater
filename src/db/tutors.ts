@@ -187,7 +187,14 @@ export type TutorDossier = {
   verifiedAt: Date | null;
   rejectionReason: string | null;
   strikes: number;
-  video: { id: string; status: string; durationS: number | null; thumbnailUrl: string | null } | null;
+  video: {
+    id: string;
+    status: string;
+    durationS: number | null;
+    hlsUrl: string | null;
+    previewUrl: string | null;
+    thumbnailUrl: string | null;
+  } | null;
   subjects: { name: string; level: string; yearsExperience: number }[];
   languages: { languageCode: string; proficiency: string }[];
   credentials: {
@@ -240,6 +247,8 @@ export async function loadTutorDossier(
       videoId: videos.id,
       videoStatus: videos.status,
       videoSeconds: videos.durationS,
+      videoHls: videos.hlsUrl,
+      videoPreview: videos.previewUrl,
       videoThumbnail: videos.thumbnailUrl,
     })
     .from(tutorProfiles)
@@ -316,6 +325,8 @@ export async function loadTutorDossier(
           id: row.videoId,
           status: row.videoStatus ?? 'missing',
           durationS: row.videoSeconds,
+          hlsUrl: row.videoHls,
+          previewUrl: row.videoPreview,
           thumbnailUrl: row.videoThumbnail,
         }
       : null,

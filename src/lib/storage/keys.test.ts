@@ -55,3 +55,18 @@ describe('bucketForKey', () => {
     expect(bucketForKey('videos/a/b.mp4')).toBe('public');
   });
 });
+
+describe('publicUrlFor', () => {
+  it('uses the development route with no CDN configured', async () => {
+    const { publicUrlFor } = await import('./index');
+    delete process.env.R2_PUBLIC_BASE_URL;
+    expect(publicUrlFor('videos/t1/v1/preview.mp4')).toBe('/api/public-files/videos/t1/v1/preview.mp4');
+  });
+
+  it('uses the CDN when one is configured, without a double slash', async () => {
+    const { publicUrlFor } = await import('./index');
+    process.env.R2_PUBLIC_BASE_URL = 'https://cdn.example.com/';
+    expect(publicUrlFor('avatars/t1/a.png')).toBe('https://cdn.example.com/avatars/t1/a.png');
+    delete process.env.R2_PUBLIC_BASE_URL;
+  });
+});

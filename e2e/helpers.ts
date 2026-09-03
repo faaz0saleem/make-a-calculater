@@ -1,4 +1,26 @@
+import { config as loadEnv } from 'dotenv';
+import postgres from 'postgres';
 import { expect, type Page } from '@playwright/test';
+
+loadEnv({ path: '.env.local', quiet: true });
+loadEnv({ path: '.env', quiet: true });
+
+/**
+ * A direct database read, for assertions about state the UI does not show —
+ * the ranking table, for instance.
+ *
+ * Reading the database beats adding a test-only HTTP route: a fixture endpoint
+ * would be real surface on a real deployment, gated by nothing more than an
+ * environment variable somebody could forget.
+ */
+export async function queryDatabase<T>(run: (sql: postgres.Sql) => Promise<T>): Promise<T> {
+  const sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+  try {
+    return await run(sql);
+  } finally {
+    await sql.end();
+  }
+}
 
 export const SEED_PASSWORD = 'tutorly-dev-2026';
 
@@ -57,14 +79,50 @@ export function pngBytes(): Buffer {
   ]);
 }
 
-/** A tiny file that passes the video content-type check. */
-export function mp4Bytes(): Buffer {
-  return Buffer.concat([
-    Buffer.from([0x00, 0x00, 0x00, 0x18]),
-    Buffer.from('ftypmp42', 'ascii'),
-    Buffer.alloc(64),
-  ]);
+/**
+ * A real, playable intro video for the upload tests.
+ *
+ * It has to be genuine: the pipeline probes the file, checks it is between 30
+ * and 90 seconds, and transcodes it. A stub with an MP4 header would be
+ * rejected, which is the point of the check.
+ *
+ * Generated once per run and cached, because ffmpeg takes a few seconds.
+ */
+export async function introVideoBytes(seconds = 35): Promise<Buffer> {
+  const { execFile } = await import('node:child_process');
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { promisify } = await import('node:util');
+
+  if (cachedIntroVideo) return cachedIntroVideo;
+
+  const run = promisify(execFile);
+  const workspace = await mkdtemp(join(tmpdir(), 'tutorly-e2e-video-'));
+
+  try {
+    const path = join(workspace, 'intro.mp4');
+    await run(
+      process.env.FFMPEG_PATH ?? 'ffmpeg',
+      [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', `testsrc2=size=480x270:rate=24:duration=${seconds}`,
+        '-f', 'lavfi', '-i', `sine=frequency=330:duration=${seconds}`,
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '34',
+        '-c:a', 'aac', '-b:a', '48k', '-shortest',
+        path,
+      ],
+      { timeout: 120_000 },
+    );
+
+    cachedIntroVideo = await readFile(path);
+    return cachedIntroVideo;
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 }
+
+let cachedIntroVideo: Buffer | null = null;
 
 /** A minimal valid PDF, so the admin review screen has something to render. */
 export function pdfBytes(text: string): Buffer {

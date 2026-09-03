@@ -11,6 +11,7 @@ import { bucketForKey, type Bucket } from './keys';
 import { signObjectPath, SIGNED_URL_TTL_SECONDS } from './signed-url';
 import type { ObjectStore } from './types';
 
+export * from './direct-upload';
 export * from './keys';
 export * from './signed-url';
 export type { ObjectStore, StoredObject } from './types';
@@ -50,6 +51,16 @@ export function resetObjectStore(): void {
 }
 
 /**
+ * The URL a browser uses for a public object: the CDN in production, and the
+ * development route that reads straight out of the local store otherwise.
+ */
+export function publicUrlFor(key: string): string {
+  const base = process.env.R2_PUBLIC_BASE_URL;
+  const encoded = key.split('/').map(encodeURIComponent).join('/');
+  return base ? `${base.replace(/\/$/, '')}/${encoded}` : `/api/public-files/${encoded}`;
+}
+
+/**
  * A URL for an object.
  *
  * Private objects get a signed, short-lived path through our own route. Public
@@ -58,12 +69,5 @@ export function resetObjectStore(): void {
  */
 export function objectUrl(key: string, ttlSeconds = SIGNED_URL_TTL_SECONDS): string {
   const bucket: Bucket = bucketForKey(key);
-
-  if (bucket === 'private') {
-    return signObjectPath(key, ttlSeconds);
-  }
-
-  const base = process.env.R2_PUBLIC_BASE_URL;
-  const encoded = key.split('/').map(encodeURIComponent).join('/');
-  return base ? `${base.replace(/\/$/, '')}/${encoded}` : `/api/public-files/${encoded}`;
+  return bucket === 'private' ? signObjectPath(key, ttlSeconds) : publicUrlFor(key);
 }

@@ -93,7 +93,15 @@ export default async function WizardStepPage({
 
     case 'video': {
       const [video] = await db
-        .select({ hlsUrl: videos.hlsUrl, durationS: videos.durationS })
+        .select({
+          status: videos.status,
+          hlsUrl: videos.hlsUrl,
+          previewUrl: videos.previewUrl,
+          thumbnailUrl: videos.thumbnailUrl,
+          thumbnailCandidates: videos.thumbnailCandidates,
+          durationS: videos.durationS,
+          error: videos.error,
+        })
         .from(videos)
         .innerJoin(tutorProfiles, eq(tutorProfiles.introVideoId, videos.id))
         .where(eq(tutorProfiles.userId, user.id))
@@ -102,9 +110,13 @@ export default async function WizardStepPage({
       return (
         <StepShell {...shell}>
           <VideoStep
-            hasVideo={Boolean(video)}
-            videoUrl={video?.hlsUrl ?? null}
+            status={video?.status ?? 'missing'}
+            hlsUrl={video?.hlsUrl ?? null}
+            previewUrl={video?.previewUrl ?? null}
+            posterUrl={video?.thumbnailUrl ?? null}
+            candidates={video?.thumbnailCandidates ?? []}
             durationS={video?.durationS ?? null}
+            error={video?.error ?? null}
           />
         </StepShell>
       );
@@ -149,7 +161,7 @@ export default async function WizardStepPage({
 
       return (
         <StepShell {...shell}>
-          <CredentialsStep documents={documents} />
+          <CredentialsStep documents={documents} isVerified={snapshot.status === 'verified'} />
         </StepShell>
       );
     }

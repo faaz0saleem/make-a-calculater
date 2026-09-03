@@ -123,35 +123,20 @@ visible:
 
 ---
 
-## 10. Should a verified tutor's edits go back through review?
+## 10. A verified tutor's edits
 
-**Blocks:** nothing yet. **Default in place:** a verified profile is read-only in
-the wizard; only `draft` and `rejected` can be edited.
+**Settled:** verified tutors edit freely; only a credential change sends them
+back for review. Implemented in Phase 2.
 
-That is safe but blunt: a verified tutor cannot fix a typo in their bio without
-an admin. The status machine allows `verified → suspended` and nothing else, on
-purpose, so the choice is yours:
+## 11. Intro video length
 
-- let verified tutors edit freely, and re-review only when a *credential*
-  changes (my recommendation — the risky field is the document, not the bio)
-- let them edit everything and drop back to `pending_review`, losing feed
-  visibility until an admin looks again
-- keep it as it is, and add an admin "unlock for editing" action
-
-## 11. Intro video length is not enforced yet
-
-**Blocks:** nothing. **Default in place:** the 30–90 second rule is checked only
-once a duration is known, and nothing measures one yet.
-
-Phase 1 stores the uploaded file and marks it ready; Phase 2 transcodes it and
-will fill in `videos.duration_s`, at which point the rule starts biting. A tutor
-verified in the meantime could have a 5-second or a 10-minute intro.
-
-If that matters before Phase 2, the cheap fix is a client-side duration check on
-upload — easy to bypass, but it catches honest mistakes. The real fix is the
-transcode step. Tell me if you want the stopgap.
+**Settled:** the pipeline probes every upload and enforces 30–90 seconds against
+the real duration. Implemented in Phase 2.
 
 ## 12. Credential files are proxied, not presigned
+
+**Settled after Phase 1:** keep the proxy. Kept here because the reasoning still
+governs the code.
 
 **Blocks:** nothing. **Default in place:** proxied through `/api/files`.
 
@@ -166,3 +151,49 @@ the admin's access a second after issuing it.
 
 At credential-review volumes the cost is nil. If you would rather presign, it is
 a contained change — `objectUrl` for the private bucket, and the route goes away.
+
+---
+
+## 13. Which hosted transcoder?
+
+**Blocks:** intro videos working on a real deployment. **Default in place:**
+ffmpeg locally, and an honest failure message anywhere without it.
+
+`SPEC.md` §14 names Mux or Cloudflare Stream. Vercel has no ffmpeg, so
+`FfmpegVideoPipeline` is a development tool only — on a deployed environment a
+tutor's upload is stored and then marked `failed` with a message saying video
+processing is not configured.
+
+The `VideoPipeline` interface is what a hosted one plugs into: `probe` and
+`transcode`, returning keys for an HLS playlist, a preview MP4 and three
+thumbnails. My lean is **Cloudflare Stream**, because the files already live in
+R2 and it keeps the bill and the vendor list in one place; Mux has the better
+API and analytics if that matters more.
+
+This is the same shape of decision as the payment provider (item 1) and worth
+making at the same time — both are accounts somebody has to open.
+
+## 14. Transcoding runs inline
+
+**Blocks:** nothing yet. **Default in place:** the upload's Server Action waits
+for the transcode.
+
+For a 90-second clip on a local ffmpeg that is a few seconds and perfectly fine.
+On a serverless function it would risk the execution timeout, and it holds a
+connection open for no reason.
+
+`SPEC.md` §14 already has Upstash QStash in the stack for jobs. The change is
+small — enqueue after the upload, mark the video `processing`, and let a webhook
+finish the row — and the UI already renders a `processing` state, so it is worth
+doing at the same time as item 13 rather than before it.
+
+## 15. Infinite scroll
+
+**Blocks:** nothing. **Default in place:** the grid shows the first 24 with a
+count of the rest.
+
+`SPEC.md` §4 asks for an infinite scroll grid. With forty tutors that would be
+one page anyway, so it is a decision about when rather than whether — it needs
+a cursor rather than an offset to be correct under a feed that reorders nightly.
+Say the word and it goes in; otherwise it is worth waiting until there is enough
+supply to need it.
