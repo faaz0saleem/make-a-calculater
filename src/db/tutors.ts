@@ -200,7 +200,7 @@ export type TutorDossier = {
     heroUrl: string | null;
     thumbnailUrl: string | null;
   } | null;
-  subjects: { name: string; level: string; yearsExperience: number }[];
+  subjects: { slug: string; name: string; level: string; yearsExperience: number }[];
   languages: { languageCode: string; proficiency: string }[];
   credentials: {
     id: string;
@@ -271,6 +271,7 @@ export async function loadTutorDossier(
   const [subjectRows, languageRows, credentialRows, availabilityRows] = await Promise.all([
     database
       .select({
+        slug: sql<string>`s.slug`,
         name: sql<string>`s.name`,
         level: tutorSubjects.level,
         yearsExperience: tutorSubjects.yearsExperience,

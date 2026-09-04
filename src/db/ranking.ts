@@ -123,7 +123,7 @@ export async function recomputeTutorRanking(
   // empty calendar is missing information, not a bad tutor.
   const availability = getAvailability();
   const tutorIds = rows.map((row) => row.tutor_id);
-  const density = await availability.densityNext7dBps(tutorIds);
+  const signals = await availability.weeklySignals(tutorIds);
 
   const breakdowns = rows.map((row) => {
     const inputs: RankingInputs = {
@@ -137,16 +137,27 @@ export async function recomputeTutorRanking(
       responseMedianSeconds: row.response_median_seconds,
       lastActiveAt: toDate(row.last_active_at),
       verifiedAt: toDate(row.verified_at),
-      availabilityDensityBps: density.known ? (density.value.get(row.tutor_id) ?? null) : null,
+      availabilityDensityBps: signals.known
+        ? (signals.value.get(row.tutor_id)?.densityBps ?? null)
+        : null,
     };
-    return { inputs, breakdown: computeRanking(inputs, now) };
+    return {
+      inputs,
+      breakdown: computeRanking(inputs, now),
+      // The tutor half of the timezone-overlap term. Derived here, nightly,
+      // because expanding a week of rules per request is exactly the work the
+      // "never rank in the request path" rule exists to prevent.
+      freeHoursMask: signals.known
+        ? (signals.value.get(row.tutor_id)?.freeHoursMask ?? 0)
+        : 0,
+    };
   });
 
   if (breakdowns.length > 0) {
     await database
       .insert(tutorRanking)
       .values(
-        breakdowns.map(({ inputs, breakdown }) => ({
+        breakdowns.map(({ inputs, breakdown, freeHoursMask }) => ({
           tutorId: breakdown.tutorId,
           score: breakdown.score,
           bayesianRatingMilli: breakdown.bayesianRatingMilli,
@@ -158,6 +169,7 @@ export async function recomputeTutorRanking(
           explorationBoost: breakdown.explorationBoost,
           reviewCount: inputs.reviewCount,
           sessionCount: inputs.settledCount,
+          freeHoursMask,
           computedAt: now,
         })),
       )
@@ -174,6 +186,7 @@ export async function recomputeTutorRanking(
           explorationBoost: sql`excluded.exploration_boost`,
           reviewCount: sql`excluded.review_count`,
           sessionCount: sql`excluded.session_count`,
+          freeHoursMask: sql`excluded.free_hours_mask`,
           computedAt: sql`excluded.computed_at`,
         },
       });
@@ -194,7 +207,7 @@ export async function recomputeTutorRanking(
     computedAt: now,
     tutorCount: breakdowns.length,
     availabilitySource: availability.name,
-    availabilityKnown: density.known,
+    availabilityKnown: signals.known,
     topScore: scores[scores.length - 1] ?? 0,
     medianScore: scores[Math.floor(scores.length / 2)] ?? 0,
   };

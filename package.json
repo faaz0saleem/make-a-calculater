@@ -27,6 +27,7 @@
     "settle": "tsx src/scripts/settle.ts",
     "prove:booking": "tsx src/scripts/prove-no-double-booking.ts",
     "prove:commission": "tsx src/scripts/prove-commission.ts",
+    "prove:curriculum": "tsx src/scripts/prove-curriculum.ts",
     "measure:regions": "tsx src/scripts/measure-regions.ts"
   },
   "dependencies": {

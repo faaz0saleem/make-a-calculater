@@ -43,6 +43,17 @@ export type TutorCardData = {
   badges: TutorBadge[];
   /** "Next free: Today 6:30 PM", or null while the calendar is unknown. */
   nextFreeLabel: string | null;
+  /**
+   * Why this tutor is above the ones below them, when the viewer has told us
+   * their curriculum. Null for anyone who has not.
+   *
+   * The card says it out loud because the ordering rule is a promise: an exact
+   * board-class-subject match outranks a better rating, and a student who is
+   * not told that just sees a 4.6 above a 4.9 and assumes the feed is broken.
+   */
+  matchLabel: string | null;
+  /** True only for a full board + class + subject match. */
+  exactMatch: boolean;
 };
 
 export function TutorCard({ tutor, className }: { tutor: TutorCardData; className?: string }) {
@@ -208,6 +219,20 @@ export function TutorCard({ tutor, className }: { tutor: TutorCardData; classNam
               </Badge>
             ))}
           </div>
+        ) : null}
+
+        {tutor.matchLabel ? (
+          <p
+            className={cn(
+              'text-xs',
+              tutor.exactMatch ? 'font-medium text-[var(--success)]' : 'text-muted-foreground',
+            )}
+            data-testid="match-label"
+            data-exact={tutor.exactMatch ? 'true' : 'false'}
+          >
+            {tutor.exactMatch ? '✓ ' : ''}
+            {tutor.matchLabel}
+          </p>
         ) : null}
 
         {tutor.nextFreeLabel ? (

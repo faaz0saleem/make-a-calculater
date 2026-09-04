@@ -29,6 +29,13 @@ export type NextFreeSlot = {
   durationMinutes: number;
 };
 
+export type WeeklySignals = {
+  /** 0-10000. */
+  densityBps: number;
+  /** 24-bit mask of the UTC hours with at least one open slot. */
+  freeHoursMask: number;
+};
+
 export type SlotQuery = {
   tutorId: string;
   durationMinutes: number;
@@ -55,14 +62,24 @@ export interface AvailabilityPort {
   tutorsFreeWithin(minutes: number, tutorIds: string[]): Promise<Availability<string[]>>;
 
   /**
-   * Powers the `availability_density_next_7d` term of the ranking score
-   * (SPEC.md §4), as basis points.
+   * Everything the nightly ranking job needs from the calendar (SPEC.md §4).
    *
-   * Not "share of published time still free" — that would reward a tutor nobody
-   * books. It measures how much bookable time a student searching now would
-   * actually find, against `DENSITY_TARGET_MINUTES` of open time in a week.
+   * Two signals, one pass over the week, because loading forty tutors' rules,
+   * exceptions and bookings twice to answer two questions about the same seven
+   * days is work nobody asked for:
+   *
+   *  - `densityBps` powers `availability_density_next_7d`. Not "share of
+   *    published time still free" — that would reward a tutor nobody books. It
+   *    measures how much bookable time a student searching now would actually
+   *    find, against `DENSITY_TARGET_MINUTES` of open time in a week.
+   *  - `freeHoursMask` is the 24-bit mask of UTC hours the tutor has open,
+   *    which the feed ANDs with the viewer's own hours to rank a tutor who is
+   *    awake when they are above one who is not.
+   *
+   * A tutor with no published hours is absent from the map entirely, so both
+   * terms treat them as unknown rather than as zero.
    */
-  densityNext7dBps(tutorIds: string[]): Promise<Availability<Map<string, number>>>;
+  weeklySignals(tutorIds: string[]): Promise<Availability<Map<string, WeeklySignals>>>;
 
   /** Tutors with any free slot inside a window, for the day/time filter. */
   tutorsFreeBetween(

@@ -11,8 +11,174 @@ Phases follow `SPEC.md` §15.
 | 3B — credits and booking | **Done** |
 | 4 — LiveKit calls + session state machine + settlement | **Done** |
 | 5 — trials, messaging, reviews, follows | **Done** |
-| 6 — payouts + admin dashboard + audit log | Not started |
+| 6A — curriculum matching | **Done** |
+| 6B — student signup | Not started |
+| 6C — payouts + admin dashboard + audit log | Not started |
 | 7 — real payment provider, notifications, SEO, analytics | Not started |
+
+---
+
+## Phase 6, part A — curriculum matching — done
+
+A subject on its own is too coarse to match on. "Maths" is the same word for a
+Year 9 Punjab Board student and an IB Diploma one, and a tutor who is excellent
+at one may be no use at all for the other. A curriculum position is now three
+fields — **board, class, subject** — and everything about matching hangs off the
+triple.
+
+### A class only means something inside a board
+
+`curriculum_levels` are board-scoped and their ids are namespaced
+(`caie:as-level`, never a global `as-level` that half the boards would have to
+pretend to understand). Both declaration tables carry a **composite foreign key**
+onto `curriculum_levels (board_id, id)`, so an AS Level under CBSE is not a
+validation error the app raises — it is a row Postgres refuses to store.
+
+```
+$ pnpm prove:curriculum
+OK    AS Level under CBSE      refused, SQLSTATE 23503
+OK    Two primary positions    refused, SQLSTATE 23505
+OK    A level that does not exist refused, SQLSTATE 23503
+
+The database refuses all three. Nothing was left behind.
+```
+
+Ten boards seeded and admin-editable: CAIE, Edexcel, Punjab, Federal (FBISE),
+IB, CBSE, AQA, OCR, AP, and a catch-all "Other / not listed" that is always
+present and always last. A list that cannot express where somebody actually is
+teaches them the product is not for them.
+
+### The board list is shaped by country, never filtered by it
+
+`board_countries` decides the *order*. A student in Lahore meets CAIE, Edexcel,
+Punjab Board and Federal Board first and does not scroll past CBSE to find them;
+the UAE surfaces CAIE, Edexcel, IB and CBSE; the UK surfaces AQA and OCR and not
+CBSE. Everything else stays on the list underneath, because "not used where you
+are" is not "not available". A signed-in user's own `users.country` decides it;
+a visitor's is guessed from their timezone, which can only ever cost them one
+extra scroll.
+
+### Exact match outweighs rating
+
+The rule, in one line, and the thing most likely to be lost by a stray
+`order by score desc`. The match tier is a **separate leading key**, not another
+weighted term — a weight can always be out-argued by a big enough rating gap, a
+key cannot.
+
+| Tier | Meaning |
+|---|---|
+| 3 | Same board, same class, same subject |
+| 2 | Same board and subject, another class |
+| 1 | Same subject at the same stage, another board |
+| 0 | No relationship |
+
+Board sits above class deliberately: a tutor who knows the CAIE Physics syllabus
+can adjust from AS to A2 in an evening; a tutor who has taught Class 11 Physics
+under the Punjab Board has never seen the CAIE paper. The syllabus is the
+expensive knowledge, the year is the cheap one. The catch-all board never earns
+a near match — two people who both picked "not listed" have told us nothing they
+have in common.
+
+On the seeded world, signed in as the demo student and with the filter cleared —
+so every non-matching tutor is present and still loses:
+
+```
+tier 3  4.65★  Hassan Raza
+tier 3  4.56★  Rania Dubois
+tier 2  4.30★  Sana Zhang
+tier 2  4.19★  Faisal Farooq
+...
+tier 0  4.60★  Nadia Hassan      ← better rated than Rania, ranked below her
+```
+
+Every card says which tier it is, because the ordering is a promise: a student
+who is not told why sees a 4.6 above a 4.6 and assumes the feed is broken.
+
+### Timezone overlap
+
+All teaching here is live, so a brilliant tutor whose evenings are 3am for this
+student is not a good tutor *for them*. The nightly job writes a 24-bit mask of
+the UTC hours each tutor is typically free to `tutor_ranking.free_hours_mask`;
+the request path ANDs it with the viewer's own reasonable study hours and counts
+the bits. **A bitwise AND and a popcount is not computing a ranking** — the
+expensive half, expanding a week of rules through the availability engine, still
+happens at 3am.
+
+Worth up to 1200 basis points, which is more than the ~225 points between a 4.6
+and a 4.9. Being reachable at a workable hour matters more than three tenths of
+a star; teaching their syllabus matters more than either. A tutor with no
+published hours scores the neutral midpoint rather than zero — the same
+"unknown is not no" rule the availability port has always kept.
+
+Half-hour offsets are handled honestly: 07:00 IST is 01:30 UTC, so both UTC
+hours the local hour touches are set.
+
+### Applied by default, visibly, clearable in one tap
+
+A signed-in student's primary position is applied to the feed by default. That
+is only fair if it is visible and reversible, so there is a banner saying
+exactly what is being matched on and a link that clears it — and one that puts
+it back. Both live in the URL, so they are shareable and the back button undoes
+them.
+
+Near matches are included by default and ranked below exact ones, so a niche
+position never lands on an empty page. When it does anyway, the empty state
+offers the two ways out rather than a dead end: relax to other boards, or see
+every tutor.
+
+A `subject` in the URL wins over the subject of the declared position: a student
+who sits CAIE AS Maths and clicks the Chemistry chip means "CAIE AS Chemistry",
+not "nothing" — and the banner shows them exactly that.
+
+### Declaring it
+
+- **Tutors** declare up to 15 positions on the subjects step. The subject picker
+  only offers subjects already on their profile, and `setTutorCurriculum`
+  enforces the same rule again inside a transaction, because a select is a
+  suggestion and a transaction is a guarantee. The cap lives in the write path
+  rather than a trigger: it is a product decision, and it belongs where the
+  product decision is readable.
+- **Students** get one primary position and as many more as they like. A partial
+  unique index on `(student_id) where is_primary` is what makes "primary" mean
+  exactly one thing. Removing the primary promotes the next one, so the feed
+  always knows what to match on.
+- The question arrives **inline in the feed**, never as a wall. The feed works
+  before it is answered, and skipping it costs nothing. (Part B tightens this
+  into the dismissible prompt and measures the time-to-feed.)
+
+### Verification: a flag, not an auto-reject
+
+The admin review screen says when a tutor's declared subjects have no visible
+support in their uploaded documents. A physics graduate who has taught GCSE
+English for a decade is a real person and a good tutor; an automatic rejection
+would lose them. What an admin wants is to be told where to look.
+
+The matching is deliberately generous — a mathematics degree supports physics,
+an engineering degree supports both, and any teaching licence or PGCE supports
+everything, because that is exactly what it certifies. Every rule can only
+*remove* a flag.
+
+Seeding this honestly mattered: pairing credentials and subjects at random made
+the flag fire on almost every profile, which is how a real flag becomes
+wallpaper. `CREDENTIAL_TEMPLATES` now carries which subjects each qualification
+backs, a deliberate minority of the queue is mismatched, and an e2e test asserts
+the queue is **not** a wall of flags.
+
+### The seed migrated onto real triples
+
+Every seeded tutor and student now has a plausible position, shaped by their
+country: 220 tutor positions and 14 student positions. Two invariants are
+asserted by the seed itself rather than assumed — no tutor exceeds 15, and no
+position names a subject the tutor has not declared.
+
+### What was not done here
+
+The match tier is one correlated lookup per candidate row. The primary key
+starts with `tutor_id`, so each lookup is a prefix scan over at most fifteen
+rows — affordable at this size, and not at a hundred thousand tutors. The step
+when it stops being affordable is to denormalise each tutor's positions onto
+`tutor_ranking` as an array with a GIN index, written by the same nightly job
+that writes the score. Not to move any of it into the request path.
 
 ---
 
@@ -557,20 +723,31 @@ The credentials step says so plainly before they do it.
 
 ## Verified end to end
 
-`pnpm e2e` reseeds and runs 18 Playwright specs. The Phase 2 twelve cover:
+`pnpm e2e` reseeds and drives the real UI. The Phase 6A twelve cover:
 
-- the feed rendering seeded tutors, with posters and previews from the pipeline
-- hover autoplay: play called on the right element, muted, on the preview MP4
-- leaving rewinds it; the timer stops it after eight seconds
-- the rails, including the one that admits it needs Phase 3, and that no card
-  claims a next-free slot or an "Available today" badge
-- *Continue with your tutors* appearing only once signed in
-- category chips filtering and driving the top-rated rail through the cookie
-- search narrowing results and pushing the rails aside
-- the price filter and price sort agreeing (they did not: the filter used the
-  promo price and the sort used the list price, so $6.40 sorted after $8.00)
-- the feed order matching `tutor_ranking` read straight from the database
-- the profile hero, and no document links anywhere on a public profile
+- the database refusing an AS Level under CBSE, and refusing a second primary
+  position — a foreign key and a partial unique index, not a validation rule
+- a student's class applied by default, with the banner naming it, cleared in
+  one tap and restored in one more
+- **an exact curriculum match ranking above a better-rated tutor who teaches
+  something else**, asserted on the stored ratings rather than the rounded ones
+  the card shows, because 4.563 and 4.6 both render as "4.6"
+- the tiers coming out in order, with every card saying which one it is
+- the triple filtering the feed, and the empty state offering the two ways out
+  rather than a dead end
+- an anonymous visitor still getting the whole board list, ordered for where
+  their browser says they are, with "Other" always last
+- a tutor adding a position, the counter reading the real list, and the subject
+  picker offering only subjects already on their profile
+- the admin flag firing on a mathematics degree against a music claim and
+  staying quiet on the same degree against a maths claim
+- the verification queue **not** being a wall of flags
+- a student with no class being asked inline, in a feed that already works,
+  and the answer landing as exactly one primary row
+- the same student in Karachi and in Los Angeles getting a different order over
+  the same tutors — an ordering term, not a filter
+- every ranked tutor carrying a real `free_hours_mask`, with more than one
+  distinct value, which a mask computed from the server's clock would not have
 
 **One caveat about the autoplay tests.** The preview is H.264/AAC, which every
 real browser plays. The open-source Chromium Playwright ships deliberately
@@ -585,14 +762,16 @@ right element, muted, and stopped on schedule.
 
 | Piece | State |
 |---|---|
-| Booking | The calendar is read-only. Choosing a slot, paying with credits and the escrow debit are checkpoint B. |
-| Hosted transcoding | `FfmpegVideoPipeline` works locally. A deployed environment needs ffmpeg somewhere — `DECISIONS_NEEDED.md` item 13. |
+| Payment provider | `PaymentProvider` with a `MockProvider`. The mock posts a genuinely signed webhook to the real route. Which provider we use is `DECISIONS_NEEDED.md` item 1. |
+| Hosted transcoding | `FfmpegVideoPipeline` works locally. A deployed environment needs ffmpeg somewhere — item 13. |
 | Transcoding is inline | Fine for a 90-second clip in development; production should queue it (`SPEC.md` §14). Item 14. |
-| Infinite scroll | The grid shows the first 24 with a count. Paging is a small addition once there is enough supply to need it. |
-| Booking | The `Book session` button is disabled. `assertBookable` is the gate Phase 3's booking mutation calls. |
-| Reviews on the profile | Rating and count are shown; the breakdown bar and review list are Phase 5. |
-| Messaging, LiveKit, notifications | Schema only. Phases 4, 5 and 7. |
-| Rate limiting | Real, but in-memory, so it is per instance. Needs a shared store before more than one node. |
+| Infinite scroll | The grid shows the first 24 with a count. Paging is a small addition once there is enough supply to need it. Item 15. |
+| Notifications | In-app only. Email and WhatsApp are Phase 7 — item 22. |
+| Payouts | The tables, the encryption and the `$100` threshold exist. Requesting and paying one is Phase 6, part C. |
+| Admin dashboard | Verification, moderation, packs and curriculum. GMV, take rate and the reports queue are Phase 6, part C. |
+| Student signup | Email + password and Google. The 18-or-over question, inferred country and the deferred prompts are Phase 6, part B. |
+| Curriculum matching at scale | One correlated lookup per candidate row. Fine here; the step at a hundred thousand tutors is a denormalised array on `tutor_ranking` with a GIN index, written nightly. |
+| Rate limiting | Real, but in-memory, so it is per instance. Needs a shared store before more than one node. Item 8. |
 
 ---
 
@@ -608,6 +787,7 @@ pnpm seed                      # needs ffmpeg for intro videos; says so if absen
 pnpm typecheck && pnpm test && pnpm build
 pnpm rank                      # the nightly ranking job
 pnpm reconcile                 # the nightly ledger check
+pnpm prove:curriculum          # the database refusing a class from the wrong board
 
 pnpm dev                       # http://localhost:3000
 pnpm e2e                       # reseeds, then drives the UI
@@ -621,15 +801,21 @@ says the videos were skipped.
 
 ```
 pnpm typecheck   clean
-pnpm test        23 files, 344 tests passed
-pnpm build       compiled, 18 routes
+pnpm test        40 files, 573 tests passed
+pnpm build       compiled, 33 routes
 pnpm seed        58 users · 40 verified · 5 pending · 1 draft · 1 rejected
+                 10 boards · 220 tutor curriculum positions · 14 student ones
                  4 transcoded clips (preview + hero + 3 thumbnails each)
-                 151 bookings, every one inside published availability
-                 152 availability rules · 24 exceptions
-                 1,023 ledger entries · zero drift
-                 Ranked 40 verified tutors: top 9220, median 8050
+                 189 bookings, every one inside published availability
+                 1,153 ledger entries · zero drift
+                 Ranked 40 verified tutors: top 9167, median 8069
                  (availability from database)
-pnpm e2e         26 passed
+pnpm e2e         73 passed
 pnpm reconcile   Ledger reconciled: zero drift.
+pnpm prove:curriculum
+                 the database refuses all three
 ```
+
+Lighthouse on the built app, desktop preset: feed **99 performance / 100
+accessibility**, tutor profile **100 / 100**, curriculum-filtered feed
+**100 / 100**. Mobile emulation on the feed: **99 / 100**.

@@ -32,6 +32,7 @@ import {
 } from 'drizzle-orm/pg-core';
 
 import { BOOKING_STATUSES } from '@/lib/bookings/status';
+import { CURRICULUM_STAGES } from '@/lib/curriculum/boards';
 import { LEDGER_ACCOUNTS } from '@/lib/money/ledger';
 import { PAYOUT_STATUSES } from '@/lib/money/payouts';
 
@@ -74,6 +75,8 @@ export const subjectLevelEnum = pgEnum('subject_level', [
   'advanced',
   'exam_prep',
 ]);
+
+export const curriculumStageEnum = pgEnum('curriculum_stage', CURRICULUM_STAGES);
 
 export const availabilityExceptionKindEnum = pgEnum('availability_exception_kind', ['block', 'extra']);
 
@@ -397,6 +400,163 @@ export const tutorSubjects = pgTable(
   (table) => [
     primaryKey({ columns: [table.tutorId, table.subjectId] }),
     index('tutor_subjects_subject_idx').on(table.subjectId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Curriculum: board, level, subject (SPEC.md §4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exam boards and school systems.
+ *
+ * The id is a readable slug rather than a uuid because it appears in URLs and
+ * in the level ids, and because these are a small, admin-curated list rather
+ * than user data.
+ */
+export const boards = pgTable(
+  'boards',
+  {
+    id: varchar({ length: 32 }).primaryKey(),
+    name: varchar({ length: 120 }).notNull(),
+    sortOrder: smallint().notNull().default(0),
+    /** Retired boards stop being offered without breaking anybody's history. */
+    isActive: boolean().notNull().default(true),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('boards_sort_idx').on(table.sortOrder)],
+);
+
+/**
+ * Which boards a country actually uses, and in what order.
+ *
+ * The board list is not flat. A student in Lahore should meet CAIE, Edexcel,
+ * Punjab Board and Federal Board before anything else, and should not have to
+ * scroll past CBSE to find them. Everything stays available — this decides the
+ * order, never the membership.
+ */
+export const boardCountries = pgTable(
+  'board_countries',
+  {
+    boardId: varchar({ length: 32 })
+      .notNull()
+      .references(() => boards.id, { onDelete: 'cascade' }),
+    /** ISO 3166-1 alpha-2. */
+    country: varchar({ length: 2 }).notNull(),
+    sortOrder: smallint().notNull().default(0),
+  },
+  (table) => [
+    primaryKey({ columns: [table.boardId, table.country] }),
+    index('board_countries_country_idx').on(table.country, table.sortOrder),
+  ],
+);
+
+/**
+ * The levels inside a board.
+ *
+ * A level only means something inside a board — "AS Level" under CBSE is
+ * nonsense — so these are board-scoped and the ids are namespaced. The unique
+ * index on `(board_id, id)` is not redundant with the primary key: it is what
+ * lets `tutor_curriculum` and `student_curriculum` carry a composite foreign
+ * key, so the database itself refuses to store a level under the wrong board.
+ */
+export const curriculumLevels = pgTable(
+  'curriculum_levels',
+  {
+    id: varchar({ length: 64 }).primaryKey(),
+    boardId: varchar({ length: 32 })
+      .notNull()
+      .references(() => boards.id, { onDelete: 'cascade' }),
+    name: varchar({ length: 120 }).notNull(),
+    /** The board-independent rung, used for near matches across boards. */
+    stage: curriculumStageEnum().notNull(),
+    sortOrder: smallint().notNull().default(0),
+    isActive: boolean().notNull().default(true),
+  },
+  (table) => [
+    uniqueIndex('curriculum_levels_board_id_key').on(table.boardId, table.id),
+    index('curriculum_levels_board_idx').on(table.boardId, table.sortOrder),
+  ],
+);
+
+/** How many curriculum positions one tutor may declare. */
+export const MAX_TUTOR_CURRICULUM = 15;
+
+/**
+ * What a tutor teaches, as (board, level, subject) triples.
+ *
+ * `tutor_subjects` stays: it carries years of experience and the free-text
+ * level a tutor describes themselves at, and it is what the profile shows. This
+ * table is the machine-readable position that matching runs on, and the write
+ * path keeps the two coherent by only offering subjects the tutor has declared.
+ */
+export const tutorCurriculum = pgTable(
+  'tutor_curriculum',
+  {
+    tutorId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    boardId: varchar({ length: 32 })
+      .notNull()
+      .references(() => boards.id, { onDelete: 'cascade' }),
+    levelId: varchar({ length: 64 }).notNull(),
+    subjectId: uuid()
+      .notNull()
+      .references(() => subjects.id, { onDelete: 'cascade' }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tutorId, table.boardId, table.levelId, table.subjectId] }),
+    // The composite key is what makes "AS Level under CBSE" unstorable.
+    foreignKey({
+      name: 'tutor_curriculum_level_fk',
+      columns: [table.boardId, table.levelId],
+      foreignColumns: [curriculumLevels.boardId, curriculumLevels.id],
+    }).onDelete('cascade'),
+    index('tutor_curriculum_position_idx').on(table.boardId, table.levelId, table.subjectId),
+    index('tutor_curriculum_subject_idx').on(table.subjectId),
+  ],
+);
+
+/**
+ * Where a student is.
+ *
+ * One row is the primary position — the one the feed applies by default — and
+ * the partial unique index is what makes "primary" mean exactly one thing.
+ */
+export const studentCurriculum = pgTable(
+  'student_curriculum',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    studentId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    boardId: varchar({ length: 32 })
+      .notNull()
+      .references(() => boards.id, { onDelete: 'cascade' }),
+    levelId: varchar({ length: 64 }).notNull(),
+    subjectId: uuid()
+      .notNull()
+      .references(() => subjects.id, { onDelete: 'cascade' }),
+    isPrimary: boolean().notNull().default(false),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('student_curriculum_position_key').on(
+      table.studentId,
+      table.boardId,
+      table.levelId,
+      table.subjectId,
+    ),
+    uniqueIndex('student_curriculum_primary_key')
+      .on(table.studentId)
+      .where(sql`is_primary`),
+    foreignKey({
+      name: 'student_curriculum_level_fk',
+      columns: [table.boardId, table.levelId],
+      foreignColumns: [curriculumLevels.boardId, curriculumLevels.id],
+    }).onDelete('cascade'),
   ],
 );
 
@@ -897,6 +1057,15 @@ export const tutorRanking = pgTable(
     explorationBoost: integer().notNull().default(0),
     reviewCount: integer().notNull().default(0),
     sessionCount: integer().notNull().default(0),
+    /**
+     * A 24-bit mask of the UTC hours this tutor is typically free.
+     *
+     * The tutor half of the timezone-overlap term (`src/lib/ranking/overlap.ts`).
+     * Expensive to derive, so it is derived here, nightly; the request path only
+     * ANDs it with the viewer's own mask and counts the bits. Zero means "no
+     * published hours", which the term scores as unknown rather than as never.
+     */
+    freeHoursMask: integer().notNull().default(0),
     computedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('tutor_ranking_score_idx').on(table.score)],
@@ -930,6 +1099,32 @@ export const tutorSubjectsRelations = relations(tutorSubjects, ({ one }) => ({
   subject: one(subjects, { fields: [tutorSubjects.subjectId], references: [subjects.id] }),
 }));
 
+export const boardsRelations = relations(boards, ({ many }) => ({
+  levels: many(curriculumLevels),
+  countries: many(boardCountries),
+}));
+
+export const curriculumLevelsRelations = relations(curriculumLevels, ({ one }) => ({
+  board: one(boards, { fields: [curriculumLevels.boardId], references: [boards.id] }),
+}));
+
+export const tutorCurriculumRelations = relations(tutorCurriculum, ({ one }) => ({
+  tutor: one(users, { fields: [tutorCurriculum.tutorId], references: [users.id] }),
+  board: one(boards, { fields: [tutorCurriculum.boardId], references: [boards.id] }),
+  level: one(curriculumLevels, { fields: [tutorCurriculum.levelId], references: [curriculumLevels.id] }),
+  subject: one(subjects, { fields: [tutorCurriculum.subjectId], references: [subjects.id] }),
+}));
+
+export const studentCurriculumRelations = relations(studentCurriculum, ({ one }) => ({
+  student: one(users, { fields: [studentCurriculum.studentId], references: [users.id] }),
+  board: one(boards, { fields: [studentCurriculum.boardId], references: [boards.id] }),
+  level: one(curriculumLevels, {
+    fields: [studentCurriculum.levelId],
+    references: [curriculumLevels.id],
+  }),
+  subject: one(subjects, { fields: [studentCurriculum.subjectId], references: [subjects.id] }),
+}));
+
 export const bookingsRelations = relations(bookings, ({ one, many }) => ({
   student: one(users, {
     fields: [bookings.studentId],
@@ -960,3 +1155,7 @@ export type LedgerEntry = typeof ledgerEntries.$inferSelect;
 export type Payout = typeof payouts.$inferSelect;
 export type Review = typeof reviews.$inferSelect;
 export type Subject = typeof subjects.$inferSelect;
+export type Board = typeof boards.$inferSelect;
+export type CurriculumLevel = typeof curriculumLevels.$inferSelect;
+export type TutorCurriculum = typeof tutorCurriculum.$inferSelect;
+export type StudentCurriculum = typeof studentCurriculum.$inferSelect;

@@ -6,7 +6,13 @@
  * ranking term neutral. `setAvailability` swaps it in.
  */
 
-import { UNKNOWN, type Availability, type AvailabilityPort, type NextFreeSlot } from './port';
+import {
+  UNKNOWN,
+  type Availability,
+  type AvailabilityPort,
+  type NextFreeSlot,
+  type WeeklySignals,
+} from './port';
 
 export class StubAvailability implements AvailabilityPort {
   readonly name = 'stub';
@@ -27,7 +33,7 @@ export class StubAvailability implements AvailabilityPort {
     return UNKNOWN;
   }
 
-  async densityNext7dBps(): Promise<Availability<Map<string, number>>> {
+  async weeklySignals(): Promise<Availability<Map<string, WeeklySignals>>> {
     return UNKNOWN;
   }
 

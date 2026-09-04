@@ -12,6 +12,7 @@ const badgeVariants = cva(
         secondary: 'border-transparent bg-secondary text-secondary-foreground',
         outline: 'border-border text-foreground',
         success: 'border-transparent bg-[var(--success)] text-[var(--success-foreground)]',
+        warning: 'border-transparent bg-[var(--warning)] text-[var(--warning-foreground)]',
         destructive: 'border-transparent bg-destructive text-destructive-foreground',
       },
     },

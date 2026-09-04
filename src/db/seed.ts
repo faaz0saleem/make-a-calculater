@@ -29,6 +29,7 @@ import { promisify } from 'node:util';
 import { eq, sql } from 'drizzle-orm';
 
 import { db } from './client';
+import { MAX_TUTOR_CURRICULUM, seedCurriculum } from './curriculum';
 import { appendLedger, formatReconciliationReport, reconcileLedger } from './ledger';
 import { recomputeAllResponseMedians } from './messages';
 import { formatRankingRun, runNightlyRanking } from './ranking';
@@ -47,8 +48,10 @@ import {
   payouts,
   reviews,
   sessionEvents,
+  studentCurriculum,
   studentWallets,
   subjects,
+  tutorCurriculum,
   tutorLanguages,
   tutorProfiles,
   tutorRanking,
@@ -59,6 +62,7 @@ import {
 } from './schema';
 import { colourFor, simplePdf, solidPng } from './seed-assets';
 import { hashPassword } from '@/lib/auth/password';
+import { BOARD_SEEDS } from '@/lib/curriculum/boards';
 import type { UserRole } from '@/lib/auth/roles';
 import { encryptSecret, last4 } from '@/lib/crypto';
 import { formatCents } from '@/lib/money/cents';
@@ -218,16 +222,128 @@ const REVIEW_BODIES = [
   null,
 ];
 
+/**
+ * Qualifications, each with the subjects it plausibly backs.
+ *
+ * `supports` exists so the seeded world is coherent: a tutor's documents
+ * should usually have something to do with what they teach. Pairing them at
+ * random made the verification screen's "worth asking about" flag fire on
+ * almost every profile, which is exactly how a real flag becomes wallpaper.
+ * A deliberate minority is still mismatched, so the flag has real work to do.
+ */
 const CREDENTIAL_TEMPLATES = [
-  { kind: 'degree' as const, title: 'BSc Mathematics', institution: 'University of Punjab' },
-  { kind: 'degree' as const, title: 'MSc Physics', institution: 'Imperial College London' },
-  { kind: 'teaching_licence' as const, title: 'QTS Teaching Licence', institution: 'UK Department for Education' },
-  { kind: 'certificate' as const, title: 'CELTA', institution: 'Cambridge Assessment English' },
-  { kind: 'diploma' as const, title: 'Diploma in Computer Science', institution: 'NUST' },
-  { kind: 'degree' as const, title: 'BA English Literature', institution: 'University of Toronto' },
-  { kind: 'certificate' as const, title: 'IELTS Examiner Training', institution: 'British Council' },
-  { kind: 'id' as const, title: 'National Identity Card', institution: 'NADRA' },
+  {
+    kind: 'degree' as const,
+    title: 'BSc Mathematics',
+    institution: 'University of Punjab',
+    supports: ['math', 'physics', 'programming', 'business', 'test-prep'],
+  },
+  {
+    kind: 'degree' as const,
+    title: 'MSc Physics',
+    institution: 'Imperial College London',
+    supports: ['physics', 'math', 'chemistry'],
+  },
+  {
+    kind: 'degree' as const,
+    title: 'BSc Biology',
+    institution: 'University of Karachi',
+    supports: ['biology', 'chemistry'],
+  },
+  {
+    kind: 'degree' as const,
+    title: 'MSc Chemistry',
+    institution: 'Aga Khan University',
+    supports: ['chemistry', 'biology'],
+  },
+  {
+    kind: 'degree' as const,
+    title: 'BBA',
+    institution: 'Lahore University of Management Sciences',
+    supports: ['business', 'math'],
+  },
+  {
+    kind: 'teaching_licence' as const,
+    title: 'QTS Teaching Licence',
+    institution: 'UK Department for Education',
+    supports: 'any' as const,
+  },
+  {
+    kind: 'certificate' as const,
+    title: 'CELTA',
+    institution: 'Cambridge Assessment English',
+    supports: ['english', 'ielts-toefl', 'languages'],
+  },
+  {
+    kind: 'diploma' as const,
+    title: 'Diploma in Computer Science',
+    institution: 'NUST',
+    supports: ['programming', 'math'],
+  },
+  {
+    kind: 'degree' as const,
+    title: 'BA English Literature',
+    institution: 'University of Toronto',
+    supports: ['english', 'ielts-toefl', 'languages'],
+  },
+  {
+    kind: 'certificate' as const,
+    title: 'IELTS Examiner Training',
+    institution: 'British Council',
+    supports: ['ielts-toefl', 'english'],
+  },
+  {
+    kind: 'certificate' as const,
+    title: 'Ijazah in Quran and Tajweed',
+    institution: 'Jamia Naeemia',
+    supports: ['quran-arabic'],
+  },
+  {
+    kind: 'diploma' as const,
+    title: 'ABRSM Grade 8 Piano',
+    institution: 'Associated Board of the Royal Schools of Music',
+    supports: ['music'],
+  },
+  {
+    kind: 'id' as const,
+    title: 'National Identity Card',
+    institution: 'NADRA',
+    supports: 'any' as const,
+  },
 ];
+
+type CredentialTemplate = (typeof CREDENTIAL_TEMPLATES)[number];
+
+/**
+ * The documents one tutor uploads: one qualification per subject they teach,
+ * deduplicated, plus an identity card for some of them.
+ *
+ * `mismatched` deliberately picks documents that back none of their subjects,
+ * which is what the admin flag is for.
+ */
+function credentialsFor(subjectSlugs: string[], mismatched: boolean): CredentialTemplate[] {
+  const qualifications = CREDENTIAL_TEMPLATES.filter((template) => template.kind !== 'id');
+
+  if (mismatched || subjectSlugs.length === 0) {
+    const unrelated = qualifications.filter(
+      (template) =>
+        template.supports !== 'any' &&
+        !subjectSlugs.some((slug) => (template.supports as readonly string[]).includes(slug)),
+    );
+    return pickMany(unrelated.length > 0 ? unrelated : qualifications, 1);
+  }
+
+  const chosen: CredentialTemplate[] = [];
+  for (const slug of subjectSlugs) {
+    const supporting = qualifications.filter(
+      (template) => template.supports === 'any' || (template.supports as readonly string[]).includes(slug),
+    );
+    const template = supporting.length > 0 ? pick(supporting) : pick(qualifications);
+    if (!chosen.includes(template)) chosen.push(template);
+  }
+
+  return chosen;
+}
 
 const LEVELS = ['beginner', 'intermediate', 'advanced', 'exam_prep'] as const;
 
@@ -297,8 +413,10 @@ async function reset(): Promise<void> {
       payouts, payout_methods, credit_purchases, credit_packs,
       follows, messages, threads, notifications, reports, admin_audit,
       availability_exceptions, availability_rules,
-      tutor_subjects, tutor_languages, tutor_ranking, credentials, tutor_profiles,
+      tutor_subjects, tutor_curriculum, student_curriculum, tutor_languages,
+      tutor_ranking, credentials, tutor_profiles,
       student_wallets, platform_accounts, videos, subjects,
+      board_countries, curriculum_levels, boards,
       accounts, sessions, verification_tokens, users
     restart identity cascade
   `);
@@ -626,6 +744,9 @@ async function seedTutors(
   demoTutor.name = 'Hassan Raza';
   demoTutor.timezone = 'Asia/Karachi';
   demoTutor.offersTrial = true;
+  // Fixed, because the demo student sits CAIE AS Maths and the two lists have
+  // to agree: a curriculum position is always *for* a declared subject.
+  demoTutor.subjectSlugs = ['math', 'physics'];
 
   const all = [...verified, ...pending];
 
@@ -773,7 +894,9 @@ async function seedTutors(
     if (status === 'draft') continue;
 
     const isVerified = status === 'verified';
-    const templates = pickMany(CREDENTIAL_TEMPLATES, isVerified ? randInt(1, 2) : 2);
+    // Every seventh tutor in the queue uploads something unrelated, so the
+    // "worth asking about" flag on the verification screen has real examples.
+    const templates = credentialsFor(tutor.subjectSlugs, !isVerified && index % 7 === 0);
 
     for (const template of templates) {
       const credentialId = randomUUID();
@@ -962,6 +1085,217 @@ function slotsInRange(
   if (rules.length === 0) return [];
   const published = applyExceptions(expandWeeklyRules(rules, range), exceptions, range);
   return slotsWithin(subtractBusy(published, busy, bufferMinutes), durationMinutes);
+}
+
+// ---------------------------------------------------------------------------
+// Curriculum declarations
+// ---------------------------------------------------------------------------
+
+/**
+ * Subjects a school exam board actually examines.
+ *
+ * Everything else — IELTS, Quran, music, conversational languages — is real
+ * teaching that no board sets a syllabus for, so those positions land on the
+ * catch-all board rather than pretending Cambridge examines the oud.
+ */
+const BOARD_SUBJECT_SLUGS = new Set([
+  'math',
+  'physics',
+  'chemistry',
+  'biology',
+  'english',
+  'business',
+  'programming',
+]);
+
+/** The boards a country actually uses, best first, never empty. */
+function boardsForSeedCountry(country: string | null): string[] {
+  const local = BOARD_SEEDS.filter((board) => country && board.countries.includes(country))
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((board) => board.id);
+
+  return local.length > 0 ? local : ['caie', 'edexcel'];
+}
+
+function levelsOf(boardId: string): string[] {
+  return (BOARD_SEEDS.find((board) => board.id === boardId)?.levels ?? []).map((level) => level.id);
+}
+
+type Triple = { boardId: string; levelId: string; subjectId: string };
+
+/**
+ * Give every seeded tutor and student a plausible curriculum position.
+ *
+ * "Plausible" means shaped by where they are: a Lahore tutor teaches CAIE,
+ * Edexcel, Punjab and Federal, not CBSE and AP. The existing `tutor_subjects`
+ * rows decide which subjects appear, so the two lists agree — the same rule the
+ * real write path enforces.
+ */
+async function seedCurriculumDeclarations(
+  tutors: SeededTutor[],
+  students: SeededStudent[],
+  subjectIds: Map<string, string>,
+): Promise<{ tutorTriples: number; studentTriples: number }> {
+  const countryRows = (await db.execute(
+    sql`select id::text as id, country from users`,
+  )) as unknown as { id: string; country: string | null }[];
+  const countryById = new Map(countryRows.map((row) => [row.id, row.country]));
+
+  const values: (Triple & { tutorId: string })[] = [];
+
+  for (const tutor of tutors) {
+    if (tutor.subjectSlugs.length === 0) continue;
+
+    const boardIds = boardsForSeedCountry(countryById.get(tutor.id) ?? null).slice(
+      0,
+      randInt(1, 2),
+    );
+
+    const triples: Triple[] = [];
+
+    for (const slug of tutor.subjectSlugs) {
+      const subjectId = subjectIds.get(slug);
+      if (!subjectId) continue;
+
+      if (!BOARD_SUBJECT_SLUGS.has(slug)) {
+        // No board examines this. Say so rather than inventing one.
+        triples.push({ boardId: 'other', levelId: pick(levelsOf('other')), subjectId });
+        continue;
+      }
+
+      for (const boardId of boardIds) {
+        const levels = levelsOf(boardId);
+        for (const levelId of pickMany(levels, randInt(2, 3))) {
+          triples.push({ boardId, levelId, subjectId });
+        }
+      }
+    }
+
+    // The cap is a real rule, so the seed obeys it rather than working around it.
+    for (const triple of triples.slice(0, MAX_TUTOR_CURRICULUM)) {
+      values.push({ tutorId: tutor.id, ...triple });
+    }
+  }
+
+  // The demo tutor teaches a known position, so the demo student matches
+  // exactly and the ordering can be demonstrated by hand.
+  const demoTutor = tutors.find((tutor) => tutor.email === 'tutor@tutorly.test');
+  if (demoTutor) {
+    const kept = values.filter((row) => row.tutorId !== demoTutor.id);
+    values.length = 0;
+    values.push(...kept);
+
+    for (const slug of ['math', 'physics']) {
+      const subjectId = subjectIds.get(slug);
+      if (!subjectId) continue;
+      for (const levelId of ['caie:as-level', 'caie:a2-level', 'caie:igcse']) {
+        values.push({ tutorId: demoTutor.id, boardId: 'caie', levelId, subjectId });
+      }
+    }
+  }
+
+  if (values.length > 0) await db.insert(tutorCurriculum).values(values).onConflictDoNothing();
+
+  // Students: one primary position each, plus a second for a few of them.
+  const studentValues: {
+    studentId: string;
+    boardId: string;
+    levelId: string;
+    subjectId: string;
+    isPrimary: boolean;
+  }[] = [];
+
+  for (const student of students) {
+    const boardId = pick(boardsForSeedCountry(countryById.get(student.id) ?? null));
+    const levelId = pick(levelsOf(boardId));
+    const slug = pick([...BOARD_SUBJECT_SLUGS]);
+    const subjectId = subjectIds.get(slug);
+    if (!subjectId) continue;
+
+    studentValues.push({ studentId: student.id, boardId, levelId, subjectId, isPrimary: true });
+
+    if (chance(0.4)) {
+      const second = subjectIds.get(pick([...BOARD_SUBJECT_SLUGS].filter((other) => other !== slug)));
+      if (second) {
+        studentValues.push({
+          studentId: student.id,
+          boardId,
+          levelId,
+          subjectId: second,
+          isPrimary: false,
+        });
+      }
+    }
+  }
+
+  // The demo student sits CAIE AS Maths — the demo tutor's exact position.
+  const demoStudent = students.find((student) => student.email === 'student@tutorly.test');
+  if (demoStudent) {
+    const kept = studentValues.filter((row) => row.studentId !== demoStudent.id);
+    studentValues.length = 0;
+    studentValues.push(...kept);
+
+    const math = subjectIds.get('math');
+    const physics = subjectIds.get('physics');
+    if (math) {
+      studentValues.push({
+        studentId: demoStudent.id,
+        boardId: 'caie',
+        levelId: 'caie:as-level',
+        subjectId: math,
+        isPrimary: true,
+      });
+    }
+    if (physics) {
+      studentValues.push({
+        studentId: demoStudent.id,
+        boardId: 'caie',
+        levelId: 'caie:as-level',
+        subjectId: physics,
+        isPrimary: false,
+      });
+    }
+  }
+
+  if (studentValues.length > 0) {
+    await db.insert(studentCurriculum).values(studentValues).onConflictDoNothing();
+  }
+
+  const [row] = (await db.execute(sql`
+    select
+      (select count(*) from tutor_curriculum)::int as tutor_triples,
+      (select count(*) from student_curriculum)::int as student_triples,
+      (select coalesce(max(per_tutor), 0) from (
+        select count(*) as per_tutor from tutor_curriculum group by tutor_id
+      ) counts)::int as most_per_tutor
+  `)) as unknown as [{ tutor_triples: number; student_triples: number; most_per_tutor: number }];
+
+  if (row.most_per_tutor > MAX_TUTOR_CURRICULUM) {
+    throw new Error(
+      `A seeded tutor declared ${row.most_per_tutor} curriculum positions; the cap is ${MAX_TUTOR_CURRICULUM}.`,
+    );
+  }
+
+  // The rule the real write path enforces, checked against what the seed
+  // actually wrote: a position is always *for* a subject the tutor claims.
+  // The seed inserts directly, so nothing else would catch a fixture that
+  // hard-codes a position and forgets the subject behind it.
+  const [orphan] = (await db.execute(sql`
+    select count(*)::int as total
+    from tutor_curriculum tc
+    where not exists (
+      select 1 from tutor_subjects ts
+      where ts.tutor_id = tc.tutor_id and ts.subject_id = tc.subject_id
+    )
+  `)) as unknown as [{ total: number }];
+
+  if (orphan.total > 0) {
+    throw new Error(
+      `${orphan.total} seeded curriculum positions name a subject the tutor has not declared.`,
+    );
+  }
+
+  return { tutorTriples: row.tutor_triples, studentTriples: row.student_triples };
 }
 
 async function seedHistory(
@@ -1862,6 +2196,7 @@ async function main() {
 
   await seedCreditPacks();
   const subjectIds = await seedSubjects();
+  await seedCurriculum(db);
   await seedAdmin(passwordHash);
   const students = await seedStudents(passwordHash, wallets);
   process.stdout.write('Building intro videos ... ');
@@ -1901,6 +2236,8 @@ async function main() {
     await ensureCredits(wallets, student.id, 20_000);
   }
 
+  const curriculum = await seedCurriculumDeclarations([...verified, ...pending], students, subjectIds);
+
   const conversations = await seedConversations(NOW);
   await seedNotifications(students, NOW);
 
@@ -1934,6 +2271,9 @@ async function main() {
   console.log(`  credential documents     ${totals.credential_documents}`);
   console.log(`  students                 ${students.length}`);
   console.log(`  subjects                 ${SUBJECTS.length}`);
+  console.log(`  boards                   ${BOARD_SEEDS.length}`);
+  console.log(`  tutor curriculum         ${curriculum.tutorTriples} positions`);
+  console.log(`  student curriculum       ${curriculum.studentTriples} positions`);
   console.log('');
   console.log('Sessions');
   console.log(`  bookings                 ${totals.bookings}`);

@@ -34,6 +34,7 @@ import {
 import { db } from '@/db/client';
 import { bookings, studentWallets, users } from '@/db/schema';
 import { openReschedulesFor } from '@/db/bookings';
+import { getStudentCurriculum } from '@/db/curriculum';
 import { reviewableSessionsFor } from '@/db/reviews';
 import { pendingTrialsForStudent, recentTrialToConvert } from '@/db/trials';
 import { getAvailability } from '@/lib/availability';
@@ -132,11 +133,12 @@ export default async function DashboardPage({
     .orderBy(desc(bookings.startAtUtc))
     .limit(10);
 
-  const [outgoingTrials, reviewable, trialToConvert, reschedules] = await Promise.all([
+  const [outgoingTrials, reviewable, trialToConvert, reschedules, studentPositions] = await Promise.all([
     pendingTrialsForStudent(user.id, now),
     reviewableSessionsFor(user.id),
     recentTrialToConvert(user.id, now),
     openReschedulesFor(user.id, now),
+    getStudentCurriculum(user.id),
   ]);
 
   // Times each upcoming session could move to. One engine call per distinct
@@ -312,6 +314,26 @@ export default async function DashboardPage({
             </CardContent>
           </Card>
         </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>My classes</CardTitle>
+            <CardDescription>
+              {studentPositions.length === 0
+                ? 'Tell us your exam board and class and the feed will show tutors who teach it first.'
+                : studentPositions
+                    .map((entry) => `${entry.boardName} · ${entry.levelName} · ${entry.subjectName}`)
+                    .join(' — ')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link href="/settings/curriculum">
+              <Button size="sm" variant="outline" className="min-h-11" data-testid="manage-curriculum">
+                {studentPositions.length === 0 ? 'Add my class' : 'Manage my classes'}
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>

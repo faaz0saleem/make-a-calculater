@@ -220,6 +220,11 @@ test('sorting by rating reorders the feed', async ({ page }) => {
 });
 
 test('the feed order comes from the ranking table, not from the request', async ({ page }) => {
+  // A first visit, with no session and no timezone cookie yet. We do not know
+  // where this visitor is, so the timezone-overlap term stays out of the
+  // ordering rather than assuming UTC — which makes this the plain nightly
+  // score, exactly as the table holds it. (The overlap term is exercised in
+  // `curriculum.spec.ts`, where the viewer's timezone is actually known.)
   await page.goto('/');
   const shown = (
     await page
@@ -238,7 +243,7 @@ test('the feed order comes from the ranking table, not from the request', async 
       join users on users.id = tutor_profiles.user_id
       left join tutor_ranking on tutor_ranking.tutor_id = tutor_profiles.user_id
       where tutor_profiles.status = 'verified' and users.suspended_at is null
-      order by tutor_ranking.score desc, users.name asc
+      order by tutor_ranking.score desc nulls last, users.name asc
     `;
     return rows;
   });

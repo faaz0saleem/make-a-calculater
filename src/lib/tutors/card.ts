@@ -8,6 +8,7 @@
 
 import { getAvailability } from '@/lib/availability';
 import type { FeedTutor } from '@/db/discovery';
+import { MATCH_TIERS, MATCH_TIER_LABELS, type MatchTier } from '@/lib/curriculum/match';
 import { badgesFor } from './badges';
 import type { TutorCardData } from '@/components/feed/tutor-card';
 import { formatInTimeZone } from '@/lib/time';
@@ -72,6 +73,8 @@ export async function toCardData(
           now,
         ),
         nextFreeLabel: next.known ? nextFreeLabel(next.value?.startUtc ?? null, viewerTimezone, now) : null,
+        matchLabel: MATCH_TIER_LABELS[(tutor.matchTier ?? MATCH_TIERS.none) as MatchTier] || null,
+        exactMatch: tutor.matchTier === MATCH_TIERS.exact,
       };
     }),
   );

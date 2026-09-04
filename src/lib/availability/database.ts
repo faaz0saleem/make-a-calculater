@@ -16,6 +16,7 @@ import { db as defaultDb } from '@/db/client';
 import type { DbLike } from '@/db/ledger';
 import { availabilityExceptions, availabilityRules, bookings, tutorProfiles } from '@/db/schema';
 import { ACTIVE_BOOKING_STATUSES } from '@/lib/bookings/status';
+import { maskFromUtcHours } from '@/lib/ranking/overlap';
 import { getLocalParts, zonedTimeToUtc } from '@/lib/time';
 import {
   bookableRange,
@@ -36,6 +37,7 @@ import {
   type AvailabilityPort,
   type NextFreeSlot,
   type SlotQuery,
+  type WeeklySignals,
 } from './port';
 
 /** Everything one tutor's calendar needs, in one shape. */
@@ -286,16 +288,16 @@ export class DatabaseAvailability implements AvailabilityPort {
     return known(free);
   }
 
-  async densityNext7dBps(
+  async weeklySignals(
     tutorIds: string[],
     now = new Date(),
-  ): Promise<Availability<Map<string, number>>> {
+  ): Promise<Availability<Map<string, WeeklySignals>>> {
     if (tutorIds.length === 0) return known(new Map());
 
     const window: Interval = { startUtc: now, endUtc: new Date(now.getTime() + 7 * 86_400_000) };
     const calendars = await this.loadCalendars(tutorIds, window);
 
-    const density = new Map<string, number>();
+    const signals = new Map<string, WeeklySignals>();
 
     for (const tutorId of tutorIds) {
       const calendar = calendars.get(tutorId);
@@ -306,10 +308,18 @@ export class DatabaseAvailability implements AvailabilityPort {
       const slots = DatabaseAvailability.slotsFor(calendar, 30, now, window);
       const openMinutes = slots.length * 30;
 
-      density.set(tutorId, Math.min(10_000, Math.round((openMinutes * 10_000) / DENSITY_TARGET_MINUTES)));
+      signals.set(tutorId, {
+        densityBps: Math.min(
+          10_000,
+          Math.round((openMinutes * 10_000) / DENSITY_TARGET_MINUTES),
+        ),
+        // The UTC hour each open slot starts in. A week is enough to see the
+        // shape of somebody's day without a single odd evening dominating it.
+        freeHoursMask: maskFromUtcHours(slots.map((slot) => slot.startUtc.getUTCHours())),
+      });
     }
 
-    return known(density);
+    return known(signals);
   }
 
   /** Published minutes over the next week, for the tutor's own dashboard. */

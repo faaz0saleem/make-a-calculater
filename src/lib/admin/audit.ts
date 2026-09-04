@@ -30,7 +30,12 @@ export type AuditAction =
   | 'review.unhide'
   | 'dispute.settle'
   | 'dispute.refund'
-  | 'pack.update';
+  | 'pack.update'
+  | 'curriculum.board.create'
+  | 'curriculum.board.update'
+  | 'curriculum.level.create'
+  | 'curriculum.level.retire'
+  | 'curriculum.level.restore';
 
 export type AuditEntry = {
   actorId: string;

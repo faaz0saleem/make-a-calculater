@@ -5,6 +5,7 @@
  * works without JavaScript.
  */
 
+import { CurriculumFields, type BoardChoice } from '@/components/curriculum/fields';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Field, Select } from '@/components/ui/select';
@@ -21,18 +22,25 @@ const TIMES = Array.from({ length: 48 }, (_, index) => {
 export function Filters({
   filters,
   subjects,
+  boards,
   countries,
   resultCount,
   timeWindow,
   viewerTimezone,
+  curriculum,
+  exactOnly,
 }: {
   filters: DiscoveryFilters;
   subjects: { slug: string; name: string }[];
+  boards: BoardChoice[];
   countries: string[];
   resultCount: number;
   /** The raw day/time values, so the form can render what was submitted. */
   timeWindow: { date?: string; from?: string; to?: string };
   viewerTimezone: string;
+  /** The board and class currently in the URL, so the form renders them back. */
+  curriculum: { board?: string; level?: string };
+  exactOnly: boolean;
 }) {
   return (
     <form
@@ -53,16 +61,15 @@ export function Filters({
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Field label="Subject" htmlFor="subject">
-          <Select id="subject" name="subject" defaultValue={filters.subject ?? ''}>
-            <option value="">Any subject</option>
-            {subjects.map((subject) => (
-              <option key={subject.slug} value={subject.slug}>
-                {subject.name}
-              </option>
-            ))}
-          </Select>
-        </Field>
+        <CurriculumFields
+          boards={boards}
+          subjects={subjects}
+          value={{
+            board: curriculum.board,
+            level: curriculum.level,
+            subject: filters.subject,
+          }}
+        />
 
         <Field label="Language" htmlFor="language">
           <Select id="language" name="language" defaultValue={filters.language ?? ''}>
@@ -132,7 +139,7 @@ export function Filters({
           </Select>
         </Field>
 
-        <div className="flex items-end gap-4">
+        <div className="flex flex-col justify-end gap-2">
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -142,6 +149,11 @@ export function Filters({
               className="size-4"
             />
             Free trial
+          </label>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" name="exact" value="1" defaultChecked={exactOnly} className="size-4" />
+            Exact board and class only
           </label>
         </div>
       </div>

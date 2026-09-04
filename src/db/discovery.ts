@@ -8,11 +8,28 @@
  *     `src/lib/tutors/visibility.ts`.
  *  2. Ranking is never computed here. The nightly job writes `tutor_ranking`
  *     and these queries order by its `score` column (SPEC.md §4).
+ *
+ * Curriculum matching (SPEC.md §4) sits on top of both. The match tier leads
+ * the ordering, so an exact board-class-subject match outweighs a rating — a
+ * key, not another weighted term, because a weight can always be out-argued by
+ * a big enough rating gap. `src/lib/curriculum/ordering.ts` is the readable
+ * statement of the same rule, and the tests check it there.
+ *
+ * The timezone-overlap term is the one thing here that touches a viewer: it is
+ * a bitwise AND against `tutor_ranking.free_hours_mask`, which the nightly job
+ * computes. Counting the bits two integers share is not computing a ranking.
  */
 
-import { and, asc, desc, eq, gte, isNull, lte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, sql, type SQL } from 'drizzle-orm';
 
 import { getAvailability } from '@/lib/availability';
+import { MATCH_TIERS, type CurriculumPosition, type MatchTier } from '@/lib/curriculum/match';
+import {
+  OVERLAP_MAX_BPS,
+  OVERLAP_TARGET_HOURS,
+  OVERLAP_UNKNOWN_BPS,
+  studyWindowMaskUtc,
+} from '@/lib/ranking/overlap';
 import { BOOKABLE_TUTOR_STATUS } from '@/lib/tutors/status';
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
@@ -35,10 +52,41 @@ export const SORT_LABELS: Record<SortOption, string> = {
   sessions: 'Most sessions',
 };
 
+/**
+ * A curriculum filter from the filter bar.
+ *
+ * Any subset of the three fields; each one that is present excludes. When the
+ * whole triple is present, `includeNearMatches` decides whether a tutor who
+ * teaches the same subject at the same stage under a different board is still
+ * admitted — labelled as a near match and ranked below every exact one.
+ */
+export type CurriculumFilter = {
+  boardId?: string;
+  levelId?: string;
+  subjectId?: string;
+  /** The level's board-independent stage, needed to admit near matches. */
+  stage?: string;
+  includeNearMatches?: boolean;
+};
+
+/**
+ * Who is looking.
+ *
+ * Their declared positions decide the match tier, and their timezone decides
+ * the overlap bonus. Both are read from the session on the server — never from
+ * a query string — so nobody can rank themselves up by editing a URL.
+ */
+export type ViewerContext = {
+  timezone?: string | null;
+  positions?: readonly CurriculumPosition[];
+};
+
 export type DiscoveryFilters = {
   q?: string;
   /** Subject slug. */
   subject?: string;
+  curriculum?: CurriculumFilter;
+  viewer?: ViewerContext;
   minPriceCents?: number;
   maxPriceCents?: number;
   /** Minimum displayed rating, in thousandths of a star. */
@@ -82,6 +130,11 @@ export type FeedTutor = {
   subjectNames: string[];
   posterUrl: string | null;
   previewUrl: string | null;
+  /**
+   * 0-3 against the viewer's declared curriculum. Zero when they have declared
+   * none, which is also what an anonymous visitor sees.
+   */
+  matchTier: MatchTier;
 };
 
 /** The one visibility rule: verified profile, unsuspended account. */
@@ -89,7 +142,83 @@ function visibleTutorCondition(): SQL {
   return and(eq(tutorProfiles.status, BOOKABLE_TUTOR_STATUS), isNull(users.suspendedAt))!;
 }
 
-const FEED_COLUMNS = {
+/**
+ * The match tier, as SQL.
+ *
+ * One correlated lookup per candidate row against `tutor_curriculum`. The
+ * primary key starts with `tutor_id`, so each lookup is a prefix scan over at
+ * most fifteen rows — cheap, but paid once per visible tutor when the student
+ * clears the filter and asks to see everyone.
+ *
+ * That is affordable at this size and would not be at a hundred thousand
+ * tutors. The step when it stops being affordable is to denormalise each
+ * tutor's positions onto `tutor_ranking` as an array with a GIN index, written
+ * by the same nightly job that writes the score — not to move any of this into
+ * the request path.
+ */
+function matchTierSql(positions: readonly CurriculumPosition[]): SQL {
+  const rows = sql.join(
+    positions.map(
+      (position) =>
+        sql`(${position.boardId}::text, ${position.levelId}::text, ${position.stage}::curriculum_stage, ${position.subjectId}::uuid)`,
+    ),
+    sql`, `,
+  );
+
+  return sql`coalesce((
+    select max(case
+      when tc.board_id = p.board_id and tc.level_id = p.level_id then ${MATCH_TIERS.exact}
+      when tc.board_id = p.board_id then ${MATCH_TIERS.board}
+      when cl.stage = p.stage and tc.board_id <> 'other' and p.board_id <> 'other'
+        then ${MATCH_TIERS.stage}
+      else ${MATCH_TIERS.none}
+    end)
+    from tutor_curriculum tc
+    join curriculum_levels cl on cl.id = tc.level_id
+    join (values ${rows}) as p(board_id, level_id, stage, subject_id)
+      on p.subject_id = tc.subject_id
+    where tc.tutor_id = ${users.id}
+  ), ${MATCH_TIERS.none})`;
+}
+
+/**
+ * The timezone-overlap bonus, as SQL.
+ *
+ * `src/lib/ranking/overlap.ts` is the definition; this is the same arithmetic
+ * where the rows are. An empty mask means the tutor has published no hours, and
+ * scores the neutral midpoint rather than zero — the same "unknown is not no"
+ * rule the availability port keeps.
+ */
+function overlapBonusSql(viewerMask: number): SQL {
+  const mask = sql`coalesce(${tutorRanking.freeHoursMask}, 0)`;
+  return sql`(case
+    when ${mask} = 0 then ${OVERLAP_UNKNOWN_BPS}
+    else round(
+      least(bit_count((${mask} & ${viewerMask})::bit(32)), ${OVERLAP_TARGET_HOURS})::numeric
+        * ${OVERLAP_MAX_BPS} / ${OVERLAP_TARGET_HOURS}
+    )
+  end)`;
+}
+
+/**
+ * The viewer's own study-hours mask, or null when we do not know where they are.
+ *
+ * Null means the term is skipped entirely, not defaulted to UTC. Assuming UTC
+ * would quietly promote tutors whose evenings happen to fall in Europe for a
+ * visitor in Karachi whose timezone we simply have not learned yet — a guess
+ * dressed as a fact, which is the one thing the availability port has never
+ * been allowed to do either.
+ */
+function viewerMaskFor(viewer: ViewerContext | undefined, now = new Date()): number | null {
+  const timezone = viewer?.timezone;
+  return timezone ? studyWindowMaskUtc(timezone, now) : null;
+}
+
+function viewerPositions(viewer: ViewerContext | undefined): readonly CurriculumPosition[] {
+  return viewer?.positions ?? [];
+}
+
+const BASE_FEED_COLUMNS = {
   id: users.id,
   name: users.name,
   headline: tutorProfiles.headline,
@@ -116,9 +245,27 @@ const FEED_COLUMNS = {
   ), '{}')`,
 } as const;
 
-function baseQuery(database: DbLike) {
+/**
+ * The output alias the ordering names.
+ *
+ * Aliased rather than repeated so the correlated subquery runs once per row
+ * instead of twice — Postgres will not collapse two identical subqueries for
+ * you, and this one is in both the select list and the ORDER BY.
+ */
+const MATCH_TIER_ALIAS = 'match_tier';
+
+function feedColumns(positions: readonly CurriculumPosition[]) {
+  return {
+    ...BASE_FEED_COLUMNS,
+    matchTier: (positions.length > 0 ? matchTierSql(positions) : sql`${MATCH_TIERS.none}`)
+      .mapWith(Number)
+      .as(MATCH_TIER_ALIAS) as unknown as SQL<MatchTier>,
+  };
+}
+
+function baseQuery(database: DbLike, positions: readonly CurriculumPosition[] = []) {
   return database
-    .select(FEED_COLUMNS)
+    .select(feedColumns(positions))
     .from(tutorProfiles)
     .innerJoin(users, eq(users.id, tutorProfiles.userId))
     .leftJoin(tutorRanking, eq(tutorRanking.tutorId, tutorProfiles.userId))
@@ -195,7 +342,51 @@ function buildConditions(filters: DiscoveryFilters): SQL[] {
     conditions.push(eq(users.country, filters.country.toUpperCase()));
   }
 
+  const curriculum = curriculumCondition(filters.curriculum);
+  if (curriculum) conditions.push(curriculum);
+
   return conditions;
+}
+
+/**
+ * The curriculum filter.
+ *
+ * Every field present narrows. With the whole triple and `includeNearMatches`,
+ * a tutor also qualifies by teaching the same subject at the same stage under
+ * another board — which is what stops a student with a niche position landing
+ * on an empty page. The catch-all `other` board never near-matches: two people
+ * who both picked "not listed" have told us nothing they have in common.
+ */
+function curriculumCondition(filter: CurriculumFilter | undefined): SQL | null {
+  if (!filter) return null;
+
+  const { boardId, levelId, subjectId, stage, includeNearMatches } = filter;
+  if (!boardId && !levelId && !subjectId) return null;
+
+  const clauses: SQL[] = [];
+  const near = Boolean(includeNearMatches && boardId && stage && boardId !== 'other');
+
+  if (subjectId) clauses.push(sql`tc.subject_id = ${subjectId}::uuid`);
+
+  if (boardId && levelId && near) {
+    // Same board at any level, or the same stage on a board that is not the
+    // catch-all. The exact level is not required here; the tier orders it.
+    clauses.push(sql`(
+      tc.board_id = ${boardId}
+      or (cl.stage = ${stage}::curriculum_stage and tc.board_id <> 'other')
+    )`);
+  } else {
+    if (boardId) clauses.push(sql`tc.board_id = ${boardId}`);
+    if (levelId) clauses.push(sql`tc.level_id = ${levelId}`);
+  }
+
+  return sql`exists (
+    select 1
+    from tutor_curriculum tc
+    join curriculum_levels cl on cl.id = tc.level_id
+    where tc.tutor_id = ${users.id}
+      and ${sql.join(clauses, sql` and `)}
+  )`;
 }
 
 /**
@@ -209,20 +400,42 @@ function buildConditions(filters: DiscoveryFilters): SQL[] {
  */
 const byScore = sql`${tutorRanking.score} desc nulls last`;
 
-function orderFor(sort: SortOption) {
+/** The nightly score plus the viewer's timezone-overlap bonus, if we have one. */
+function byAdjustedScore(viewerMask: number | null): SQL {
+  if (viewerMask === null) return byScore;
+  return sql`(${tutorRanking.score} + ${overlapBonusSql(viewerMask)}) desc nulls last`;
+}
+
+/**
+ * The match tier leads every sort, not only relevance.
+ *
+ * A student who has said they sit CAIE AS Maths and then sorts by price wants
+ * the cheapest tutor *who teaches that*, not the cheapest tutor on the site.
+ * The chosen sort orders within each tier.
+ *
+ * Named by its select alias rather than repeated, so the correlated subquery
+ * runs once per row instead of twice.
+ */
+const byMatchTier = sql`${sql.identifier(MATCH_TIER_ALIAS)} desc`;
+
+function orderFor(sort: SortOption, options: { viewerMask: number | null; matched: boolean }) {
+  const adjusted = byAdjustedScore(options.viewerMask);
+  const lead: SQL[] = options.matched ? [byMatchTier] : [];
+
   switch (sort) {
     case 'price_asc':
-      return [asc(effectiveHourlyCents), byScore];
+      return [...lead, asc(effectiveHourlyCents), adjusted];
     case 'price_desc':
-      return [desc(effectiveHourlyCents), byScore];
+      return [...lead, desc(effectiveHourlyCents), adjusted];
     case 'rating':
-      return [sql`${tutorRanking.bayesianRatingMilli} desc nulls last`, byScore];
+      return [...lead, sql`${tutorRanking.bayesianRatingMilli} desc nulls last`, adjusted];
     case 'sessions':
-      return [sql`${tutorRanking.sessionCount} desc nulls last`, byScore];
+      return [...lead, sql`${tutorRanking.sessionCount} desc nulls last`, adjusted];
     case 'relevance':
     default:
-      // Relevance is the nightly score. Nothing is computed per request.
-      return [byScore, asc(users.name)];
+      // Relevance is the nightly score, adjusted only by a bit count. Nothing
+      // is recomputed per request.
+      return [...lead, adjusted, asc(users.name)];
   }
 }
 
@@ -240,14 +453,16 @@ export async function searchTutors(
   const offset = Math.max(filters.offset ?? 0, 0);
   const where = and(...buildConditions(filters))!;
 
+  const positions = viewerPositions(filters.viewer);
+  const viewerMask = viewerMaskFor(filters.viewer);
   const wantsTimeWindow = Boolean(filters.availableFromUtc && filters.availableToUtc);
 
   // Without a time filter, page in SQL. With one, the filter is not expressible
   // as a column, so take a bounded candidate set, ask the calendar, then page
   // the survivors. The bound is what stops this becoming a table scan.
-  const rows = await baseQuery(database)
+  const rows = await baseQuery(database, positions)
     .where(where)
-    .orderBy(...orderFor(filters.sort ?? 'relevance'))
+    .orderBy(...orderFor(filters.sort ?? 'relevance', { viewerMask, matched: positions.length > 0 }))
     .limit(wantsTimeWindow ? TIME_FILTER_CANDIDATE_LIMIT : limit + 1)
     .offset(wantsTimeWindow ? 0 : offset);
 
@@ -319,21 +534,72 @@ export async function railContinueWithYourTutors(
     .limit(12) as unknown as Promise<FeedTutor[]>;
 }
 
-export async function railFreeTrials(database: DbLike = defaultDb): Promise<FeedTutor[]> {
-  return baseQuery(database)
+export async function railFreeTrials(
+  database: DbLike = defaultDb,
+  viewer?: ViewerContext,
+): Promise<FeedTutor[]> {
+  return baseQuery(database, viewerPositions(viewer))
     .where(and(visibleTutorCondition(), eq(tutorProfiles.offersTrial, true))!)
-    .orderBy(byScore)
+    .orderBy(...railOrder(viewer))
     .limit(12) as unknown as Promise<FeedTutor[]>;
+}
+
+/**
+ * How every rail orders: match tier, then the score with the overlap bonus.
+ *
+ * The rails are the first thing a signed-in student sees, so they honour the
+ * same rule the feed does rather than showing a differently-ordered world.
+ */
+function railOrder(viewer: ViewerContext | undefined): SQL[] {
+  const positions = viewerPositions(viewer);
+  const adjusted = byAdjustedScore(viewerMaskFor(viewer));
+  return positions.length > 0 ? [byMatchTier, adjusted] : [adjusted];
 }
 
 /**
  * "New tutors" — the exploration slot, so new supply is not starved. Membership
  * is exactly the tutors the nightly job is still giving an exploration boost.
  */
-export async function railNewTutors(database: DbLike = defaultDb): Promise<FeedTutor[]> {
-  return baseQuery(database)
+export async function railNewTutors(
+  database: DbLike = defaultDb,
+  viewer?: ViewerContext,
+): Promise<FeedTutor[]> {
+  return baseQuery(database, viewerPositions(viewer))
     .where(and(visibleTutorCondition(), sql`coalesce(${tutorRanking.explorationBoost}, 0) > 0`)!)
+    // The exploration boost is the point of this rail, so it leads here.
     .orderBy(desc(tutorRanking.explorationBoost), byScore)
+    .limit(12) as unknown as Promise<FeedTutor[]>;
+}
+
+/**
+ * "Tutors for your class" — the rail the curriculum triple earns.
+ *
+ * Empty for a student who has not told us where they are, which is exactly
+ * right: there is nothing honest to put in it until they do.
+ */
+export async function railForYourCurriculum(
+  viewer: ViewerContext,
+  database: DbLike = defaultDb,
+): Promise<FeedTutor[]> {
+  const positions = viewerPositions(viewer);
+  if (positions.length === 0) return [];
+
+  const primary = positions[0]!;
+
+  return baseQuery(database, positions)
+    .where(
+      and(
+        visibleTutorCondition(),
+        curriculumCondition({
+          boardId: primary.boardId,
+          levelId: primary.levelId,
+          subjectId: primary.subjectId,
+          stage: primary.stage,
+          includeNearMatches: true,
+        })!,
+      )!,
+    )
+    .orderBy(...railOrder(viewer))
     .limit(12) as unknown as Promise<FeedTutor[]>;
 }
 
@@ -365,10 +631,11 @@ export async function railTopRatedInSubject(
 export async function railAvailableSoon(
   minutes = 60,
   database: DbLike = defaultDb,
+  viewer?: ViewerContext,
 ): Promise<FeedTutor[] | null> {
-  const candidates = await baseQuery(database)
+  const candidates = await baseQuery(database, viewerPositions(viewer))
     .where(visibleTutorCondition())
-    .orderBy(byScore)
+    .orderBy(...railOrder(viewer))
     .limit(60);
 
   const free = await getAvailability().tutorsFreeWithin(

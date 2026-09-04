@@ -27,7 +27,9 @@ import {
   users,
   videos,
 } from '@/db/schema';
+import { curriculumContextFor, getTutorCurriculum, MAX_TUTOR_CURRICULUM } from '@/db/curriculum';
 import { loadWizardSnapshot } from '@/db/tutors';
+import { TutorPositions } from '@/components/curriculum/tutor-positions';
 import { requireRole } from '@/lib/auth/guards';
 import { findStep, wizardProgress } from '@/lib/tutors/wizard';
 
@@ -38,7 +40,7 @@ export default async function WizardStepPage({
   searchParams,
 }: {
   params: Promise<{ step: string }>;
-  searchParams: Promise<{ error?: string; saved?: string }>;
+  searchParams: Promise<{ error?: string; saved?: string; curriculumError?: string }>;
 }) {
   const { step: slug } = await params;
   const step = findStep(slug);
@@ -48,7 +50,7 @@ export default async function WizardStepPage({
   const snapshot = await loadWizardSnapshot(user.id);
   if (!snapshot) redirect('/tutor');
 
-  const { error, saved } = await searchParams;
+  const { error, saved, curriculumError } = await searchParams;
   const shell = { step, error, saved: saved === '1' };
 
   switch (step.slug) {
@@ -124,9 +126,9 @@ export default async function WizardStepPage({
     }
 
     case 'subjects': {
-      const [allSubjects, chosen] = await Promise.all([
+      const [allSubjects, chosen, context, positions] = await Promise.all([
         db
-          .select({ id: subjects.id, name: subjects.name })
+          .select({ id: subjects.id, slug: subjects.slug, name: subjects.name })
           .from(subjects)
           .orderBy(asc(subjects.sortOrder), asc(subjects.name)),
         db
@@ -137,11 +139,37 @@ export default async function WizardStepPage({
           })
           .from(tutorSubjects)
           .where(eq(tutorSubjects.tutorId, user.id)),
+        curriculumContextFor(user.id, null),
+        getTutorCurriculum(user.id),
       ]);
+
+      // Only the subjects already saved: a board and class have to be *for*
+      // something, and offering a subject the tutor has not claimed would let
+      // the two lists tell a student different stories.
+      const declaredSubjectIds = new Set(chosen.map((row) => row.subjectId));
+      const declaredSubjects = allSubjects.filter((subject) => declaredSubjectIds.has(subject.id));
 
       return (
         <StepShell {...shell}>
-          <SubjectsStep subjects={allSubjects} chosen={chosen} />
+          <div className="flex flex-col gap-8">
+            <SubjectsStep subjects={allSubjects} chosen={chosen} />
+
+            <section className="flex flex-col gap-3 border-t border-border pt-6">
+              <h2 className="text-sm font-semibold">Boards and classes</h2>
+              <TutorPositions
+                boards={context.boards}
+                subjects={declaredSubjects}
+                positions={positions.map((position) => ({
+                  boardId: position.boardId,
+                  levelId: position.levelId,
+                  subjectSlug: position.subjectSlug,
+                }))}
+                max={MAX_TUTOR_CURRICULUM}
+                returnTo="/tutor/onboarding/subjects"
+                error={curriculumError ?? null}
+              />
+            </section>
+          </div>
         </StepShell>
       );
     }

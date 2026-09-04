@@ -110,6 +110,7 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm settle` | Release escrow on sessions past their dispute window. `--at <iso>` runs it as if it were then; `--dry-run` lists what it would touch |
 | `pnpm prove:booking` | Fire N parallel bookings at one slot and print the result. `--clients 4` |
 | `pnpm prove:commission` | What commission a booking between two people would carry right now |
+| `pnpm prove:curriculum` | Show the database refusing a class from the wrong board, and a second primary position |
 | `pnpm measure:regions` | Median latency to each candidate media region. **Run it from the market** |
 
 ---
@@ -151,6 +152,44 @@ calendar. The port still answers three ways rather than two: `unknown` now means
 *their week is full*. The first deserves silence on a card, the second an honest
 "nothing free" — a wrong "Next free: Today 6:30 PM" costs more trust than a
 missing one.
+
+### Curriculum: board, class, subject
+
+A subject on its own is too coarse to match on. "Maths" is the same word for a
+Year 9 Punjab Board student and an IB Diploma one. A curriculum position is
+three fields, and a class belongs to its board — an AS Level under CBSE is not
+a validation error, it is a row Postgres refuses to store, because both
+declaration tables carry a composite foreign key onto
+`curriculum_levels (board_id, id)`. `pnpm prove:curriculum` demonstrates it.
+
+Matching is a **tier**, not a percentage, because the differences are
+categorical:
+
+| Tier | |
+|---|---|
+| 3 | Same board, class and subject |
+| 2 | Same board and subject, another class |
+| 1 | Same subject at the same rung, another board |
+| 0 | No relationship |
+
+The tier is a **leading sort key**, so an exact match outweighs a rating: a 4.6
+tutor who teaches the student's exact syllabus ranks above a 4.9 who does not.
+A weight could always be out-argued by a big enough rating gap; a key cannot.
+Board sits above class because a tutor who knows the syllabus can adjust a year,
+and one who knows the year but not the syllabus cannot.
+
+Below the tier, the order is the nightly score plus a **timezone-overlap
+bonus**: the nightly job writes a 24-bit mask of the UTC hours each tutor is
+typically free, and the request path ANDs it with the viewer's own reasonable
+study hours and counts the bits. A bitwise AND and a popcount is not computing
+a ranking. If we do not know where the viewer is, the term is skipped rather
+than defaulted to UTC.
+
+The board list is **shaped by country, never filtered by it** — a student in
+Lahore meets CAIE, Edexcel, Punjab and Federal first and does not scroll past
+CBSE to find them. Boards and classes are seeded and then owned by admin at
+`/admin/curriculum`; nothing there deletes, because a board somebody declared
+against cannot simply vanish.
 
 ## How a lesson runs
 
@@ -468,6 +507,9 @@ These come from `SPEC.md` §13 and are not negotiable:
 8. Double-booking is impossible at the database level — a partial unique index
    on `(tutor_id, start_at_utc)` over live statuses, plus a transaction wrapping
    the slot check, the debit and the insert.
+9. A class belongs to its board at the database level — a composite foreign key
+   onto `curriculum_levels (board_id, id)`, so an AS Level under CBSE cannot be
+   stored whatever the app does. `pnpm prove:curriculum`.
 
 ---
 
@@ -478,6 +520,8 @@ src/
   app/                  routes — home, auth, dashboard, tutor, admin, api
     tutor/onboarding/   the ten-step wizard and its server actions
     admin/verification/ the review queue and the approve / reject screen
+    admin/curriculum/   boards and classes, seeded then owned by admin
+    settings/curriculum a student's own classes
     api/files/          private objects, behind a 60-second signature
     api/uploads/        signed direct uploads (development stand-in for R2)
     api/cron/           ranking, reconciliation and settlement, on a schedule
@@ -492,6 +536,7 @@ src/
   db/
     schema.ts           the whole schema from SPEC.md §12
     ledger.ts           the only writer of balance columns; reconciliation
+    curriculum.ts       boards, classes, and who declares what
     discovery.ts        the feed, search, filters and the rails
     ranking.ts          the nightly ranking job
     bookings.ts         creating, moving and cancelling, in one transaction
@@ -509,6 +554,8 @@ src/
     auth/               password policy, roles, server-side guards
     bookings/           the state machine, slot holds, reschedule rules
     availability/       the scheduling engine, and the port discovery reads
+    curriculum/         boards, match tiers, and the credential-relevance flag
+    geo/                a timezone-to-country guess, used only to order a list
     livekit/            room names and access tokens
     messaging/          contact-info masking, response-time medians
     reviews/            who may review, and what the stars add up to
@@ -516,7 +563,7 @@ src/
     trials/             the free-trial rules and their abuse guards
     money/              cents, pricing, commission, outcomes, ledger drafts, packs, payouts
     payments/           the PaymentProvider interface and the mock
-    ranking/            the §4 score, pure and tested
+    ranking/            the §4 score and the timezone-overlap term, pure and tested
     storage/            object stores, keys, signed URLs, direct uploads
     tutors/             profile status machine, wizard model, visibility, badges
     video/              intro-video pipeline: probe, renditions, thumbnails

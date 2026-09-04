@@ -28,6 +28,7 @@ import { heldSlotsFor, liveHoldsFor } from '@/db/bookings';
 import { isFollowing, followerCount } from '@/db/follows';
 import { ratingSummaryFor, reviewsForTutor } from '@/db/reviews';
 import { pairHasHadTrial } from '@/db/trials';
+import { getStudentCurriculum, getTutorCurriculum, toPosition } from '@/db/curriculum';
 import { loadTutorDossier } from '@/db/tutors';
 import { currentUser } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
@@ -53,11 +54,12 @@ export default async function TutorProfilePage({
   searchParams: Promise<{ mode?: string; duration?: string; error?: string; at?: string }>;
 }) {
   const { tutorId } = await params;
-  const [tutor, viewer, jar, query] = await Promise.all([
+  const [tutor, viewer, jar, query, positions] = await Promise.all([
     loadTutorDossier(tutorId),
     currentUser(),
     cookies(),
     searchParams,
+    getTutorCurriculum(tutorId),
   ]);
 
   if (!tutor) notFound();
@@ -65,6 +67,13 @@ export default async function TutorProfilePage({
 
   const isPreview = !isPubliclyVisible(tutor);
   const problem = bookabilityProblem(tutor);
+
+  // Which of this tutor's positions are the viewer's own, so the profile can
+  // say "this is your class" rather than leaving them to compare two lists.
+  const viewerPositions = viewer ? (await getStudentCurriculum(viewer.id)).map(toPosition) : [];
+  const viewerLevels = new Set(
+    viewerPositions.map((position) => `${position.levelId}:${position.subjectId}`),
+  );
 
   // The viewer's timezone: their account if they have one, the cookie the
   // browser set otherwise, and UTC only if neither is available.
@@ -210,6 +219,33 @@ export default async function TutorProfilePage({
             <p className="whitespace-pre-wrap text-sm">{tutor.bio}</p>
           </CardContent>
         </Card>
+
+        {positions.length > 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Boards and classes</CardTitle>
+              <CardDescription>
+                The syllabus matters as much as the subject, so this is what {tutor.name.split(' ')[0]}{' '}
+                actually teaches.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ul className="flex flex-wrap gap-2">
+                {positions.map((position) => {
+                  const mine = viewerLevels.has(`${position.levelId}:${position.subjectId}`);
+                  return (
+                    <li key={`${position.boardId}:${position.levelId}:${position.subjectId}`}>
+                      <Badge variant={mine ? 'success' : 'secondary'} data-testid="tutor-position">
+                        {position.boardName} · {position.levelName} · {position.subjectName}
+                        {mine ? ' — your class' : ''}
+                      </Badge>
+                    </li>
+                  );
+                })}
+              </ul>
+            </CardContent>
+          </Card>
+        ) : null}
 
         <div className="grid gap-6 sm:grid-cols-2">
           <Card>

@@ -7,6 +7,11 @@
  *
  * Document links are minted fresh on every page load and expire after 60
  * seconds, so a URL copied out of the page is useless a minute later.
+ *
+ * Where the claims and the documents look unrelated, the screen says so — as a
+ * flag next to the claim, never as a decision. A physics graduate teaching
+ * GCSE English is a real tutor; what an admin needs is to be told where to
+ * look, not to be told the answer.
  */
 
 import Link from 'next/link';
@@ -18,7 +23,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
+import { getTutorCurriculum } from '@/db/curriculum';
 import { loadTutorDossier } from '@/db/tutors';
+import { unsupportedSubjects } from '@/lib/curriculum/credential-match';
 import { requireRole } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
 import { objectUrl, SIGNED_URL_TTL_SECONDS } from '@/lib/storage';
@@ -52,6 +59,10 @@ export default async function VerificationReviewPage({
 
   const tutor = await loadTutorDossier(tutorId);
   if (!tutor) notFound();
+
+  const positions = await getTutorCurriculum(tutorId);
+  const flags = unsupportedSubjects(tutor.subjects, tutor.credentials);
+  const flagged = new Set(flags.map((flag) => flag.subjectSlug));
 
   const decidable = tutor.status === 'pending_review';
 
@@ -124,8 +135,28 @@ export default async function VerificationReviewPage({
                   ) : (
                     <ul className="flex flex-col gap-0.5">
                       {tutor.subjects.map((subject) => (
-                        <li key={subject.name}>
+                        <li key={subject.slug}>
                           {subject.name} · {subject.level.replace('_', ' ')} · {subject.yearsExperience} yr
+                          {flagged.has(subject.slug) ? (
+                            <Badge variant="warning" className="ml-2 text-[10px]" data-testid="credential-flag">
+                              Check this
+                            </Badge>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Claim>
+                <Claim label="Boards and classes">
+                  {positions.length === 0 ? (
+                    <span className="text-muted-foreground">
+                      None declared — this tutor will not be matched to a student&rsquo;s curriculum.
+                    </span>
+                  ) : (
+                    <ul className="flex flex-col gap-0.5">
+                      {positions.map((position) => (
+                        <li key={`${position.boardId}:${position.levelId}:${position.subjectId}`}>
+                          {position.boardName} · {position.levelName} · {position.subjectName}
                         </li>
                       ))}
                     </ul>
@@ -164,6 +195,28 @@ export default async function VerificationReviewPage({
           {/* ---------------------------------------------------------------- */}
           {/* The documents backing them                                       */}
           {/* ---------------------------------------------------------------- */}
+          {flags.length > 0 ? (
+            <Card className="border-[var(--warning)]" data-testid="credential-flags">
+              <CardHeader>
+                <CardTitle as="h2">Worth asking about</CardTitle>
+                <CardDescription>
+                  This is a prompt, not a verdict. Plenty of good tutors teach outside the field they
+                  studied — but if the documents say nothing about a subject, it is worth knowing why
+                  before approving.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ul className="flex flex-col gap-2 text-sm">
+                  {flags.map((flag) => (
+                    <li key={flag.subjectSlug}>
+                      <strong className="font-medium">{flag.subjectName}</strong> — {flag.reason}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader>
               <CardTitle>Documents</CardTitle>

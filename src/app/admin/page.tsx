@@ -170,6 +170,11 @@ export default async function AdminPage() {
                       Packs
                     </Button>
                   </Link>
+                  <Link href="/admin/curriculum">
+                    <Button size="sm" variant="outline">
+                      Curriculum
+                    </Button>
+                  </Link>
                 </div>
               </div>
             </CardHeader>
