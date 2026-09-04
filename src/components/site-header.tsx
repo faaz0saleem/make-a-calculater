@@ -1,6 +1,7 @@
 import Link from 'next/link';
 
 import { auth, signOut } from '@/auth';
+import { unreadCount } from '@/db/notifications';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { defaultLandingPath } from '@/lib/auth/roles';
@@ -8,6 +9,7 @@ import { defaultLandingPath } from '@/lib/auth/roles';
 export async function SiteHeader() {
   const session = await auth();
   const roles = session?.user?.roles ?? [];
+  const unread = session?.user?.id ? await unreadCount(session.user.id) : 0;
 
   return (
     <header className="border-b border-border">
@@ -27,6 +29,26 @@ export async function SiteHeader() {
                   {role}
                 </Badge>
               ))}
+              <Link href="/messages" className="hidden sm:block">
+                <Button size="sm" variant="ghost">
+                  Messages
+                </Button>
+              </Link>
+              <Link
+                href="/notifications"
+                aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
+                className="relative inline-flex min-h-11 items-center rounded-md px-2 text-lg hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <span aria-hidden>🔔</span>
+                {unread > 0 ? (
+                  <span
+                    aria-hidden
+                    className="absolute -right-0.5 top-1 rounded-full bg-primary px-1.5 text-[11px] font-medium leading-4 text-primary-foreground"
+                  >
+                    {unread > 9 ? '9+' : unread}
+                  </span>
+                ) : null}
+              </Link>
               <Link href={defaultLandingPath(roles)}>
                 <Button size="sm" variant="outline">
                   Dashboard

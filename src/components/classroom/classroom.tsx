@@ -29,6 +29,7 @@ import {
 
 import { requestSessionToken } from '@/app/sessions/[bookingId]/actions';
 import { PreCallCheck } from '@/components/classroom/pre-call-check';
+import { TrialConversion, type TrialConversionProps } from '@/components/trials/trial-conversion';
 import { formatDuration, useTick } from '@/components/classroom/session-clock';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -55,6 +56,8 @@ export type ClassroomProps = {
   joinOpensUtcIso: string;
   joinClosesUtcIso: string;
   configured: boolean;
+  /** Only for a student who has just taken a free trial (SPEC.md §6). */
+  conversion: TrialConversionProps | null;
 };
 
 export function Classroom(props: ClassroomProps) {
@@ -276,17 +279,23 @@ export function Classroom(props: ClassroomProps) {
   if (stage === 'ended') {
     return (
       <Shell {...props}>
-        <div className="flex flex-col gap-4">
-          <h2 className="text-lg font-semibold">Session ended</h2>
-          <p className="text-sm text-muted-foreground">
-            {props.isTrial
-              ? 'That was a free trial, so no credits moved.'
-              : `Your ${formatCents(props.priceCents)} is held until this time tomorrow, in case anything went wrong. It settles automatically after that.`}
-          </p>
-          <div className="flex gap-3">
-            <Link href={props.role === 'tutor' ? '/tutor' : '/dashboard'}>
-              <Button>Back to your sessions</Button>
-            </Link>
+        <div className="flex flex-col gap-5">
+          {/* After a trial, the next booking is the point of the screen — so it
+              comes first and everything else is a footnote (SPEC.md §6). */}
+          {props.conversion ? <TrialConversion {...props.conversion} /> : null}
+
+          <div className="flex flex-col gap-3">
+            <h2 className="text-lg font-semibold">Session ended</h2>
+            <p className="text-sm text-muted-foreground">
+              {props.isTrial
+                ? 'That was a free trial, so no credits moved.'
+                : `Your ${formatCents(props.priceCents)} is held until this time tomorrow, in case anything went wrong. It settles automatically after that.`}
+            </p>
+            <div className="flex gap-3">
+              <Link href={props.role === 'tutor' ? '/tutor' : '/dashboard'}>
+                <Button variant={props.conversion ? 'outline' : 'default'}>Back to your sessions</Button>
+              </Link>
+            </div>
           </div>
         </div>
       </Shell>

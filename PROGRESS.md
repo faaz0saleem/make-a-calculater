@@ -10,9 +10,141 @@ Phases follow `SPEC.md` §15.
 | 3A — availability engine | **Done** |
 | 3B — credits and booking | **Not started** — see the note below |
 | 4 — LiveKit calls + session state machine + settlement | **Done** |
-| 5 — trials, messaging, reviews, follows | Not started |
+| 5 — trials, messaging, reviews, follows | **Done** |
 | 6 — payouts + admin dashboard + audit log | Not started |
 | 7 — real payment provider, notifications, SEO, analytics | Not started |
+
+---
+
+## Phase 5 — done
+
+### Free trials
+
+A trial is a booking with `is_trial = true`, priced at zero, with no escrow row
+and no ledger entries. It holds the tutor's calendar, so it goes through the
+same availability engine and the same partial unique index as a paid session,
+asking for its own length plus the five-minute buffer SPEC.md §6 names — which
+is what lets a 15-minute trial sit in a gap an hour-long session could not.
+
+**One per pair, for life, is the database's job.** `one_trial_per_pair` was
+already in the Phase 0 schema; `requestTrial` catches the constraint violation
+and turns it into a sentence rather than a 500. The guards that produce a decent
+error message first — three outstanding, five a week, the tutor's own cap — are
+pure, in `src/lib/trials/rules.ts`, with sixteen tests.
+
+**Expiry is read-time.** Twelve hours after the request or two hours before the
+slot, whichever comes first. Every read of pending requests clears the dead ones
+first, so the counts a student is judged by are never inflated by requests that
+timed out overnight, and a tutor cannot accept from a stale tab. Each expiry
+goes through `transitionBooking` one row at a time: a bulk `UPDATE` would have
+been the only status write in the codebase that skipped the state machine.
+
+**The conversion moment** is the loudest thing on the screen when a trial ends —
+the tutor's next three genuinely free hours from the Phase 3 engine, above the
+"session ended" text rather than below it. It also waits on the dashboard for a
+week, because people close tabs, and disappears as soon as they book a paid
+session with that tutor.
+
+### Messaging
+
+No cold DMs: a thread is created by a booking or a trial request and by nothing
+else. Bodies are masked **on write** — emails (including `name (at) gmail dot
+com`), phone numbers however they are punctuated, messaging-app handles, and
+wa.me / t.me style links. Ordinary links are left alone, because this is a
+marketplace for teaching and blanket link-stripping would break the teaching.
+
+The masker is honest about its limits: a number spelled out in words gets
+through, and there is a test that says so. That is why `body_raw` exists, and
+why exactly one module reads it — `src/db/moderation.ts`, which demands an admin
+inside the function rather than at the route, so a future route cannot forget.
+`e2e/social.spec.ts` sends a message with a phone number and an email, then
+loads the thread as the tutor and asserts neither appears anywhere in the HTML.
+
+Attachments up to 25 MB take the Phase 2 direct-upload path into the private
+bucket; `/api/files` now authorises them by thread membership.
+
+### Response time, and the two ranking terms that read nothing before
+
+`response_median_seconds` had been a column nothing wrote since Phase 0, which
+meant the "Responds in <1h" badge never appeared and the `response_speed` term
+scored every tutor at the neutral midpoint. It is now computed from real
+messages: the median gap between a student writing and the tutor's first reply,
+with a burst of messages counting as one wait and a burst of replies as one
+answer. Silence past a day counts as a reply at the ceiling — otherwise ignoring
+somebody would score better than answering slowly.
+
+`trial_to_paid_rate` had the same problem from the other end: the query was
+right, but no trial had ever been taken. The seed now plants trials that
+happened, two in three of which led to a paid session with the same tutor.
+
+After both: **27 of 41 ranked tutors have a real response-speed score and 17 a
+real trial-conversion score**, against zero before. `runNightlyRanking` refreshes
+the medians and then scores, in one function, so a new caller cannot rank
+against a week-old median.
+
+### Reviews
+
+Only from a student, only on a paid session that actually happened. "Actually
+happened" is now a fact rather than an inference: `bookings.completed_at` is
+stamped when LiveKit says the room emptied and `classifyOutcome` — the same pure
+classifier settlement uses — agrees both people were there for at least half the
+booked time. Settlement stamps it too, for a session nobody closed at the time.
+That also fixed something quieter: a booking used to read "in progress" for the
+whole day between the lesson ending and the money moving.
+
+The displayed rating is the Bayesian average imported from the ranking module,
+not re-derived, so the number on a profile and the ordering of the feed cannot
+disagree. The raw distribution sits beside it as a breakdown bar. An admin can
+hide a review with a reason; that writes an `admin_audit` row and takes the
+review out of both the profile and the rating.
+
+### Follows
+
+A follow is one row. When a tutor publishes genuinely *more* time — a wider
+weekly schedule, or a one-off extra window — their followers get an in-app
+notification. A shuffled week is not news, so the weekly save compares published
+minutes before and after; only an increase notifies. One notification per tutor
+per day per follower, held by a unique index on the dedupe key.
+
+The `notifications` table is new and not in SPEC.md §12 — see DECISIONS_NEEDED.md
+item 5. Email templates are Phase 7; these rows are what they will read.
+
+### What the tests prove
+
+`e2e/social.spec.ts`, ten cases, is the phase's acceptance line: a trial
+requested from the profile, accepted by the tutor, with the booking asserted at
+zero credits and zero ledger rows; a second trial with the same tutor refused
+before the student can ask for it; the conversion CTA with three real slots; the
+masking round trip from both sides; a non-participant getting a 404; a review
+written, shown on the profile, hidden by an admin with an audit row; and a
+follower hearing about new hours.
+
+Lighthouse on the built app: feed **99 / 100**, tutor profile **98 / 100**,
+dashboard **98 / 100**, messages **99 / 100**, one conversation **99 / 100**,
+notifications **98 / 100** (performance / accessibility). Getting the profile
+back to 100 meant giving the star rating `role="img"` — without a role a screen
+reader is required to ignore `aria-label`, so the rating was five unlabelled
+glyphs — and adding a real `--warning` token instead of a hard-coded fallback.
+The 360px suite now covers the conversation list and a thread.
+
+### One test moved, and why
+
+`the verified tutor is now in the feed` used to assert a newly verified tutor
+appeared in the first screen of the ranked grid. With response speed and trial
+conversion carrying real numbers, proven tutors now score above the neutral
+midpoint and a brand-new one sits 26th of 41 — one scroll into an infinite feed
+rather than on its first screen. That is the ranking working, not breaking, so
+the test now asserts what SPEC.md §4 actually promises: the exploration slot.
+It checks the **New tutors** rail, and that the tutor is genuinely in
+`tutor_ranking` rather than only in a rail.
+
+### Still owed
+
+Phase 3 checkpoint B. There is no `PaymentProvider`, no credit purchase, and no
+paid booking creation — so the conversion screen's call to action opens the
+tutor's calendar instead of taking payment, and says so rather than pretending.
+Trials proved out the booking-creation path (availability check, partial unique
+index, state machine); what is missing is the money half.
 
 ---
 

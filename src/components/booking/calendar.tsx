@@ -6,7 +6,9 @@
  * they mean the same moment. Days are grouped by the student's calendar day,
  * because that is the one they are planning around.
  *
- * Booking itself is checkpoint B; the slots here are read-only for now.
+ * Slots are read-only unless the page hands in a `select` action — which today
+ * is the free-trial request (SPEC.md §6). Paying for a session with credits is
+ * checkpoint B of phase 3 and is still owed.
  */
 
 import Link from 'next/link';
@@ -21,16 +23,35 @@ export type CalendarSlot = {
   durationMinutes: number;
 };
 
+export type CalendarMode = 30 | 60 | 'trial';
+
 export type CalendarProps = {
   slots: CalendarSlot[] | null;
   studentTimezone: string;
   tutorTimezone: string;
-  durationMinutes: 30 | 60;
+  mode: CalendarMode;
+  /** What the chosen mode costs. Zero for a trial. */
   priceCents: number;
-  /** Links back to this page with the other duration selected. */
-  durationHref: (minutes: 30 | 60) => string;
+  /** How long the chosen mode runs for. */
+  durationMinutes: number;
+  /** Links back to this page with another mode selected. */
+  modeHref: (mode: CalendarMode) => string;
+  /** Offered as a chip when the tutor has trials on and this student may take one. */
+  trialMinutes: number | null;
   bookable: boolean;
   notBookableReason?: string;
+  /**
+   * Makes each slot a button. Given only when the viewer can actually act on
+   * it — a signed-out visitor gets the same calendar, read-only, rather than a
+   * button that turns into a sign-in wall.
+   */
+  select?: {
+    action: (formData: FormData) => void | Promise<void>;
+    label: string;
+    note: string;
+  };
+  /** Shown above the grid when the last attempt failed. */
+  error?: string | null;
 };
 
 type Day = { key: string; label: string; slots: CalendarSlot[] };
@@ -65,20 +86,25 @@ export function BookingCalendar({
   slots,
   studentTimezone,
   tutorTimezone,
-  durationMinutes,
+  mode,
   priceCents,
-  durationHref,
+  durationMinutes,
+  modeHref,
+  trialMinutes,
   bookable,
   notBookableReason,
+  select,
+  error,
 }: CalendarProps) {
   const sameZone = studentTimezone === tutorTimezone;
+  const modes: CalendarMode[] = trialMinutes ? ['trial', 30, 60] : [30, 60];
 
   return (
     <section className="flex flex-col gap-4" aria-labelledby="calendar-heading">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 id="calendar-heading" className="text-lg font-semibold tracking-tight">
-            Book a session
+            {mode === 'trial' ? 'Book your free trial' : 'Book a session'}
           </h2>
           <p className="text-sm text-muted-foreground">
             Times shown in <strong>{studentTimezone}</strong>
@@ -86,25 +112,33 @@ export function BookingCalendar({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          {([30, 60] as const).map((minutes) => (
+        <div className="flex flex-wrap items-center gap-2">
+          {modes.map((option) => (
             <Link
-              key={minutes}
-              href={durationHref(minutes)}
-              aria-current={minutes === durationMinutes ? 'true' : undefined}
+              key={String(option)}
+              href={modeHref(option)}
+              aria-current={option === mode ? 'true' : undefined}
               className={cn(
                 'rounded-full border px-3 py-1.5 text-sm transition-colors',
-                minutes === durationMinutes
+                option === mode
                   ? 'border-transparent bg-primary text-primary-foreground'
                   : 'border-border hover:bg-secondary',
               )}
             >
-              {minutes} min
+              {option === 'trial' ? `Free trial · ${trialMinutes} min` : `${option} min`}
             </Link>
           ))}
-          <Badge variant="secondary">{formatCents(priceCents)}</Badge>
+          <Badge variant={mode === 'trial' ? 'success' : 'secondary'}>
+            {mode === 'trial' ? 'Free' : formatCents(priceCents)}
+          </Badge>
         </div>
       </div>
+
+      {error ? (
+        <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
 
       {!bookable ? (
         <p className="rounded-lg border border-dashed border-border px-4 py-6 text-sm text-muted-foreground">
@@ -117,7 +151,7 @@ export function BookingCalendar({
       ) : slots.length === 0 ? (
         <p className="rounded-lg border border-dashed border-border px-4 py-6 text-sm text-muted-foreground">
           Nothing free in the next few weeks for a {durationMinutes}-minute session.
-          {durationMinutes === 60 ? ' A 30-minute session may still fit.' : ''}
+          {mode === 60 ? ' A 30-minute session may still fit.' : ''}
         </p>
       ) : (
         <div className="flex flex-col gap-4">
@@ -125,24 +159,43 @@ export function BookingCalendar({
             <div key={day.key} className="flex flex-col gap-2">
               <h3 className="text-sm font-medium">{day.label}</h3>
               <ul className="flex flex-wrap gap-2">
-                {day.slots.map((slot) => (
-                  <li key={slot.startUtc.toISOString()}>
-                    <span
-                      data-testid="calendar-slot"
-                      data-start={slot.startUtc.toISOString()}
-                      className="flex min-w-20 flex-col items-center rounded-md border border-border px-3 py-1.5 text-sm"
-                    >
-                      <span className="font-medium tabular-nums">
-                        {formatClock(slot.startUtc, studentTimezone)}
-                      </span>
-                      {sameZone ? null : (
-                        <span className="text-[11px] text-muted-foreground tabular-nums">
-                          {formatClock(slot.startUtc, tutorTimezone)} for them
+                {day.slots.map((slot) => {
+                  const time = formatClock(slot.startUtc, studentTimezone);
+                  const theirTime = sameZone ? null : (
+                    <span className="text-[11px] text-muted-foreground tabular-nums">
+                      {formatClock(slot.startUtc, tutorTimezone)} for them
+                    </span>
+                  );
+
+                  return (
+                    <li key={slot.startUtc.toISOString()}>
+                      {select ? (
+                        <form action={select.action}>
+                          <input type="hidden" name="startUtc" value={slot.startUtc.toISOString()} />
+                          <button
+                            type="submit"
+                            data-testid="calendar-slot"
+                            data-start={slot.startUtc.toISOString()}
+                            aria-label={`${select.label} at ${time}`}
+                            className="flex min-h-11 min-w-20 flex-col items-center justify-center rounded-md border border-border px-3 py-1.5 text-sm transition-colors hover:border-primary hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                          >
+                            <span className="font-medium tabular-nums">{time}</span>
+                            {theirTime}
+                          </button>
+                        </form>
+                      ) : (
+                        <span
+                          data-testid="calendar-slot"
+                          data-start={slot.startUtc.toISOString()}
+                          className="flex min-w-20 flex-col items-center rounded-md border border-border px-3 py-1.5 text-sm"
+                        >
+                          <span className="font-medium tabular-nums">{time}</span>
+                          {theirTime}
                         </span>
                       )}
-                    </span>
-                  </li>
-                ))}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}
@@ -150,9 +203,11 @@ export function BookingCalendar({
       )}
 
       <p className="text-xs text-muted-foreground">
-        Choosing a slot and paying with credits arrives with booking. The calendar above is live: it already
-        subtracts existing sessions, the tutor&rsquo;s buffer between them, their daily cap, and any time they
-        have blocked off.
+        {select
+          ? select.note
+          : 'Choosing a slot and paying with credits arrives with booking.'}{' '}
+        The calendar above is live: it already subtracts existing sessions, the tutor&rsquo;s buffer between
+        them, their daily cap, and any time they have blocked off.
       </p>
     </section>
   );

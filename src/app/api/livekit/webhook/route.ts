@@ -11,7 +11,7 @@
 
 import { WebhookReceiver } from 'livekit-server-sdk';
 
-import { markInProgressIfNeeded, recordSessionEvent } from '@/db/sessions';
+import { completeIfAttended, markInProgressIfNeeded, recordSessionEvent } from '@/db/sessions';
 import { bookingIdFromRoom, liveKitConfig } from '@/lib/livekit/config';
 import type { SessionEventKind } from '@/lib/sessions/attendance';
 
@@ -77,6 +77,13 @@ export async function POST(request: Request) {
     // Somebody actually arrived, so the booking is under way.
     if (inserted && kind === 'participant_joined') {
       await markInProgressIfNeeded(bookingId);
+    }
+
+    // The room emptied. If both of them were there for long enough, close the
+    // booking now rather than leaving it "in progress" until settlement runs a
+    // day later — that stamp is also what lets the student write a review.
+    if (inserted && kind === 'room_finished') {
+      await completeIfAttended(bookingId, atUtc);
     }
 
     return Response.json({ ok: true, recorded: inserted });

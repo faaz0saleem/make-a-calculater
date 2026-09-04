@@ -186,6 +186,8 @@ export type TutorDossier = {
   commissionBps: number;
   offersTrial: boolean;
   trialMinutes: number;
+  /** Median first reply, or null when nobody has messaged them yet. */
+  responseMedianSeconds: number | null;
   submittedAt: Date | null;
   verifiedAt: Date | null;
   rejectionReason: string | null;
@@ -246,6 +248,7 @@ export async function loadTutorDossier(
       commissionBps: tutorProfiles.commissionBps,
       offersTrial: tutorProfiles.offersTrial,
       trialMinutes: tutorProfiles.trialMinutes,
+      responseMedianSeconds: tutorProfiles.responseMedianSeconds,
       submittedAt: tutorProfiles.submittedAt,
       verifiedAt: tutorProfiles.verifiedAt,
       rejectionReason: tutorProfiles.rejectionReason,
@@ -325,6 +328,7 @@ export async function loadTutorDossier(
     commissionBps: row.commissionBps,
     offersTrial: row.offersTrial,
     trialMinutes: row.trialMinutes,
+    responseMedianSeconds: row.responseMedianSeconds,
     submittedAt: row.submittedAt,
     verifiedAt: row.verifiedAt,
     rejectionReason: row.rejectionReason,

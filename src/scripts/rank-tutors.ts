@@ -7,10 +7,10 @@
 
 import './bootstrap';
 
-import { formatRankingRun, recomputeTutorRanking } from '@/db/ranking';
+import { formatRankingRun, runNightlyRanking } from '@/db/ranking';
 
 async function main() {
-  const run = await recomputeTutorRanking();
+  const run = await runNightlyRanking();
   console.log(formatRankingRun(run));
   process.exit(0);
 }

@@ -10,11 +10,14 @@ import { eq } from 'drizzle-orm';
 import { notFound } from 'next/navigation';
 
 import { Classroom } from '@/components/classroom/classroom';
+import type { ConversionSlot } from '@/components/trials/trial-conversion';
 import { db } from '@/db/client';
-import { bookings, users } from '@/db/schema';
+import { bookings, tutorProfiles, users } from '@/db/schema';
 import { requireUser } from '@/lib/auth/guards';
+import { getAvailability } from '@/lib/availability';
 import { isLiveKitConfigured } from '@/lib/livekit/config';
 import { sessionWindow } from '@/lib/sessions/window';
+import { formatInTimeZone } from '@/lib/time';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Session' };
@@ -34,9 +37,12 @@ export default async function SessionPage({ params }: { params: Promise<{ bookin
       isTrial: bookings.isTrial,
       priceCents: bookings.priceCents,
       studentName: users.name,
+      hourlyCents: tutorProfiles.hourlyCents,
+      halfHourCents: tutorProfiles.halfHourCents,
     })
     .from(bookings)
     .innerJoin(users, eq(users.id, bookings.studentId))
+    .innerJoin(tutorProfiles, eq(tutorProfiles.userId, bookings.tutorId))
     .where(eq(bookings.id, bookingId))
     .limit(1);
 
@@ -55,6 +61,31 @@ export default async function SessionPage({ params }: { params: Promise<{ bookin
 
   const window = sessionWindow(booking.startAtUtc, booking.durationMinutes);
 
+  // SPEC.md §6: the moment a trial ends is the conversion moment, so the
+  // tutor's next three genuinely free hours are loaded before the student needs
+  // them — not fetched after they have already closed the tab.
+  let conversionSlots: ConversionSlot[] = [];
+  if (booking.isTrial && !isTutor) {
+    const free = await getAvailability().freeSlotsFor({
+      tutorId: booking.tutorId,
+      durationMinutes: 60,
+      fromUtc: window.endUtc,
+      toUtc: new Date(window.endUtc.getTime() + 14 * 86_400_000),
+      limit: 3,
+    });
+
+    if (free.known) {
+      conversionSlots = free.value.slice(0, 3).map((slot) => ({
+        startUtcIso: slot.startUtc.toISOString(),
+        label: formatInTimeZone(slot.startUtc, user.timezone, {
+          weekday: 'short',
+          hour: 'numeric',
+          minute: '2-digit',
+        }),
+      }));
+    }
+  }
+
   return (
     <Classroom
       bookingId={booking.id}
@@ -71,6 +102,17 @@ export default async function SessionPage({ params }: { params: Promise<{ bookin
       joinOpensUtcIso={window.joinOpensUtc.toISOString()}
       joinClosesUtcIso={window.joinClosesUtc.toISOString()}
       configured={isLiveKitConfigured()}
+      conversion={
+        booking.isTrial && !isTutor
+          ? {
+              tutorId: booking.tutorId,
+              tutorName: other?.name ?? 'your tutor',
+              hourlyCents: booking.hourlyCents,
+              halfHourCents: booking.halfHourCents,
+              slots: conversionSlots,
+            }
+          : null
+      }
     />
   );
 }

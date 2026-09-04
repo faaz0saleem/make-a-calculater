@@ -7,7 +7,10 @@
 import { and, desc, eq, gte, inArray } from 'drizzle-orm';
 import Link from 'next/link';
 
+import { answerTrial, postReviewReply } from '@/app/tutor/actions';
 import { withdrawProfile } from '@/app/tutor/onboarding/actions';
+import { TutorReviews } from '@/components/reviews/tutor-reviews';
+import { TrialRequests } from '@/components/trials/trial-requests';
 import { JoinLink } from '@/components/sessions/join-link';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
@@ -22,6 +25,8 @@ import {
 } from '@/components/ui/card';
 import { db } from '@/db/client';
 import { bookings, payouts, tutorProfiles, users } from '@/db/schema';
+import { ratingSummaryFor, reviewsForTutor } from '@/db/reviews';
+import { pendingTrialsForTutor } from '@/db/trials';
 import { loadWizardSnapshot } from '@/db/tutors';
 import { requireRole } from '@/lib/auth/guards';
 import { wizardProgress } from '@/lib/tutors/wizard';
@@ -92,6 +97,12 @@ export default async function TutorPage() {
     )
     .orderBy(bookings.startAtUtc)
     .limit(10);
+
+  const [trialRequests, ratings, reviews] = await Promise.all([
+    pendingTrialsForTutor(user.id, now),
+    ratingSummaryFor(user.id),
+    reviewsForTutor(user.id),
+  ]);
 
   const payoutHistory = await db
     .select()
@@ -174,6 +185,13 @@ export default async function TutorPage() {
             </Link>
           </p>
         ) : null}
+
+        <TrialRequests
+          requests={trialRequests}
+          timezone={user.timezone}
+          now={now}
+          action={answerTrial}
+        />
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card>
@@ -292,6 +310,12 @@ export default async function TutorPage() {
             </CardContent>
           </Card>
         </div>
+        <TutorReviews
+          summary={ratings}
+          reviews={reviews}
+          timezone={user.timezone}
+          action={postReviewReply}
+        />
       </main>
     </>
   );

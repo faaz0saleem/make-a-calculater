@@ -51,6 +51,7 @@ describe('key builders', () => {
 describe('bucketForKey', () => {
   it('puts credentials in the private bucket and everything else in the public one', () => {
     expect(bucketForKey('credentials/a/b.pdf')).toBe('private');
+    expect(bucketForKey('attachments/a/b.pdf')).toBe('private');
     expect(bucketForKey('avatars/a/b.jpg')).toBe('public');
     expect(bucketForKey('videos/a/b.mp4')).toBe('public');
   });

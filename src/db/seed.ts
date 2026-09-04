@@ -26,11 +26,13 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import { db } from './client';
 import { appendLedger, formatReconciliationReport, reconcileLedger } from './ledger';
-import { formatRankingRun, recomputeTutorRanking } from './ranking';
+import { recomputeAllResponseMedians } from './messages';
+import { formatRankingRun, runNightlyRanking } from './ranking';
+import { ensureThread } from './trials';
 import {
   availabilityRules,
   bookings,
@@ -39,6 +41,8 @@ import {
   credentials,
   follows,
   availabilityExceptions,
+  messages,
+  notifications,
   payoutMethods,
   payouts,
   reviews,
@@ -48,6 +52,7 @@ import {
   tutorProfiles,
   tutorRanking,
   tutorSubjects,
+  threads,
   users,
   videos,
 } from './schema';
@@ -65,6 +70,8 @@ import {
 import { CREDIT_PACKS, type CreditPack } from '@/lib/money/packs';
 import { resolveBookingOutcome, type Attendance, type BookingForOutcome } from '@/lib/money/outcomes';
 import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
+import { maskContactInfo } from '@/lib/messaging/masking';
+import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
 import {
   applyExceptions,
   expandWeeklyRules,
@@ -265,6 +272,7 @@ type SeededTutor = {
   halfHourCents: number;
   commissionBps: number;
   offersTrial: boolean;
+  trialMinutes: number;
   ratingBias: number;
   subjectSlugs: string[];
 };
@@ -286,7 +294,7 @@ async function reset(): Promise<void> {
     truncate table
       ledger_entries, session_events, reviews, bookings,
       payouts, payout_methods, credit_purchases, credit_packs,
-      follows, messages, threads, reports, admin_audit,
+      follows, messages, threads, notifications, reports, admin_audit,
       availability_exceptions, availability_rules,
       tutor_subjects, tutor_languages, tutor_ranking, credentials, tutor_profiles,
       student_wallets, platform_accounts, videos, subjects,
@@ -569,6 +577,7 @@ async function seedTutors(
       // A handful of early tutors negotiated 15%.
       commissionBps: index % 9 === 0 ? 1_500 : 2_000,
       offersTrial: chance(0.6),
+      trialMinutes: pick([10, 15, 20]),
       ratingBias: pick([4.1, 4.4, 4.6, 4.7, 4.8, 4.9, 5.0, 3.9]),
       subjectSlugs: pickMany(
         SUBJECTS.map((subject) => subject.slug),
@@ -702,7 +711,7 @@ async function seedTutors(
         promoEndsAt: promoActive ? daysFromNow(11, 0) : null,
         commissionBps: tutor.commissionBps,
         offersTrial: tutor.offersTrial,
-        trialMinutes: pick([10, 15, 20]),
+        trialMinutes: tutor.trialMinutes,
         maxTrialsPerWeek: randInt(3, 8),
         bufferMinutes: pick([0, 5, 10, 15]),
         maxSessionsPerDay: randInt(4, 10),
@@ -920,6 +929,8 @@ type HistoryCounts = {
   noShow: number;
   upcoming: number;
   trials: number;
+  trialsTaken: number;
+  trialsConverted: number;
   reviews: number;
   awaitingSettlement: number;
 };
@@ -966,6 +977,8 @@ async function seedHistory(
     noShow: 0,
     upcoming: 0,
     trials: 0,
+    trialsTaken: 0,
+    trialsConverted: 0,
     reviews: 0,
     awaitingSettlement: 0,
   };
@@ -1002,6 +1015,8 @@ async function seedHistory(
     };
 
     const pastRange: Interval = { startUtc: daysFromNow(-120, 0), endUtc: daysFromNow(-1, 0) };
+    /** Students who have paid this tutor, and when they first did. */
+    const paidBefore = new Map<string, Date>();
     const futureRange: Interval = { startUtc: daysFromNow(1, 0), endUtc: daysFromNow(21, 0) };
 
     const sessionCount = randInt(0, 9);
@@ -1120,6 +1135,12 @@ async function seedHistory(
         .set({
           status: outcome.terminalStatus,
           settledAt: startAt,
+          // Stamped the moment the lesson ended, the same as the live path —
+          // it is what makes a session reviewable (SPEC.md §9).
+          completedAt:
+            outcome.resolution === 'completed'
+              ? new Date(startAt.getTime() + durationMinutes * 60_000)
+              : null,
           cancelledAt: attendance.kind === 'cancellation' ? attendance.atUtc : null,
           cancelledBy: attendance.kind === 'cancellation' ? attendance.by : null,
         })
@@ -1127,6 +1148,10 @@ async function seedHistory(
 
       if (outcome.resolution === 'completed') {
         counts.settled += 1;
+        // Remembered so a seeded trial can be placed before a session the same
+        // student later paid for — which is what `trial_to_paid_rate` counts.
+        const earliest = paidBefore.get(student.id);
+        if (!earliest || startAt < earliest) paidBefore.set(student.id, startAt);
 
         // Roughly two in three completed sessions get reviewed.
         if (chance(0.66)) {
@@ -1146,6 +1171,59 @@ async function seedHistory(
         counts.cancelled += 1;
       } else if (outcome.resolution.startsWith('no_show')) {
         counts.noShow += 1;
+      }
+    }
+
+    // Trials that actually happened (SPEC.md §6). Some of these students went on
+    // to book a paid session, which is the whole of `trial_to_paid_rate`: without
+    // them the term scores every tutor at the neutral midpoint and tells the
+    // ranking nothing.
+    if (tutor.offersTrial) {
+      // Two in three trials led to a paid session; the rest did not. A seed
+      // where every trial converts would make the ranking term a constant.
+      const paid = [...paidBefore.entries()];
+      const converted = paid.length > 0 && chance(0.66) ? paid[randInt(0, paid.length - 1)]! : null;
+      const strangers = students.filter((candidate) => !paidBefore.has(candidate.id));
+      const trialStudent = converted
+        ? students.find((candidate) => candidate.id === converted[0])
+        : pick(strangers.length > 0 ? strangers : students);
+      const before = converted ? converted[1] : daysFromNow(-2, 0);
+      const pairKey = trialStudent ? `${trialStudent.id}:${tutor.id}` : null;
+
+      if (trialStudent && pairKey && !trialPairs.has(pairKey)) {
+        const startAt = takeSlot(
+          { startUtc: daysFromNow(-120, 0), endUtc: before },
+          tutor.trialMinutes + TRIAL_BUFFER_MINUTES,
+        );
+
+        if (startAt && reserve(tutor.id, startAt)) {
+          trialPairs.add(pairKey);
+          const bookingId = randomUUID();
+
+          await db.insert(bookings).values({
+            id: bookingId,
+            studentId: trialStudent.id,
+            tutorId: tutor.id,
+            subjectId: subjectIds.get(tutor.subjectSlugs[0]!)!,
+            isTrial: true,
+            startAtUtc: startAt,
+            durationMinutes: tutor.trialMinutes,
+            // A trial moves no money, so it settles the moment it is over.
+            status: 'settled',
+            priceCents: 0,
+            commissionBps: tutor.commissionBps,
+            escrowCents: 0,
+            studentTz: trialStudent.timezone,
+            tutorTz: tutor.timezone,
+            livekitRoom: `booking_${bookingId}`,
+            createdAt: new Date(startAt.getTime() - 2 * 24 * 60 * 60 * 1000),
+            completedAt: new Date(startAt.getTime() + tutor.trialMinutes * 60_000),
+            settledAt: new Date(startAt.getTime() + tutor.trialMinutes * 60_000),
+          });
+
+          counts.trialsTaken += 1;
+          if (converted) counts.trialsConverted += 1;
+        }
       }
     }
 
@@ -1268,6 +1346,51 @@ async function seedHistory(
     }
   }
 
+  // A free trial the demo student took yesterday with the demo tutor, so the
+  // post-trial conversion screen (SPEC.md §6) has something to show without
+  // waiting for a trial to happen.
+  // Deliberately not the demo tutor: the demo student already has an upcoming
+  // session with them, which is exactly the case where nobody needs nudging.
+  const conversionTutor = tutors.find(
+    (candidate) =>
+      candidate.offersTrial &&
+      candidate.email !== 'tutor@tutorly.test' &&
+      !(PAYOUT_FIXTURE_EMAILS as readonly string[]).includes(candidate.email),
+  );
+
+  if (liveStudent && conversionTutor) {
+    const startAt = new Date(NOW.getTime() - 26 * 60 * 60_000 - 45 * 60_000);
+    const pairKey = `${liveStudent.id}:${conversionTutor.id}`;
+
+    if (!trialPairs.has(pairKey) && reserve(conversionTutor.id, startAt)) {
+      trialPairs.add(pairKey);
+      const bookingId = randomUUID();
+      const finished = new Date(startAt.getTime() + conversionTutor.trialMinutes * 60_000);
+
+      await db.insert(bookings).values({
+        id: bookingId,
+        studentId: liveStudent.id,
+        tutorId: conversionTutor.id,
+        subjectId: subjectIds.get(conversionTutor.subjectSlugs[0]!)!,
+        isTrial: true,
+        startAtUtc: startAt,
+        durationMinutes: conversionTutor.trialMinutes,
+        status: 'settled',
+        priceCents: 0,
+        commissionBps: conversionTutor.commissionBps,
+        escrowCents: 0,
+        studentTz: liveStudent.timezone,
+        tutorTz: conversionTutor.timezone,
+        livekitRoom: `booking_${bookingId}`,
+        createdAt: new Date(startAt.getTime() - 6 * 60 * 60_000),
+        completedAt: finished,
+        settledAt: finished,
+      });
+
+      counts.trialsTaken += 1;
+    }
+  }
+
   // A session that finished more than a day ago and has not settled yet, so
   // `pnpm settle` has something to do and the settlement test has a booking
   // whose dispute window has closed. It carries no session events: what
@@ -1313,6 +1436,137 @@ async function seedHistory(
   await db.insert(follows).values([...followRows.values()]);
 
   return counts;
+}
+
+/**
+ * A few notifications for the demo accounts, so the bell has something in it
+ * without waiting for an event to happen (SPEC.md §11).
+ */
+async function seedNotifications(students: SeededStudent[], now: Date): Promise<void> {
+  const student = students.find((candidate) => candidate.email === 'student@tutorly.test');
+  if (!student) return;
+
+  const rows = (await db.execute(sql`
+    select b.id::text as booking_id, u.name as tutor_name, b.tutor_id::text as tutor_id
+    from bookings b
+    join users u on u.id = b.tutor_id
+    where b.student_id = ${student.id}
+    order by b.start_at_utc desc
+    limit 2
+  `)) as unknown as { booking_id: string; tutor_name: string; tutor_id: string }[];
+
+  await db.insert(notifications).values(
+    rows.map((row, index) => ({
+      userId: student.id,
+      kind: index === 0 ? ('new_availability' as const) : ('review_reply' as const),
+      title:
+        index === 0
+          ? `${row.tutor_name} added new times`
+          : `${row.tutor_name} replied to your review`,
+      body:
+        index === 0
+          ? 'They have opened up hours you can book.'
+          : 'Thank you — see you next week!',
+      href: index === 0 ? `/tutors/${row.tutor_id}` : '/dashboard',
+      dedupeKey: `seed:${student.id}:${index}`,
+      createdAt: new Date(now.getTime() - (index + 1) * 3 * 60 * 60 * 1000),
+    })),
+  );
+}
+
+/**
+ * Conversations (SPEC.md §8).
+ *
+ * Threads only exist where there is a booking, so they are built from the
+ * bookings that already exist rather than invented. The tutor's reply latency
+ * varies by tutor, which is the whole point: `response_median_seconds` and the
+ * "Responds in <1h" badge are computed from these messages, and with every
+ * tutor replying at the same speed the ranking term would tell you nothing.
+ *
+ * One exchange deliberately contains a phone number and an email, so the
+ * masking is visible in the product and the moderation queue has something real
+ * in it.
+ */
+async function seedConversations(now: Date): Promise<{ threads: number; messages: number }> {
+  const pairs = (await db.execute(sql`
+    select distinct on (student_id, tutor_id)
+      student_id::text as student_id, tutor_id::text as tutor_id, start_at_utc
+    from bookings
+    order by student_id, tutor_id, start_at_utc desc
+    limit 120
+  `)) as unknown as { student_id: string; tutor_id: string; start_at_utc: string | Date }[];
+
+  const openers = [
+    'Hi! Looking forward to the session. Could we start with quadratic equations?',
+    'Hello — I am stuck on question 7 from the past paper. Can we go over it?',
+    'Hi, is it alright if we spend the first ten minutes on last week’s homework?',
+    'Salaam! My exam is in three weeks. What should I focus on first?',
+  ];
+
+  const replies = [
+    'Of course. Send over the paper beforehand and I will mark the tricky ones.',
+    'Yes — bring your working and we will find where it goes wrong.',
+    'That works. I will prepare a couple of extra examples.',
+    'Happy to. We will cover the method first, then practise it.',
+  ];
+
+  let threadCount = 0;
+  let messageCount = 0;
+
+  for (const [index, pair] of pairs.entries()) {
+    if (!chance(0.55)) continue;
+
+    const threadId = await ensureThread(pair.student_id, pair.tutor_id, db);
+    threadCount += 1;
+
+    // A spread of habits: quick repliers, average ones, and one tutor in ten
+    // who takes most of a day.
+    const replyMinutes = index % 10 === 0 ? randInt(600, 1_400) : index % 3 === 0 ? randInt(5, 45) : randInt(60, 300);
+
+    const started = new Date(
+      new Date(pair.start_at_utc).getTime() - randInt(1, 6) * 24 * 60 * 60 * 1000,
+    );
+
+    const exchange: { senderId: string; body: string; at: Date }[] = [
+      { senderId: pair.student_id, body: pick(openers), at: started },
+      {
+        senderId: pair.tutor_id,
+        body: pick(replies),
+        at: new Date(started.getTime() + replyMinutes * 60_000),
+      },
+    ];
+
+    // Every twelfth pair tries to take it off-platform.
+    if (index % 12 === 0) {
+      exchange.push({
+        senderId: pair.student_id,
+        body: 'Could we just do it over whatsapp? My number is +92 300 1234567, or email me at student@example.com',
+        at: new Date(started.getTime() + (replyMinutes + 30) * 60_000),
+      });
+    }
+
+    for (const message of exchange) {
+      if (message.at > now) continue;
+      const masked = maskContactInfo(message.body);
+      await db.insert(messages).values({
+        threadId,
+        senderId: message.senderId,
+        bodyMasked: masked.masked,
+        bodyRaw: message.body,
+        redactions: masked.redactions,
+        createdAt: message.at,
+      });
+      messageCount += 1;
+    }
+
+    const last = exchange[exchange.length - 1]!;
+    await db.update(threads).set({ lastMessageAt: last.at }).where(eq(threads.id, threadId));
+  }
+
+  // The medians the badge and the ranking term both read.
+  await recomputeAllResponseMedians(now, db);
+
+  return { threads: threadCount, messages: messageCount };
 }
 
 /**
@@ -1406,7 +1660,14 @@ async function seedPayoutFixtures(
       db,
       pendingToAvailableEntries({ bookingId, tutorId: tutor.id, amountCents: outcome.tutorCents }),
     );
-    await db.update(bookings).set({ status: 'settled', settledAt: startAt }).where(sql`id = ${bookingId}`);
+    await db
+      .update(bookings)
+      .set({
+        status: 'settled',
+        settledAt: startAt,
+        completedAt: new Date(startAt.getTime() + 60 * 60_000),
+      })
+      .where(sql`id = ${bookingId}`);
 
     amounts[target.email] = outcome.tutorCents;
   }
@@ -1539,6 +1800,9 @@ async function main() {
     rulesByTutor,
     exceptionsByTutor,
   );
+  const conversations = await seedConversations(NOW);
+  await seedNotifications(students, NOW);
+
   await assertNoNegativeBalances();
   await assertLedgerConservation();
 
@@ -1577,6 +1841,8 @@ async function main() {
   console.log(`  no-shows                 ${counts.noShow}`);
   console.log(`  upcoming (confirmed)     ${counts.upcoming}`);
   console.log(`  trial requests pending   ${counts.trials}`);
+  console.log(`  trials taken             ${counts.trialsTaken} (${counts.trialsConverted} converted to paid)`);
+  console.log(`  conversations            ${conversations.threads} threads, ${conversations.messages} messages`);
   console.log(`  awaiting settlement      ${counts.awaitingSettlement}`);
   console.log(`  reviews                  ${totals.reviews}`);
   console.log('');
@@ -1600,7 +1866,7 @@ async function main() {
   );
   console.log('');
 
-  const ranking = await recomputeTutorRanking(db);
+  const ranking = await runNightlyRanking(db);
   console.log('Discovery');
   console.log(`  ${formatRankingRun(ranking)}`);
   console.log(`  intro videos             ${clips ? `${clips.length} transcoded clips shared across tutors` : 'none (ffmpeg not available)'}`);

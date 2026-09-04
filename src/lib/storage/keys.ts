@@ -43,6 +43,16 @@ export function avatarKey(userId: string, assetId: string, extension: string): s
   return assertValidObjectKey(`avatars/${userId}/${assetId}.${normaliseExtension(extension)}`);
 }
 
+/**
+ * Message attachments — homework, past papers, a photo of a worked answer.
+ *
+ * Private: somebody's homework should not sit at a guessable public URL. Reads
+ * go through `/api/files`, which re-checks that the viewer is in the thread.
+ */
+export function attachmentKey(threadId: string, attachmentId: string, extension: string): string {
+  return assertValidObjectKey(`attachments/${threadId}/${attachmentId}.${normaliseExtension(extension)}`);
+}
+
 /** Intro videos. Public bucket. Phase 2 replaces the raw file with an HLS ladder. */
 export function introVideoKey(userId: string, videoId: string, extension: string): string {
   return assertValidObjectKey(`videos/${userId}/${videoId}.${normaliseExtension(extension)}`);
@@ -56,7 +66,10 @@ function normaliseExtension(extension: string): string {
   return cleaned;
 }
 
+/** Prefixes whose objects are private. Everything else is public. */
+const PRIVATE_PREFIXES = ['credentials/', 'attachments/'] as const;
+
 /** Which bucket a key belongs in, decided by its prefix. */
 export function bucketForKey(key: string): Bucket {
-  return key.startsWith('credentials/') ? 'private' : 'public';
+  return PRIVATE_PREFIXES.some((prefix) => key.startsWith(prefix)) ? 'private' : 'public';
 }

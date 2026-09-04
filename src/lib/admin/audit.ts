@@ -26,7 +26,8 @@ export type AuditAction =
   | 'payout.approve'
   | 'payout.reject'
   | 'payout.paid'
-  | 'review.hide';
+  | 'review.hide'
+  | 'review.unhide';
 
 export type AuditEntry = {
   actorId: string;

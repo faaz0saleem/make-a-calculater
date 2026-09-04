@@ -11,6 +11,7 @@
 
 import { sql } from 'drizzle-orm';
 
+import { recomputeAllResponseMedians } from './messages';
 import { getAvailability } from '@/lib/availability';
 import { computeRanking, type RankingInputs } from '@/lib/ranking/score';
 import { db as defaultDb } from './client';
@@ -117,8 +118,9 @@ export async function recomputeTutorRanking(
       }
   `)) as unknown as InputRow[];
 
-  // Availability is unknown until Phase 3; the port says so rather than
-  // guessing, and the score treats "unknown" as a neutral constant.
+  // The port answers `unknown` for a tutor who has published no hours at all,
+  // and the score treats that as a neutral constant rather than a zero — an
+  // empty calendar is missing information, not a bad tutor.
   const availability = getAvailability();
   const tutorIds = rows.map((row) => row.tutor_id);
   const density = await availability.densityNext7dBps(tutorIds);
@@ -196,6 +198,22 @@ export async function recomputeTutorRanking(
     topScore: scores[scores.length - 1] ?? 0,
     medianScore: scores[Math.floor(scores.length / 2)] ?? 0,
   };
+}
+
+/**
+ * The whole nightly job: refresh the derived inputs, then score.
+ *
+ * `response_speed` is a ranking term computed from messages, so it belongs to
+ * the same run rather than to whenever a tutor last happened to reply. Keeping
+ * both steps in one exported function means a new caller cannot rank against a
+ * median that is a week old.
+ */
+export async function runNightlyRanking(
+  database: DbLike = defaultDb,
+  now = new Date(),
+): Promise<RankingRun> {
+  await recomputeAllResponseMedians(now, database);
+  return recomputeTutorRanking(database, now);
 }
 
 /**

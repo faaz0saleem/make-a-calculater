@@ -7,7 +7,11 @@
 
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 
+import { submitReview } from '@/app/dashboard/actions';
+import { ReviewPrompt } from '@/components/reviews/review-prompt';
 import { JoinLink } from '@/components/sessions/join-link';
+import { OutgoingTrials } from '@/components/trials/outgoing-trials';
+import { TrialConversion, type ConversionSlot } from '@/components/trials/trial-conversion';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -20,6 +24,9 @@ import {
 } from '@/components/ui/card';
 import { db } from '@/db/client';
 import { bookings, studentWallets, users } from '@/db/schema';
+import { reviewableSessionsFor } from '@/db/reviews';
+import { pendingTrialsForStudent, recentTrialToConvert } from '@/db/trials';
+import { getAvailability } from '@/lib/availability';
 import { requireUser } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
 import { cancellationConsequence } from '@/lib/sessions/cancellation';
@@ -28,9 +35,14 @@ import { formatInTimeZone } from '@/lib/time';
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Your dashboard' };
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ reviewError?: string; reviewed?: string; requested?: string }>;
+}) {
   const user = await requireUser();
   const now = new Date();
+  const query = await searchParams;
 
   const [wallet] = await db
     .select({
@@ -80,6 +92,35 @@ export default async function DashboardPage() {
     .orderBy(desc(bookings.startAtUtc))
     .limit(10);
 
+  const [outgoingTrials, reviewable, trialToConvert] = await Promise.all([
+    pendingTrialsForStudent(user.id, now),
+    reviewableSessionsFor(user.id),
+    recentTrialToConvert(user.id, now),
+  ]);
+
+  // SPEC.md §6: the conversion moment survives closing the tab. The slots are
+  // real ones from the availability engine, loaded here so the card is useful
+  // rather than decorative.
+  let conversionSlots: ConversionSlot[] = [];
+  if (trialToConvert) {
+    const free = await getAvailability().freeSlotsFor({
+      tutorId: trialToConvert.tutorId,
+      durationMinutes: 60,
+      toUtc: new Date(now.getTime() + 14 * 86_400_000),
+      limit: 3,
+    });
+    if (free.known) {
+      conversionSlots = free.value.slice(0, 3).map((slot) => ({
+        startUtcIso: slot.startUtc.toISOString(),
+        label: formatInTimeZone(slot.startUtc, user.timezone, {
+          weekday: 'short',
+          hour: 'numeric',
+          minute: '2-digit',
+        }),
+      }));
+    }
+  }
+
   return (
     <>
       <SiteHeader />
@@ -91,6 +132,39 @@ export default async function DashboardPage() {
             All times below are shown in {user.timezone}.
           </p>
         </div>
+
+        {query.requested === 'trial' ? (
+          <p role="status" className="rounded-md bg-[var(--success)]/10 px-4 py-3 text-sm">
+            Trial requested. The tutor has 12 hours to accept — you will see it here either way, and nothing
+            has been charged.
+          </p>
+        ) : null}
+
+        {query.reviewed ? (
+          <p role="status" className="rounded-md bg-[var(--success)]/10 px-4 py-3 text-sm">
+            Thanks — your review is live on their profile.
+          </p>
+        ) : null}
+
+        {trialToConvert ? (
+          <TrialConversion
+            tutorId={trialToConvert.tutorId}
+            tutorName={trialToConvert.tutorName}
+            hourlyCents={trialToConvert.hourlyCents}
+            halfHourCents={trialToConvert.halfHourCents}
+            slots={conversionSlots}
+          />
+        ) : null}
+
+        <OutgoingTrials requests={outgoingTrials} timezone={user.timezone} now={now} />
+
+        <ReviewPrompt
+          sessions={reviewable}
+          timezone={user.timezone}
+          now={now}
+          action={submitReview}
+          error={query.reviewError ?? null}
+        />
 
         <div className="grid gap-4 sm:grid-cols-2">
           <Card>

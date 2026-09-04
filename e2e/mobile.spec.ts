@@ -26,7 +26,10 @@ async function liveBookingId(): Promise<string> {
       limit 1
     ` as never,
   );
-  expect(rows, 'the seed should leave one session running right now').toHaveLength(1);
+  expect(
+    rows,
+    'the seed should leave one session running right now — run `pnpm e2e`, which reseeds first',
+  ).toHaveLength(1);
   return rows[0]!.id;
 }
 
@@ -54,6 +57,21 @@ test('the signed-in pages fit a 360px screen', async ({ page }) => {
   await page.goto(`/sessions/${await liveBookingId()}`);
   await expect(page.getByRole('heading', { name: 'Check your setup' })).toBeVisible();
   await expectNoSidewaysScroll(page, 'the classroom');
+
+  await page.goto('/messages');
+  await expect(page.getByRole('heading', { name: 'Messages' })).toBeVisible();
+  await expectNoSidewaysScroll(page, 'the conversation list');
+
+  const thread = page.getByTestId('thread-link').first();
+  if (await thread.isVisible().catch(() => false)) {
+    await thread.click();
+    await page.waitForURL(/\/messages\/[0-9a-f-]{36}/);
+    await expectNoSidewaysScroll(page, 'a conversation');
+  }
+
+  await page.goto('/notifications');
+  await expect(page.getByRole('heading', { name: 'Notifications' })).toBeVisible();
+  await expectNoSidewaysScroll(page, 'notifications');
 });
 
 test('the tutor pages fit a 360px screen', async ({ page }) => {

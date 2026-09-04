@@ -11,8 +11,9 @@ import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
 import { bookings, sessionEvents } from './schema';
 import { transitionBooking, type BookingStatus } from '@/lib/bookings/status';
-import type { SessionEvent, SessionEventKind } from '@/lib/sessions/attendance';
-import { DISPUTE_WINDOW_HOURS } from '@/lib/sessions/window';
+import { classifyOutcome } from '@/lib/money/outcomes';
+import { summariseAttendance, type SessionEvent, type SessionEventKind } from '@/lib/sessions/attendance';
+import { DISPUTE_WINDOW_HOURS, sessionWindow } from '@/lib/sessions/window';
 
 export type IncomingSessionEvent = {
   bookingId: string;
@@ -113,6 +114,79 @@ export async function markInProgressIfNeeded(
   }
 }
 
+/**
+ * Close a session that has clearly finished (SPEC.md §7, §9).
+ *
+ * Called when LiveKit says the room is empty. It asks the same question
+ * settlement will ask a day later — did both people spend at least half the
+ * booked time in the room — and if the answer is yes, moves the booking to
+ * `completed` and stamps `completed_at`.
+ *
+ * Two things depend on that stamp: the booking stops reading as "in progress"
+ * the moment the lesson ends rather than a day later, and the student can leave
+ * a review straight away instead of waiting for the money to move.
+ *
+ * No money is decided here. `classifyOutcome` is the pure classifier
+ * `resolveBookingOutcome` uses; settlement still makes the money call, and a
+ * booking this function leaves alone is settled exactly as before.
+ */
+export async function completeIfAttended(
+  bookingId: string,
+  now = new Date(),
+  database: DbLike = defaultDb,
+): Promise<boolean> {
+  const [booking] = await database
+    .select({
+      id: bookings.id,
+      studentId: bookings.studentId,
+      tutorId: bookings.tutorId,
+      isTrial: bookings.isTrial,
+      priceCents: bookings.priceCents,
+      commissionBps: bookings.commissionBps,
+      startAtUtc: bookings.startAtUtc,
+      durationMinutes: bookings.durationMinutes,
+      status: bookings.status,
+      completedAt: bookings.completedAt,
+    })
+    .from(bookings)
+    .where(eq(bookings.id, bookingId))
+    .limit(1);
+
+  if (!booking) return false;
+  if (booking.completedAt) return true;
+  if (booking.status !== 'in_progress') return false;
+
+  const window = sessionWindow(booking.startAtUtc, booking.durationMinutes);
+  const events = await loadSessionEvents(booking.id, database);
+
+  const attendance = summariseAttendance({
+    events,
+    window,
+    studentId: booking.studentId,
+    tutorId: booking.tutorId,
+    now,
+  });
+
+  const resolution = classifyOutcome(
+    {
+      id: booking.id,
+      studentId: booking.studentId,
+      tutorId: booking.tutorId,
+      isTrial: booking.isTrial,
+      priceCents: booking.priceCents,
+      commissionBps: booking.commissionBps,
+      startAtUtc: booking.startAtUtc,
+      durationMinutes: booking.durationMinutes,
+    },
+    attendance,
+  );
+
+  if (resolution !== 'completed') return false;
+
+  await moveBookingStatus(booking.id, 'completed', { completedAt: now }, database);
+  return true;
+}
+
 export type SettleableBooking = {
   id: string;
   studentId: string;
@@ -123,6 +197,8 @@ export type SettleableBooking = {
   startAtUtc: Date;
   durationMinutes: number;
   status: BookingStatus;
+  /** Set if the session was already closed as having happened. */
+  completedAt: Date | null;
 };
 
 /**
@@ -145,6 +221,7 @@ export async function findBookingsAwaitingSettlement(
       startAtUtc: bookings.startAtUtc,
       durationMinutes: bookings.durationMinutes,
       status: bookings.status,
+      completedAt: bookings.completedAt,
     })
     .from(bookings)
     .where(

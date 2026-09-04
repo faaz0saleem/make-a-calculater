@@ -21,6 +21,7 @@ import { redirect } from 'next/navigation';
 import { z } from 'zod';
 
 import { db } from '@/db/client';
+import { notifyFollowersOfNewAvailability } from '@/db/follows';
 import {
   availabilityExceptions,
   availabilityRules,
@@ -636,6 +637,24 @@ export async function saveAvailability(formData: FormData): Promise<void> {
 
   if (rows.length === 0) backTo('availability', 'Set hours on at least one day.');
 
+  /** Published minutes in a week, so "new times" means more time, not different time. */
+  const weeklyMinutes = (windows: { startTimeLocal: string; endTimeLocal: string }[]) =>
+    windows.reduce((total, window) => {
+      const [startHour, startMinute] = window.startTimeLocal.split(':').map(Number);
+      const [endHour, endMinute] = window.endTimeLocal.split(':').map(Number);
+      return total + ((endHour ?? 0) * 60 + (endMinute ?? 0)) - ((startHour ?? 0) * 60 + (startMinute ?? 0));
+    }, 0);
+
+  const before = await db
+    .select({
+      startTimeLocal: availabilityRules.startTimeLocal,
+      endTimeLocal: availabilityRules.endTimeLocal,
+    })
+    .from(availabilityRules)
+    .where(and(eq(availabilityRules.tutorId, user.id), eq(availabilityRules.active, true)));
+
+  const opened = weeklyMinutes(rows) > weeklyMinutes(before);
+
   await db.transaction(async (tx) => {
     await tx.delete(availabilityRules).where(eq(availabilityRules.tutorId, user.id));
     await tx.insert(availabilityRules).values(rows);
@@ -649,6 +668,10 @@ export async function saveAvailability(formData: FormData): Promise<void> {
       })
       .where(eq(tutorProfiles.userId, user.id));
   });
+
+  // SPEC.md §4: followers hear when a tutor publishes new availability. Only
+  // when there is genuinely more of it — a shuffled week is not news.
+  if (opened) await notifyFollowersOfNewAvailability(user.id);
 
   onwards('availability', 'payout');
 }
@@ -714,6 +737,10 @@ export async function addAvailabilityException(formData: FormData): Promise<void
     endUtc,
     note: String(formData.get('note') ?? '').trim().slice(0, 200) || null,
   });
+
+  // An extra window is strictly more time, so it is always worth telling
+  // followers about. Blocking time off is not.
+  if (kind === 'extra') await notifyFollowersOfNewAvailability(user.id);
 
   revalidatePath(`${BASE}/availability`);
   redirect(`${BASE}/availability?saved=1`);

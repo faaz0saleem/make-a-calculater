@@ -109,6 +109,21 @@ export const reportTargetEnum = pgEnum('report_target', [
 
 export const reportStatusEnum = pgEnum('report_status', ['open', 'reviewing', 'resolved', 'dismissed']);
 
+/**
+ * The in-app bell (SPEC.md §11). Email templates arrive in Phase 7; these are
+ * the events Phase 5 actually produces.
+ */
+export const notificationKindEnum = pgEnum('notification_kind', [
+  'trial_requested',
+  'trial_accepted',
+  'trial_declined',
+  'trial_expired',
+  'new_message',
+  'new_review',
+  'review_reply',
+  'new_availability',
+]);
+
 // ---------------------------------------------------------------------------
 // Users and auth
 // ---------------------------------------------------------------------------
@@ -456,6 +471,12 @@ export const bookings = pgTable(
     livekitRoom: varchar({ length: 100 }),
 
     rescheduleCount: smallint().notNull().default(0),
+    /**
+     * Stamped when the session actually happened — both parties present for at
+     * least half the booked time (SPEC.md §7). Null means it did not, whatever
+     * the status says, and a review needs it (SPEC.md §9).
+     */
+    completedAt: timestamp({ withTimezone: true }),
     cancelledAt: timestamp({ withTimezone: true }),
     cancelledBy: partyEnum(),
     settledAt: timestamp({ withTimezone: true }),
@@ -644,6 +665,7 @@ export const reviews = pgTable(
     rating: smallint().notNull(),
     body: text(),
     tutorReply: text(),
+    tutorRepliedAt: timestamp({ withTimezone: true }),
     hiddenAt: timestamp({ withTimezone: true }),
     hiddenReason: text(),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -702,6 +724,11 @@ export const messages = pgTable(
     bodyMasked: text().notNull(),
     /** Moderation only. Never selected by a route a normal user can reach. */
     bodyRaw: text().notNull(),
+    /**
+     * How many pieces of contact information were taken out. Lets the UI show
+     * the notice without reading — or even comparing against — the raw body.
+     */
+    redactions: smallint().notNull().default(0),
     attachments: jsonb().$type<{ url: string; name: string; bytes: number }[]>().notNull().default(sql`'[]'::jsonb`),
     readAt: timestamp({ withTimezone: true }),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -725,6 +752,39 @@ export const reports = pgTable(
     resolvedAt: timestamp({ withTimezone: true }),
   },
   (table) => [index('reports_status_idx').on(table.status, table.createdAt)],
+);
+
+/**
+ * The in-app bell (SPEC.md §11).
+ *
+ * Not in SPEC.md §12's table list — see DECISIONS_NEEDED.md item 5. Phase 5
+ * needs somewhere to put "a tutor you follow published new hours", and an email
+ * with no in-app equivalent would be a notification you cannot go back and read.
+ */
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: notificationKindEnum().notNull(),
+    title: varchar({ length: 160 }).notNull(),
+    body: varchar({ length: 400 }),
+    /** Where the bell takes you. Always an in-app path. */
+    href: varchar({ length: 300 }),
+    /**
+     * Stops the same event notifying twice — a tutor saving their calendar
+     * three times in a morning is one piece of news, not three.
+     */
+    dedupeKey: varchar({ length: 200 }),
+    readAt: timestamp({ withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('notifications_user_idx').on(table.userId, table.createdAt),
+    uniqueIndex('notifications_dedupe_key').on(table.dedupeKey),
+  ],
 );
 
 /** SPEC.md §10: every money-moving admin action writes a row here. No exceptions. */

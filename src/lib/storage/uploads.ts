@@ -7,7 +7,7 @@
  * `Content-Type` is a claim, not a fact.
  */
 
-export type UploadKind = 'credential' | 'avatar' | 'introVideo';
+export type UploadKind = 'credential' | 'avatar' | 'introVideo' | 'attachment';
 
 export type UploadRule = {
   maxBytes: number;
@@ -38,6 +38,21 @@ export const UPLOAD_RULES: Record<UploadKind, UploadRule> = {
     contentTypes: ['video/mp4', 'video/quicktime', 'video/webm'],
     extensionFor: { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm' },
     label: 'an MP4, MOV or WebM up to 200 MB',
+  },
+  // Homework, a past paper, a photo of a worked answer (SPEC.md §8). Big enough
+  // for a scanned book chapter, and on the direct-upload path so it never has
+  // to fit through a Server Action.
+  attachment: {
+    maxBytes: 25 * 1024 * 1024,
+    contentTypes: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'text/plain'],
+    extensionFor: {
+      'application/pdf': 'pdf',
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+      'text/plain': 'txt',
+    },
+    label: 'a PDF, image or text file up to 25 MB',
   },
 };
 

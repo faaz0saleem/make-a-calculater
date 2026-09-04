@@ -1,24 +1,26 @@
 /**
- * Serving private objects — credential documents (SPEC.md §3 step 6, §13.5).
+ * Serving private objects — credential documents (SPEC.md §3 step 6, §13.5) and
+ * message attachments (SPEC.md §8).
  *
  * Two independent gates, and a request has to clear both:
  *
  *  1. A valid, unexpired signature over the exact key. Anything missing,
  *     tampered with or older than 60 seconds is a 403. This is what stops a
  *     leaked or guessed path from being useful.
- *  2. The viewer is an admin, or the tutor the document belongs to. Failing this
- *     is a 404, not a 403, so nobody can use the endpoint to discover that a
- *     document exists (SPEC.md §16, last line).
+ *  2. The viewer is entitled to *that* object: an admin or the owning tutor for
+ *     a credential, one of the two people in the thread for an attachment.
+ *     Failing this is a 404, not a 403, so nobody can use the endpoint to
+ *     discover that a document exists (SPEC.md §16, last line).
  *
  * A presigned R2 URL could do the first but not the second — it stays valid
  * even if the admin's access is revoked a second later.
  */
 
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { currentUser } from '@/lib/auth/guards';
 import { db } from '@/db/client';
-import { credentials } from '@/db/schema';
+import { credentials, threads } from '@/db/schema';
 import { isAdmin } from '@/lib/auth/roles';
 import { bucketForKey, getObjectStore, verifyObjectSignature } from '@/lib/storage';
 
@@ -31,6 +33,8 @@ function forbidden(): Response {
 function missing(): Response {
   return new Response('Not found', { status: 404, headers: { 'cache-control': 'no-store' } });
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function GET(request: Request, context: { params: Promise<{ key: string[] }> }) {
   const { key: segments } = await context.params;
@@ -46,14 +50,32 @@ export async function GET(request: Request, context: { params: Promise<{ key: st
   const viewer = await currentUser();
   if (!viewer) return missing();
 
-  const [document] = await db
-    .select({ id: credentials.id, tutorId: credentials.tutorId })
-    .from(credentials)
-    .where(eq(credentials.fileKey, key))
-    .limit(1);
+  if (key.startsWith('attachments/')) {
+    // `attachments/{threadId}/{id}.{ext}` — the thread is in the path, so
+    // entitlement is "are you one of the two people in it".
+    const threadId = key.split('/')[1] ?? '';
+    if (!UUID.test(threadId)) return missing();
 
-  if (!document) return missing();
-  if (!isAdmin(viewer.roles) && document.tutorId !== viewer.id) return missing();
+    const [thread] = await db
+      .select({ studentId: threads.studentId, tutorId: threads.tutorId })
+      .from(threads)
+      .where(eq(threads.id, threadId))
+      .limit(1);
+
+    if (!thread) return missing();
+    if (!isAdmin(viewer.roles) && thread.studentId !== viewer.id && thread.tutorId !== viewer.id) {
+      return missing();
+    }
+  } else {
+    const [document] = await db
+      .select({ id: credentials.id, tutorId: credentials.tutorId })
+      .from(credentials)
+      .where(eq(credentials.fileKey, key))
+      .limit(1);
+
+    if (!document) return missing();
+    if (!isAdmin(viewer.roles) && document.tutorId !== viewer.id) return missing();
+  }
 
   const object = await getObjectStore().get('private', key);
   if (!object) return missing();

@@ -156,9 +156,16 @@ export default async function AdminPage() {
                   <CardTitle>Verification queue</CardTitle>
                   <CardDescription>{totals.pending_verifications} waiting</CardDescription>
                 </div>
-                <Link href="/admin/verification">
-                  <Button size="sm">Open queue</Button>
-                </Link>
+                <div className="flex gap-2">
+                  <Link href="/admin/verification">
+                    <Button size="sm">Open queue</Button>
+                  </Link>
+                  <Link href="/admin/moderation">
+                    <Button size="sm" variant="outline">
+                      Moderation
+                    </Button>
+                  </Link>
+                </div>
               </div>
             </CardHeader>
             <CardContent>

@@ -215,6 +215,71 @@ and quietly falls apart a few seconds in.
 Without these variables the classroom refuses to start and says so, rather than
 dropping a student into a room that will never connect.
 
+## Trials, messages, reviews and follows
+
+**A free trial** is a booking with `is_trial = true`, priced at zero, with no
+escrow row and no ledger entries — nothing about it touches money. It does hold
+the tutor's calendar, so it goes through the same availability engine and the
+same partial unique index as a paid session, asking for its own length plus a
+five-minute buffer.
+
+One trial per student–tutor pair, for life, is a **partial unique index** on
+`(student_id, tutor_id) where is_trial` — not a check in application code, which
+would lose the race between two clicks. The other guards (three outstanding
+requests, five a week across all tutors, the tutor's own weekly cap) live in
+`src/lib/trials/rules.ts`, where they can be read in one place.
+
+A request dies twelve hours after it was made or two hours before the slot,
+whichever comes first, and **expiry is checked when a request is read** rather
+than by a sweeper: a job that runs every five minutes leaves five minutes in
+which a tutor can accept something that should already be dead. Each expiry goes
+through the booking state machine, one row at a time — a bulk `UPDATE` would be
+faster and would also be the only place in the codebase that writes a status
+without it.
+
+When a trial ends, the conversion screen is the loudest thing on the page: the
+tutor's next three genuinely free hours, from the availability engine. It also
+waits on the dashboard for a week afterwards, because people close tabs — and
+disappears the moment they book, so it never nags somebody who already said yes.
+
+**Messages** exist only between two people who already have a booking or a trial
+request. There is no way to start a conversation with a stranger, which removes
+most of the spam surface before it exists.
+
+Bodies are **masked on write**. Emails, phone numbers, messaging-app handles and
+links to WhatsApp or Telegram are replaced with `[hidden]` before the row is
+stored, and the readable column is the only one any student- or tutor-facing
+query selects. The raw text is kept in `body_raw` for moderation, read in
+exactly one place — `src/db/moderation.ts`, which demands an admin — because a
+pattern cannot catch a number spelled out in words, and a human reviewing a
+report needs to see what was actually sent. `e2e/social.spec.ts` proves the raw
+text is not reachable from the other side of the conversation.
+
+Attachments (25 MB) take the direct-upload path to the private bucket, and reads
+go through `/api/files`, which re-checks that the viewer is one of the two
+people in the thread.
+
+**Response time** is computed from those messages: the median gap between a
+student writing and the tutor's first reply. Silence past a day counts as a
+reply at the ceiling — otherwise ignoring somebody entirely would score better
+than answering slowly. It feeds the `response_speed` term of the ranking and the
+"Responds in <1h" badge, both of which read a stored column rather than
+computing anything in a request.
+
+**Reviews** come only from a student on a paid session that actually happened —
+`bookings.completed_at`, stamped when LiveKit says the room emptied and both
+people were there for at least half the booked time. Trials cannot be reviewed.
+One per booking, editable for seven days, one public tutor reply. The number on
+a profile is the Bayesian average (m = 4.3, C = 5), the same function the
+ranking uses, with the raw distribution shown beside it as a breakdown bar. An
+admin can hide one with a reason, which writes an `admin_audit` row and removes
+it from both the profile and the rating.
+
+**Follows** are the retention loop: when a tutor publishes genuinely more time —
+a wider weekly schedule, or a one-off extra window — their followers get an
+in-app notification, deduplicated to one per tutor per day so a tutor saving
+their calendar four times before breakfast is still one piece of news.
+
 ## How files work
 
 Two buckets. `private` holds credential documents; `public` holds avatars and
@@ -309,6 +374,8 @@ src/
     api/uploads/        signed direct uploads (development stand-in for R2)
     api/cron/           ranking, reconciliation and settlement, on a schedule
     api/livekit/        the webhook attendance is measured from
+    messages/           conversations, masked on write
+    notifications/      the in-app bell
     sessions/           the classroom
   auth.ts               Auth.js: credentials + Google, Node runtime
   auth.config.ts        the edge-safe half, used by middleware
@@ -318,6 +385,8 @@ src/
     ledger.ts           the only writer of balance columns; reconciliation
     discovery.ts        the feed, search, filters and the rails
     ranking.ts          the nightly ranking job
+    moderation.ts       the only reader of raw message bodies
+    trials.ts           free-trial requests and the tutor's answer
     tutors.ts           every query that decides who is visible
     seed.ts             the development world
     seed-assets.ts      generated PNGs and PDFs, so no binaries are committed
@@ -328,7 +397,10 @@ src/
     bookings/status.ts  the booking state machine
     availability/       the scheduling engine, and the port discovery reads
     livekit/            room names and access tokens
+    messaging/          contact-info masking, response-time medians
+    reviews/            who may review, and what the stars add up to
     sessions/           the session window, attendance, connection grading
+    trials/             the free-trial rules and their abuse guards
     money/              cents, pricing, outcomes, ledger drafts, packs, payouts
     ranking/            the §4 score, pure and tested
     storage/            object stores, keys, signed URLs, direct uploads

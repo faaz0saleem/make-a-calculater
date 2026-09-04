@@ -14,19 +14,28 @@ import Link from 'next/link';
 import { cookies } from 'next/headers';
 import { notFound } from 'next/navigation';
 
-import { BookingCalendar } from '@/components/booking/calendar';
+import { askForTrial, toggleFollow } from '@/app/tutors/[tutorId]/actions';
+import { BookingCalendar, type CalendarMode } from '@/components/booking/calendar';
+import { FollowButton } from '@/components/tutors/follow-button';
+import { ReviewList } from '@/components/reviews/review-list';
 import { SiteHeader } from '@/components/site-header';
 import { TimezoneProbe, TIMEZONE_COOKIE } from '@/components/timezone-probe';
 import { IntroPlayer } from '@/components/video/intro-player';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { isFollowing, followerCount } from '@/db/follows';
+import { ratingSummaryFor, reviewsForTutor } from '@/db/reviews';
+import { pairHasHadTrial } from '@/db/trials';
 import { loadTutorDossier } from '@/db/tutors';
 import { currentUser } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
+import { formatStars } from '@/lib/reviews/rules';
 import { languageName, PROFICIENCY_LABELS, type LanguageProficiency } from '@/lib/tutors/languages';
 import { getAvailability } from '@/lib/availability';
 import { priceForBooking } from '@/lib/money/pricing';
+import { describeResponseTime } from '@/lib/messaging/response-time';
+import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
 import { isValidTimeZone } from '@/lib/time';
 import { bookabilityProblem, canViewProfile, isPubliclyVisible } from '@/lib/tutors/visibility';
 
@@ -39,7 +48,7 @@ export default async function TutorProfilePage({
   searchParams,
 }: {
   params: Promise<{ tutorId: string }>;
-  searchParams: Promise<{ duration?: string }>;
+  searchParams: Promise<{ mode?: string; duration?: string; error?: string }>;
 }) {
   const { tutorId } = await params;
   const [tutor, viewer, jar, query] = await Promise.all([
@@ -63,7 +72,20 @@ export default async function TutorProfilePage({
     (cookieTimezone && isValidTimeZone(cookieTimezone) ? cookieTimezone : null) ??
     'UTC';
 
-  const durationMinutes = query.duration === '30' ? 30 : 60;
+  // Who this viewer is to this tutor decides what the calendar offers.
+  const [alreadyTrialled, following, followers, ratings, reviews] = await Promise.all([
+    viewer ? pairHasHadTrial(viewer.id, tutor.id) : Promise.resolve(false),
+    viewer ? isFollowing(viewer.id, tutor.id) : Promise.resolve(false),
+    followerCount(tutor.id),
+    ratingSummaryFor(tutor.id),
+    reviewsForTutor(tutor.id),
+  ]);
+
+  const trialOffered = tutor.offersTrial && !problem && !alreadyTrialled && viewer?.id !== tutor.id;
+  const requested = query.mode ?? query.duration;
+  const mode: CalendarMode = requested === 'trial' && trialOffered ? 'trial' : requested === '30' ? 30 : 60;
+
+  const durationMinutes = mode === 'trial' ? tutor.trialMinutes : mode;
   const { priceCents } = priceForBooking({
     rates: {
       hourlyCents: tutor.hourlyCents,
@@ -72,20 +94,24 @@ export default async function TutorProfilePage({
       promoStartsAt: tutor.promoStartsAt,
       promoEndsAt: tutor.promoEndsAt,
     },
-    durationMinutes,
-    isTrial: false,
+    durationMinutes: mode === 'trial' ? 30 : mode,
+    isTrial: mode === 'trial',
     now: new Date(),
   });
 
-  // Two weeks is enough to choose from without rendering a month of buttons.
+  // Two weeks is enough to choose from without rendering a month of buttons. A
+  // trial asks for its own length plus the buffer that follows it (SPEC.md §6),
+  // so a 15-minute trial can sit in a gap an hour-long session could not.
   const slots = problem
     ? null
     : await getAvailability().freeSlotsFor({
         tutorId: tutor.id,
-        durationMinutes,
+        durationMinutes: mode === 'trial' ? durationMinutes + TRIAL_BUFFER_MINUTES : durationMinutes,
         toUtc: new Date(Date.now() + 14 * 86_400_000),
         limit: 120,
       });
+
+  const respondsIn = describeResponseTime(tutor.responseMedianSeconds ?? null);
 
   return (
     <>
@@ -117,13 +143,37 @@ export default async function TutorProfilePage({
             <p className="mt-1 text-sm text-muted-foreground">
               {[tutor.city, tutor.country].filter(Boolean).join(', ')} · {tutor.timezone}
             </p>
-          </div>
-          <div className="text-right">
-            <p className="text-xl font-semibold">
-              {formatCents(tutor.hourlyCents)}
-              <span className="text-sm font-normal text-muted-foreground">/hr</span>
+            <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+              <span>
+                <span aria-hidden>★</span>{' '}
+                <span className="font-medium text-foreground">{formatStars(ratings.displayedMilli)}</span>{' '}
+                {ratings.count === 0
+                  ? '(no reviews yet)'
+                  : `(${ratings.count} review${ratings.count === 1 ? '' : 's'})`}
+              </span>
+              {respondsIn ? <span>{respondsIn}</span> : null}
+              {followers > 0 ? (
+                <span>
+                  {followers} follower{followers === 1 ? '' : 's'}
+                </span>
+              ) : null}
             </p>
-            <p className="text-sm text-muted-foreground">{formatCents(tutor.halfHourCents)} per 30 min</p>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            <div className="text-right">
+              <p className="text-xl font-semibold">
+                {formatCents(tutor.hourlyCents)}
+                <span className="text-sm font-normal text-muted-foreground">/hr</span>
+              </p>
+              <p className="text-sm text-muted-foreground">{formatCents(tutor.halfHourCents)} per 30 min</p>
+            </div>
+            {viewer && viewer.id !== tutor.id ? (
+              <FollowButton
+                following={following}
+                action={toggleFollow.bind(null, tutor.id)}
+                tutorName={tutor.name}
+              />
+            ) : null}
           </div>
         </header>
 
@@ -202,32 +252,61 @@ export default async function TutorProfilePage({
           </Card>
         </div>
 
+        <ReviewList summary={ratings} reviews={reviews} timezone={studentTimezone} />
+
         <BookingCalendar
           slots={slots && slots.known ? slots.value : null}
           studentTimezone={studentTimezone}
           tutorTimezone={tutor.timezone}
-          durationMinutes={durationMinutes}
+          mode={mode}
           priceCents={priceCents}
-          durationHref={(minutes) => `/tutors/${tutor.id}?duration=${minutes}`}
+          durationMinutes={durationMinutes}
+          modeHref={(next) => `/tutors/${tutor.id}?mode=${next}`}
+          trialMinutes={trialOffered ? tutor.trialMinutes : null}
           bookable={!problem}
           notBookableReason={
             problem === 'suspended'
               ? 'This tutor is not currently taking bookings.'
               : 'This tutor has not completed verification yet, so they cannot be booked.'
           }
+          error={query.error ?? null}
+          select={
+            mode === 'trial' && viewer
+              ? {
+                  action: askForTrial.bind(null, tutor.id),
+                  label: `Ask for a free ${tutor.trialMinutes}-minute trial`,
+                  note: `Pick a time and ${tutor.name.split(' ')[0]} has 12 hours to accept. Nothing is charged, and you keep your credits either way.`,
+                }
+              : undefined
+          }
         />
 
-        <div className="sticky bottom-4 flex items-center justify-between gap-4 rounded-lg border border-border bg-card p-4">
+        <div className="sticky bottom-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
           <p className="text-sm text-muted-foreground">
             {problem
               ? problem === 'suspended'
                 ? 'This tutor is not currently taking bookings.'
                 : 'This tutor has not completed verification yet, so they cannot be booked.'
-              : 'Pick a slot above. Paying with credits arrives with booking.'}
+              : trialOffered
+                ? `A free ${tutor.trialMinutes}-minute trial, no credits, no card.`
+                : alreadyTrialled
+                  ? 'You have already had your free trial with this tutor.'
+                  : 'Pick a slot above. Paying with credits arrives with booking.'}
           </p>
-          <Button disabled title="Booking arrives with credits">
-            {tutor.offersTrial && !problem ? 'Book free trial' : 'Book session'}
-          </Button>
+
+          {trialOffered && viewer ? (
+            <Link href={`/tutors/${tutor.id}?mode=trial`}>
+              <Button className="min-h-11">Book free trial</Button>
+            </Link>
+          ) : trialOffered && !viewer ? (
+            <Link href={`/signin?next=${encodeURIComponent(`/tutors/${tutor.id}?mode=trial`)}`}>
+              <Button className="min-h-11">Sign in to book a free trial</Button>
+            </Link>
+          ) : (
+            <Button disabled title="Paying with credits arrives with booking" className="min-h-11">
+              Book session
+            </Button>
+          )}
         </div>
 
         <Link href="/" className="text-sm text-muted-foreground underline underline-offset-4">

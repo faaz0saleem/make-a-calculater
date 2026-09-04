@@ -118,7 +118,15 @@ export async function settleBooking(
 
     await tx
       .update(bookings)
-      .set({ status, settledAt: now, updatedAt: now })
+      .set({
+        status,
+        settledAt: now,
+        // A session nobody closed at the time — LiveKit never said the room
+        // finished, say — is stamped here instead, so "did this happen" has
+        // one answer whichever path got there.
+        ...(outcome.resolution === 'completed' && !booking.completedAt ? { completedAt: now } : {}),
+        updatedAt: now,
+      })
       .where(eq(bookings.id, booking.id));
 
     // SPEC.md §2: three strikes in 90 days triggers a review.

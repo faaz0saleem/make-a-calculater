@@ -11,7 +11,7 @@
 
 import { expect, test } from '@playwright/test';
 
-import { ACCOUNTS, introVideoBytes, pdfBytes, pngBytes, signIn, signOut } from './helpers';
+import { ACCOUNTS, introVideoBytes, pdfBytes, pngBytes, queryDatabase, signIn, signOut } from './helpers';
 
 const NEW_TUTOR_NAME = 'Amara Nwosu';
 const BIO = `I have taught secondary and university mathematics for eleven years, mostly to students who had decided they were "bad at maths" long before they met me. We work from your syllabus and your past papers rather than a generic curriculum, and every session ends with a short written summary and a handful of practice problems you keep. Book the free trial first — I would rather you found the right tutor than the first one.`;
@@ -213,12 +213,24 @@ test('an admin reads the documents and approves', async ({ page }) => {
 });
 
 test('the verified tutor is now in the feed, in search, and publicly visible', async ({ page }) => {
-  // Scoped to the ranked grid: a newly verified tutor who offers a trial also
-  // turns up in the rails, and an unscoped locator would match twice.
-  const grid = () => page.locator('section', { has: page.getByRole('heading', { name: 'All tutors' }) });
-
   await page.goto('/');
-  await expect(grid().getByRole('link', { name: new RegExp(NEW_TUTOR_NAME) })).toBeVisible();
+
+  // The exploration slot from SPEC.md §4 is where a tutor with no history is
+  // supposed to be findable: with real response-speed and trial-conversion
+  // scores in the ranking, a brand-new tutor sits mid-table on merit and is a
+  // scroll down the infinite grid rather than on its first screen.
+  const newRail = () => page.locator('section', { has: page.getByRole('heading', { name: 'New tutors' }) });
+  await expect(newRail().getByRole('link', { name: new RegExp(NEW_TUTOR_NAME) }).first()).toBeVisible();
+
+  // ...and they are genuinely in the ranked feed, not only in the rail.
+  const ranked = await queryDatabase<{ total: number }[]>(
+    (sql) => sql`
+      select count(*)::int as total from tutor_ranking r
+      join users u on u.id = r.tutor_id
+      where u.email = ${ACCOUNTS.draftTutor}
+    ` as never,
+  );
+  expect(ranked[0]?.total).toBe(1);
 
   await page.goto(`/?q=${encodeURIComponent('Amara')}`);
   await expect(page.getByRole('link', { name: new RegExp(NEW_TUTOR_NAME) })).toBeVisible();

@@ -47,7 +47,16 @@ in place and it also blocks a second request after a tutor *declines* one, or
 after a request expires unanswered.
 
 If a declined trial should not burn the student's one chance, the index needs a
-status condition. Say which you want before trials ship in Phase 5.
+status condition.
+
+**Now built, and worth looking at.** Trials shipped in Phase 5 with the spec's
+default. The consequence is now visible: a tutor who declines, or who simply
+never answers within twelve hours, permanently uses up that student's one free
+trial with them — the student got nothing and cannot ask again. The profile even
+says so, which reads badly. My recommendation is to narrow the index to statuses
+where the trial actually happened (`confirmed`, `in_progress`, `completed`,
+`settled`, `no_show_student`), leaving `cancelled_by_tutor` and `expired` out of
+it. That is a one-line migration and a change to `pairHasHadTrial`.
 
 ## 4. What is a "free-session credit" worth?
 
@@ -308,3 +317,62 @@ A sensible shape would be: keep the derived join/leave rows for as long as the
 booking's financial record, and drop `raw` after the dispute window plus a
 margin — ninety days, say. Say what your retention policy should be and it is a
 one-line job.
+
+
+## 22. Tutors have twelve hours to answer, and only an in-app bell to hear it
+
+**Blocks:** nothing today; blocks trials working outside a demo. **Default in
+place:** an in-app notification and a card on `/tutor`.
+
+A trial request expires twelve hours after it is made. Until Phase 7 wires up
+Resend, the only way a tutor learns about one is by opening the site — so a
+tutor who teaches on Monday and looks at Tutorly on Wednesday will watch every
+request expire without ever seeing it, and the student is told nothing except
+that their one free trial with that tutor is now used up (see item 3).
+
+Three ways out, and they are not exclusive:
+
+- pull the email template for `trial_requested` forward from Phase 7; it is one
+  template, and the row it would send from already exists
+- lengthen the response window for tutors with no recent activity
+- stop the clock: let a request sit until the two-hour cutoff before the slot,
+  however far away that is, rather than dying twelve hours in
+
+Whichever you pick, decide it before real tutors are relying on trials for
+supply.
+
+## 23. What counts as answering a message
+
+**Blocks:** nothing. **Default in place:** the median gap between a student
+writing and the tutor's first reply, with silence past 24 hours counted as a
+reply at the ceiling (`src/lib/messaging/response-time.ts`).
+
+Two judgement calls in there are worth your eye, because they decide the
+"Responds in <1h" badge and 10% of the ranking score:
+
+- **Silence counts.** A student message left unanswered for a day is recorded as
+  a 24-hour reply rather than ignored. Without that, a tutor who answers nobody
+  has no data points at all and scores the same neutral midpoint as a tutor with
+  no messages yet — silence would rank better than a slow answer.
+- **A burst is one wait.** Four messages from a student, then one reply, counts
+  once, timed from the first of them. The alternative — timing from the last —
+  would let a tutor look fast by waiting for someone to finish typing.
+
+Neither is obviously right. They are, at least, in one pure module with tests
+rather than spread through a query.
+
+## 24. Masking cannot catch a number written in words
+
+**Blocks:** nothing. **Default in place:** patterns for emails, phone numbers,
+handles and messaging-app links, plus the raw text kept for moderation.
+
+`maskContactInfo` is deliberately conservative — it would rather hide a long
+order number than let a phone number through — but "oh three double oh, one two
+three four five six seven" goes straight past it, and so does "my handle is my
+first name and my birth year". There is a test that documents exactly that.
+
+The moderation queue is the answer for now: every message the masker touched is
+listed, worst first, with what was typed beside what was shown. If off-platform
+leakage turns out to matter more than that, the next step is a classifier on the
+raw text rather than more regexes — but that is a real cost, and worth deciding
+with numbers rather than in advance.

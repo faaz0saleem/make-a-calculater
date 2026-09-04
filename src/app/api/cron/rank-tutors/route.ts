@@ -5,7 +5,7 @@
  * refused, so this cannot be used by a passer-by to make the database work.
  */
 
-import { formatRankingRun, recomputeTutorRanking } from '@/db/ranking';
+import { formatRankingRun, runNightlyRanking } from '@/db/ranking';
 import { safeEqual } from '@/lib/crypto';
 
 export const dynamic = 'force-dynamic';
@@ -26,7 +26,7 @@ export async function GET(request: Request) {
   }
 
   try {
-    const run = await recomputeTutorRanking();
+    const run = await runNightlyRanking();
     return Response.json({ ok: true, summary: formatRankingRun(run), ...run });
   } catch (error) {
     console.error('ranking job failed', error);
