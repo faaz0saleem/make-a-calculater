@@ -93,24 +93,39 @@ describe('overlapBonusBps', () => {
   });
 
   it('pays in full once the overlap reaches the target', () => {
-    const tutor = maskFromUtcHours([10, 11, 12, 13, 14, 15]);
+    const tutor = maskFromUtcHours([10, 11, 12]);
     expect(overlapBonusBps(tutor, karachiStudent)).toBe(OVERLAP_MAX_BPS);
   });
 
   it('stops paying past the target rather than rewarding an emptier week', () => {
-    const six = maskFromUtcHours([10, 11, 12, 13, 14, 15]);
+    const three = maskFromUtcHours([10, 11, 12]);
     const twelve = maskFromUtcHours([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-    expect(overlapBonusBps(twelve, karachiStudent)).toBe(overlapBonusBps(six, karachiStudent));
+    expect(overlapBonusBps(twelve, karachiStudent)).toBe(overlapBonusBps(three, karachiStudent));
   });
 
-  it('rises with the overlap in between', () => {
-    const bonuses = [1, 2, 3, 4, 5].map((count) =>
-      overlapBonusBps(maskFromUtcHours([10, 11, 12, 13, 14].slice(0, count)), karachiStudent),
-    );
-    for (let i = 1; i < bonuses.length; i += 1) {
-      expect(bonuses[i]!).toBeGreaterThan(bonuses[i - 1]!);
-    }
-    expect(bonuses[bonuses.length - 1]!).toBeLessThan(OVERLAP_MAX_BPS);
+  it('is graduated, not a threshold: one shared hour is worth a third', () => {
+    // One shared hour is a lesson a week that actually happens. It should not
+    // fall off a cliff to nothing just because it is not three.
+    const one = overlapBonusBps(maskFromUtcHours([10]), karachiStudent);
+    const two = overlapBonusBps(maskFromUtcHours([10, 11]), karachiStudent);
+
+    expect(one).toBe(Math.round(OVERLAP_MAX_BPS / 3));
+    expect(one).toBeGreaterThan(0);
+    expect(two).toBeGreaterThan(one);
+    expect(two).toBeLessThan(OVERLAP_MAX_BPS);
+  });
+
+  it('does not fail a Lahore student looking at a London tutor', () => {
+    // The corridor this product is built for. A London tutor teaching their own
+    // evening shares about an hour with a Karachi student's day — thin, and
+    // real, and worth more than nothing.
+    const londonEvening = maskFromUtcHours([16, 17, 18, 19, 20]);
+    expect(overlapHours(londonEvening, karachiStudent)).toBeGreaterThan(0);
+    expect(overlapBonusBps(londonEvening, karachiStudent)).toBeGreaterThan(0);
+
+    // A London tutor teaching in the daytime shares plenty, and maxes the term.
+    const londonDaytime = maskFromUtcHours([9, 10, 11, 12, 13, 14, 15, 16]);
+    expect(overlapBonusBps(londonDaytime, karachiStudent)).toBe(OVERLAP_MAX_BPS);
   });
 
   it('treats an empty mask as unknown, not as never free', () => {
@@ -137,8 +152,13 @@ describe('overlapBonusBps', () => {
     }
   });
 
-  it('keeps the target small enough to be reachable', () => {
+  it('keeps the target small enough to be reachable across a continent', () => {
     expect(OVERLAP_TARGET_HOURS).toBeLessThanOrEqual(hoursFromMask(karachiStudent).length);
+
+    // A five-hour offset — Lahore to London — must not on its own fail the bar
+    // for a tutor working ordinary hours.
+    const london = studyWindowMaskUtc('Europe/London', WINTER);
+    expect(overlapHours(london, karachiStudent)).toBeGreaterThanOrEqual(OVERLAP_TARGET_HOURS);
   });
 });
 

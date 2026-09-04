@@ -39,12 +39,49 @@ export async function listCreditPacks(database: DbLike = defaultDb): Promise<Cre
       paidCents: creditPacks.paidCents,
       creditsCents: creditPacks.creditsCents,
       sortOrder: creditPacks.sortOrder,
+      firstPurchaseOnly: creditPacks.firstPurchaseOnly,
     })
     .from(creditPacks)
     .where(eq(creditPacks.active, true))
     .orderBy(creditPacks.sortOrder);
 
   return rows.length > 0 ? rows : [...CREDIT_PACKS];
+}
+
+/**
+ * Whether this person has ever bought credits before.
+ *
+ * Decides whether the first-purchase pack is on the shelf. A failed attempt is
+ * not a purchase — somebody whose card was declined has not had their taste.
+ */
+export async function hasPurchasedBefore(
+  userId: string,
+  database: DbLike = defaultDb,
+): Promise<boolean> {
+  const [row] = await database
+    .select({ id: creditPurchases.id })
+    .from(creditPurchases)
+    .where(
+      and(
+        eq(creditPurchases.userId, userId),
+        sql`${creditPurchases.status} in ('paid', 'refunded')`,
+      ),
+    )
+    .limit(1);
+
+  return Boolean(row);
+}
+
+/** The packs to show this person, with the first-purchase one removed if spent. */
+export async function packsForUser(
+  userId: string | null,
+  database: DbLike = defaultDb,
+): Promise<CreditPack[]> {
+  const packs = await listCreditPacks(database);
+  if (!userId) return packs;
+
+  const spent = await hasPurchasedBefore(userId, database);
+  return spent ? packs.filter((pack) => !pack.firstPurchaseOnly) : packs;
 }
 
 export async function findCreditPack(
@@ -57,7 +94,7 @@ export async function findCreditPack(
 
 export type StartPurchaseResult =
   | { ok: true; purchaseId: string; checkoutUrl: string }
-  | { ok: false; reason: 'no_such_pack' | 'no_such_user' };
+  | { ok: false; reason: 'no_such_pack' | 'no_such_user' | 'not_a_first_purchase' };
 
 /**
  * Open a checkout.
@@ -66,7 +103,7 @@ export type StartPurchaseResult =
  * exists when their webhook comes back with it. Nothing is credited here.
  */
 export async function startPurchase(
-  input: { userId: string; packId: string; returnUrl?: string },
+  input: { userId: string; packId: string; returnUrl?: string; providerId?: string | null },
   database: DbLike = defaultDb,
 ): Promise<StartPurchaseResult> {
   const pack = await findCreditPack(input.packId, database);
@@ -80,22 +117,42 @@ export async function startPurchase(
 
   if (!user) return { ok: false, reason: 'no_such_user' };
 
-  const provider = getPaymentProvider();
+  // The $5 pack is a taste, not a tier: one per person, ever.
+  //
+  // Two guards, because they catch different things. This one refuses somebody
+  // who has already bought *anything*; the partial unique index on
+  // `credit_purchases` refuses a second first-purchase row even when two
+  // checkouts are opened in two tabs at the same instant and both pass here.
+  if (pack.firstPurchaseOnly && (await hasPurchasedBefore(input.userId, database))) {
+    return { ok: false, reason: 'not_a_first_purchase' };
+  }
 
-  const [created] = await database
-    .insert(creditPurchases)
-    .values({
-      userId: input.userId,
-      packId: pack.id,
-      paidCents: pack.paidCents,
-      creditsCents: pack.creditsCents,
-      provider: provider.name,
-      status: 'pending',
-      // One row per checkout attempt. What stops a *redelivered webhook*
-      // crediting twice is the ledger key below, not this.
-      idempotencyKey: `checkout:${crypto.randomUUID()}`,
-    })
-    .returning({ id: creditPurchases.id });
+  // The student's chosen method, or the deployment default. An unknown id
+  // throws rather than quietly falling back, because `credit_purchases.provider`
+  // is what support and the revenue report both read.
+  const provider = getPaymentProvider(input.providerId);
+
+  let created: { id: string } | undefined;
+  try {
+    [created] = await database
+      .insert(creditPurchases)
+      .values({
+        userId: input.userId,
+        packId: pack.id,
+        paidCents: pack.paidCents,
+        creditsCents: pack.creditsCents,
+        provider: provider.name,
+        status: 'pending',
+        firstPurchaseOnly: pack.firstPurchaseOnly ?? false,
+        // One row per checkout attempt. What stops a *redelivered webhook*
+        // crediting twice is the ledger key below, not this.
+        idempotencyKey: `checkout:${crypto.randomUUID()}`,
+      })
+      .returning({ id: creditPurchases.id });
+  } catch (error) {
+    if (isFirstPurchaseClash(error)) return { ok: false, reason: 'not_a_first_purchase' };
+    throw error;
+  }
 
   const purchaseId = created!.id;
 
@@ -115,6 +172,31 @@ export async function startPurchase(
     .where(eq(creditPurchases.id, purchaseId));
 
   return { ok: true, purchaseId, checkoutUrl: session.url };
+}
+
+/**
+ * A unique-violation on the one-first-purchase-per-person index.
+ *
+ * Drizzle wraps the driver error, so the code is somewhere down the `cause`
+ * chain rather than on the object it hands back — the same lesson the booking
+ * race taught in Phase 3B.
+ */
+function isFirstPurchaseClash(error: unknown): boolean {
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    const candidate = current as { code?: string; constraint_name?: string; message?: string };
+    if (
+      candidate.code === '23505' &&
+      (candidate.constraint_name === 'credit_purchases_first_only_key' ||
+        candidate.message?.includes('credit_purchases_first_only_key'))
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+
+  return false;
 }
 
 export type ApplyEventResult = {
@@ -211,6 +293,8 @@ export type PurchaseRow = {
   paidCents: number;
   creditsCents: number;
   status: string;
+  /** Which provider this attempt went through. Never branched on in logic. */
+  provider: string;
   createdAt: Date;
   settledAt: Date | null;
 };
@@ -227,6 +311,7 @@ export async function purchaseHistoryFor(
       paidCents: creditPurchases.paidCents,
       creditsCents: creditPurchases.creditsCents,
       status: creditPurchases.status,
+      provider: creditPurchases.provider,
       createdAt: creditPurchases.createdAt,
       settledAt: creditPurchases.settledAt,
     })
@@ -249,6 +334,7 @@ export async function loadPurchaseFor(
       paidCents: creditPurchases.paidCents,
       creditsCents: creditPurchases.creditsCents,
       status: creditPurchases.status,
+      provider: creditPurchases.provider,
       createdAt: creditPurchases.createdAt,
       settledAt: creditPurchases.settledAt,
     })

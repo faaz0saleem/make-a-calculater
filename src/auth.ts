@@ -11,12 +11,49 @@ import NextAuth from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 import Google from 'next-auth/providers/google';
 
+import { cookies } from 'next/headers';
+
 import { authConfig } from '@/auth.config';
 import { db } from '@/db/client';
-import { accounts, sessions, users, verificationTokens } from '@/db/schema';
+import { accounts, sessions, studentWallets, users, verificationTokens } from '@/db/schema';
 import { verifyPassword } from '@/lib/auth/password';
 import type { UserRole } from '@/lib/auth/roles';
+import { countryFromTimeZone } from '@/lib/geo/timezone-country';
+import { isValidTimeZone } from '@/lib/time';
 import { isGoogleConfigured } from '@/lib/env';
+
+/** Set by the signup form before it hands the browser to Google. */
+const SIGNUP_HINT_COOKIE = 'tutorly_signup';
+
+type SignupHint = {
+  isAdult?: unknown;
+  intent?: unknown;
+  timezone?: unknown;
+  country?: unknown;
+};
+
+/**
+ * The answers the signup form collected, carried across Google's round trip.
+ *
+ * Google gives us an email and a name and nothing else, so the 18-or-over
+ * answer and the inferred place would be lost between pressing the button and
+ * coming back. A short-lived cookie carries them.
+ *
+ * Everything in it is a *hint*, not a credential: the worst somebody can do by
+ * forging it is set their own timezone and lie about their age, both of which
+ * they could do on the form anyway. No role is ever read from it.
+ */
+async function readSignupHint(): Promise<SignupHint | null> {
+  try {
+    const raw = (await cookies()).get(SIGNUP_HINT_COOKIE)?.value;
+    if (!raw) return null;
+
+    const parsed: unknown = JSON.parse(decodeURIComponent(raw));
+    return typeof parsed === 'object' && parsed !== null ? (parsed as SignupHint) : null;
+  } catch {
+    return null;
+  }
+}
 
 const googleProviders = isGoogleConfigured()
   ? [
@@ -80,6 +117,47 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
     }),
   ],
+  events: {
+    /**
+     * Finish an account the adapter just created for a Google sign-in.
+     *
+     * The adapter writes an email, a name and an image — the columns Auth.js
+     * knows about. Everything this product needs beyond that lands here: the
+     * wallet every student has, and the answers the signup form collected
+     * before handing the browser to Google.
+     *
+     * Runs exactly once per account, which is why it is an event rather than a
+     * check on every sign-in.
+     */
+    async createUser({ user }) {
+      if (!user.id) return;
+
+      const hint = await readSignupHint();
+      const timezone =
+        typeof hint?.timezone === 'string' && isValidTimeZone(hint.timezone) ? hint.timezone : 'UTC';
+      const country =
+        typeof hint?.country === 'string' && /^[A-Za-z]{2}$/.test(hint.country)
+          ? hint.country.toUpperCase()
+          : countryFromTimeZone(timezone);
+
+      // Only a student. Signing up to teach goes through the wizard, which
+      // needs a name, a rate and documents — none of which Google supplies.
+      await db
+        .update(users)
+        .set({
+          roles: ['student'],
+          timezone,
+          country,
+          isAdult: typeof hint?.isAdult === 'boolean' ? hint.isAdult : null,
+          // Google gives a real name, so it is confirmed rather than a
+          // placeholder waiting for the booking form.
+          nameConfirmedAt: user.name ? new Date() : null,
+        })
+        .where(eq(users.id, user.id));
+
+      await db.insert(studentWallets).values({ userId: user.id }).onConflictDoNothing();
+    },
+  },
   callbacks: {
     ...authConfig.callbacks,
     /**

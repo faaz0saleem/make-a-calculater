@@ -41,6 +41,48 @@ export async function signIn(page: Page, email: string): Promise<void> {
   await page.waitForURL((url) => !url.pathname.startsWith('/signin'));
 }
 
+/**
+ * A fresh student account, made directly rather than through the form.
+ *
+ * The signup form is rate limited to five registrations a minute per IP, which
+ * is right in production and wrong for a suite that needs several accounts in a
+ * row. Tests that are *about* signup go through the form; tests that merely
+ * need somebody new use this.
+ *
+ * The password hash is copied from a seeded account, so `SEED_PASSWORD` signs
+ * in as usual and no bcrypt work happens here.
+ */
+export async function createStudent(
+  email: string,
+  overrides: { isAdult?: boolean; country?: string | null; creditsCents?: number } = {},
+): Promise<string> {
+  return queryDatabase(async (sql) => {
+    const [seeded] = await sql`select password_hash from users where email = ${ACCOUNTS.student}`;
+
+    const [created] = await sql`
+      insert into users (email, password_hash, name, roles, timezone, country, is_adult, email_verified_at)
+      values (
+        ${email},
+        ${String(seeded!.password_hash)},
+        ${email.split('@')[0] ?? 'student'},
+        array['student']::user_role[],
+        'UTC',
+        ${overrides.country ?? null},
+        ${overrides.isAdult ?? true},
+        now()
+      )
+      returning id
+    `;
+
+    await sql`
+      insert into student_wallets (user_id, credits_cents)
+      values (${created!.id}, ${overrides.creditsCents ?? 0})
+    `;
+
+    return created!.id as string;
+  });
+}
+
 export async function signOut(page: Page): Promise<void> {
   await page.goto('/');
   const button = page.getByRole('button', { name: 'Sign out' });

@@ -18,6 +18,7 @@
 
 import { and, asc, count, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 
+import { commissionBpsFor } from '@/lib/money/commission';
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
 import { notify } from './notifications';
@@ -225,7 +226,10 @@ export async function requestTrial(
         durationMinutes: tutor.trialMinutes,
         status: 'pending_tutor',
         priceCents: 0,
-        commissionBps: tutor.commissionBps,
+        // A trial is free and moves no money, but the column is not nullable
+        // and a zero would read as "we took nothing from a paid session".
+        // Snapshot what a first paid booking would have carried.
+        commissionBps: commissionBpsFor(false, tutor.commissionBps),
         escrowCents: 0,
         studentTz: student.timezone,
         tutorTz: tutor.timezone,

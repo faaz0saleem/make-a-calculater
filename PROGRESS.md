@@ -12,9 +12,164 @@ Phases follow `SPEC.md` §15.
 | 4 — LiveKit calls + session state machine + settlement | **Done** |
 | 5 — trials, messaging, reviews, follows | **Done** |
 | 6A — curriculum matching | **Done** |
-| 6B — student signup | Not started |
+| 6B — student signup + the paywall moved | **Done** |
 | 6C — payouts + admin dashboard + audit log | Not started |
 | 7 — real payment provider, notifications, SEO, analytics | Not started |
+
+---
+
+## Phase 6, part B — signup, and the paywall moved — done
+
+Two halves of the same idea: **stop asking for things before they are worth
+anything.** The old flow asked for a name, a country and a timezone before
+showing a tutor, and asked for money before showing a price.
+
+### Signup asks three things
+
+An email, a password, and **are you 18 or over?** That last one is the only
+question that cannot be deferred, because the answer changes what we are
+legally allowed to do with the account from the first minute. Everything else
+is a field, and a field can wait.
+
+- **Country and timezone are inferred, never asked.** The browser knows both.
+  The form shows what was inferred and offers a corrector behind one link,
+  rather than two required selects. This is not only politeness: the timezone
+  feeds the overlap term from Part A, so a student who answers nothing still
+  gets tutors who are awake when they are.
+- **`users.guardian_id` exists now**, nullable, alongside `guardian_email` and
+  `guardian_linked_at`. Parent accounts are later; adding a self-referencing
+  foreign key to `users` once bookings and ledger rows point at these accounts
+  is a far worse migration than adding it while it is empty.
+- **Under 18 is captured at signup and acted on at the first booking**, which
+  is when it stops being hypothetical: somebody is about to meet an adult on a
+  video call. The booking form asks for a guardian's email and `linkGuardian`
+  refuses to write one onto an account that never said it was under 18.
+- **Google carries the same answers across.** Google returns an email and a
+  name; the 18-or-over answer and the inferred place ride along in a
+  short-lived cookie and land in an `events.createUser` hook. It is a hint, not
+  a credential — no role is ever read from it.
+
+Nothing else is asked at signup:
+
+| Field | Where it now arrives | Why there |
+|---|---|---|
+| Class | A dismissible prompt on the feed | The answer improves the feed immediately |
+| Name | The booking form | The tutor is about to need it |
+| Phone | "WhatsApp reminders" on the dashboard | A reminder is a thing they get, not a tax they pay |
+
+The class prompt's "Not now" lasts a fortnight, not for ever — somebody
+browsing idly in January may be looking hard in February. Once they answer it
+never returns. Until a student gives a name, `users.name` holds a tidied
+version of their email's local part and `name_confirmed_at` is null, so no
+screen ever renders a blank and every screen knows it is a placeholder.
+
+**Measured, not asserted.** A Playwright test counts every click, key press and
+submit the browser sees and times the first browsable feed:
+
+```
+interactions  0   (a visitor presses nothing to browse)
+time to feed  well under the 10s bar, on the built app
+```
+
+### The paywall moved to the end
+
+Browse → profile → calendar → **pick a slot** all work signed out. Auth is
+required at exactly one point: committing.
+
+The hard part was not moving it. It was that a visitor who picks a time and
+goes off to create an account has to come back to **that time, still held** —
+otherwise "sign up to book this" means "sign up and find out". So a hold no
+longer requires an account:
+
+- `slot_holds.student_id` is nullable and `guest_token` was added, with a check
+  constraint making it exactly one of the two and a partial unique index on
+  each. A guest's pick is a real ten-minute hold before the account exists.
+- Sign-in and sign-up both redirect through `/api/auth/land`, which claims the
+  guest's holds and clears the cookie. One place, once, testable — rather than
+  something every landing page has to remember.
+- The commit page is `/tutors/[id]/book`: the slot, the price, the balance, the
+  hold's expiry, the top-up, the name and the guardian question, all on one
+  page. **The top-up is inline** — a detour to a separate credits screen is how
+  a booking gets abandoned. The e2e test buys credits mid-flow and asserts the
+  hold's `expires_at` is unchanged on the way back.
+
+### Pricing
+
+- **A $5 pack, once per person.** Two guards, because they catch different
+  things: a check that refuses anybody who has bought before, and a partial
+  unique index on `credit_purchases` that refuses a second one even when two
+  checkouts are opened in two tabs at the same instant.
+- **Bonus credits: none below $50, 3% at $50, 5% at $100.** A dollar of bonus
+  is not a dollar of marketing spend — a credit is a claim on a lesson, and a
+  lesson costs us the tutor's share. The test that pins this asserts the real
+  number: **78c of payout per dollar given away.**
+- **Commission 22% / 16%**, up from 20/15, floored by any negotiated rate
+  exactly as before.
+
+`tutor_profiles.commission_bps` had to change shape for that rise to mean
+anything. It defaulted to 2000, which was a stand-in for "nothing was
+negotiated" — and left as-is it would have capped every existing tutor at the
+old rate and made the change a no-op. It is now **nullable, null meaning no
+promise was made**; the migration moves the old default to null and leaves the
+five genuinely negotiated 15% rates alone.
+
+### Settled bookings did not move
+
+```
+$ pnpm prove:rates
+176 bookings in a terminal state, by snapshotted rate:
+  15%    45 (a rate we no longer charge)
+  16%     7 (a rate we charge today)
+  20%    80 (a rate we no longer charge)
+  22%    44 (a rate we charge today)
+
+Ran the nightly jobs: settled 1, pruned 0, ledger drift none.
+OK    no terminal booking changed its price or its rate
+OK    every settled booking was split at its own snapshotted rate
+
+The rate change reached no booking that already existed.
+```
+
+Two assertions, deliberately different. The first is a fingerprint before and
+after the nightly jobs. The second reads the **ledger**: for every settled
+booking, the platform's share as recorded matches that booking's *own*
+snapshot rather than today's constant. Zero ledger drift would not have caught
+a wrong rewrite — both sides would agree with each other perfectly. This does.
+
+The seed now spans the repricing on purpose: bookings older than thirty days
+carry the rates that were in force when they were made, so the proof has
+something to fail on. It also applies the retention rule properly, tracking
+which student-and-tutor pairs have already had a paid session.
+
+### Paying without a card
+
+Many students here have no card at all, so a card-only checkout is not an
+expensive checkout for them — it is a closed door. And at 5% + 50c a $5
+purchase costs 75c in fees, fifteen percent of the transaction we most want
+somebody to make.
+
+`src/lib/payments/catalogue.ts` is one table: id, label, the countries it leads
+in, what it costs us, and a factory. Adding a provider is an entry there and
+nothing else — no branch in the checkout, no `if (country === 'PK')` anywhere
+in the app. Each provider gets its own webhook endpoint, because a body must be
+verified with the key of the provider that signed it.
+
+Countries decide **order, not availability**: a Karachi student sees JazzCash
+and Easypaisa first, a London student sees the card first, and both see
+everything. Every implementation is still a mock; the routing is not.
+
+### What a tutor actually earns
+
+The rate screen now says *"You'll receive $19.50 of a $25.00 lesson from a new
+student, and $21.00 once they come back."* Two numbers, because a rate is one
+figure and income is two. At the $5 floor it reads $3.90 an hour, which is a
+better argument against pricing there than a rule forbidding it would be.
+
+### A bug the tests found
+
+The trial calendar offered slots inside the two-hour request cutoff and then
+refused them. It now starts the trial calendar at the cutoff, so a time that is
+offered can actually be asked for.
 
 ---
 
@@ -769,7 +924,9 @@ right element, muted, and stopped on schedule.
 | Notifications | In-app only. Email and WhatsApp are Phase 7 — item 22. |
 | Payouts | The tables, the encryption and the `$100` threshold exist. Requesting and paying one is Phase 6, part C. |
 | Admin dashboard | Verification, moderation, packs and curriculum. GMV, take rate and the reports queue are Phase 6, part C. |
-| Student signup | Email + password and Google. The 18-or-over question, inferred country and the deferred prompts are Phase 6, part B. |
+| Payment providers | Card, JazzCash and Easypaisa all route correctly and all three are mocks. No merchant account exists yet — item 1. |
+| Parent accounts | An under-18 account records a guardian's email and `guardian_id` is ready. A guardian cannot sign in and see it yet. |
+| WhatsApp reminders | The number is collected and stored. Sending is Phase 7 — item 22. |
 | Curriculum matching at scale | One correlated lookup per candidate row. Fine here; the step at a hundred thousand tutors is a denormalised array on `tutor_ranking` with a GIN index, written nightly. |
 | Rate limiting | Real, but in-memory, so it is per instance. Needs a shared store before more than one node. Item 8. |
 
@@ -801,19 +958,16 @@ says the videos were skipped.
 
 ```
 pnpm typecheck   clean
-pnpm test        40 files, 573 tests passed
-pnpm build       compiled, 33 routes
+pnpm test        41 files, 592 tests passed
+pnpm build       compiled, 36 routes
 pnpm seed        58 users · 40 verified · 5 pending · 1 draft · 1 rejected
-                 10 boards · 220 tutor curriculum positions · 14 student ones
-                 4 transcoded clips (preview + hero + 3 thumbnails each)
-                 189 bookings, every one inside published availability
-                 1,153 ledger entries · zero drift
-                 Ranked 40 verified tutors: top 9167, median 8069
-                 (availability from database)
-pnpm e2e         73 passed
+                 10 boards · 221 tutor curriculum positions · 12 student ones
+                 bookings spanning the repricing: 20/15 and 22/16 both present
+                 zero ledger drift
+pnpm e2e         87 passed
 pnpm reconcile   Ledger reconciled: zero drift.
-pnpm prove:curriculum
-                 the database refuses all three
+pnpm prove:curriculum   the database refuses all three
+pnpm prove:rates        the rate change reached no booking that already existed
 ```
 
 Lighthouse on the built app, desktop preset: feed **99 performance / 100

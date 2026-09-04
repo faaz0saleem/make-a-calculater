@@ -14,6 +14,7 @@ import { relations, sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
+  check,
   date,
   foreignKey,
   index,
@@ -150,15 +151,51 @@ export const users = pgTable(
     roles: userRoleEnum().array().notNull().default(sql`ARRAY['student']::user_role[]`),
     name: varchar({ length: 120 }).notNull(),
     /**
+     * When the person confirmed the name we are showing.
+     *
+     * A student is never asked for their name at signup — it buys them nothing
+     * at that moment. Until they give one on the booking form, `name` holds a
+     * tidied version of their email's local part, and this is null so every
+     * screen that shows it to somebody else knows it is a placeholder rather
+     * than a name they chose.
+     */
+    nameConfirmedAt: timestamp({ withTimezone: true }),
+    /**
      * Named for the Auth.js adapter, stored as `avatar_url` per SPEC.md §12.
      * The adapter type-checks the TypeScript key, Postgres sees the spec's name.
      */
     image: text('avatar_url'),
     /** IANA identifier, e.g. `Asia/Karachi`. Never an offset. */
     timezone: varchar({ length: 64 }).notNull().default('UTC'),
-    /** ISO 3166-1 alpha-2. */
+    /** ISO 3166-1 alpha-2. Inferred from the browser, never asked for. */
     country: varchar({ length: 2 }),
     city: varchar({ length: 120 }),
+    /** WhatsApp reminders. Asked for at the reminder step, never at signup. */
+    phone: varchar({ length: 32 }),
+
+    /**
+     * "Are you 18 or over?" — the one question signup cannot defer, because the
+     * answer changes what we are legally allowed to do with the account.
+     *
+     * Null for the accounts created before we asked. Not a date of birth: we do
+     * not need one, and a date of birth is a far more sensitive thing to hold
+     * than a boolean.
+     */
+    isAdult: boolean(),
+
+    /**
+     * The parent or guardian on an under-18 account.
+     *
+     * Captured at first booking rather than at signup — a 15-year-old browsing
+     * tutors has nothing to consent to yet. The email lands first and the id
+     * follows when parent accounts exist, which is why the column is here now:
+     * adding a foreign key to `users` once bookings and ledger rows reference
+     * these accounts is a far worse migration than adding it while it is empty.
+     */
+    guardianEmail: varchar({ length: 255 }),
+    guardianId: uuid(),
+    guardianLinkedAt: timestamp({ withTimezone: true }),
+
     /** Auth.js calls this `emailVerified`; the column is `email_verified_at`. */
     emailVerified: timestamp('email_verified_at', { withTimezone: true }),
     suspendedAt: timestamp({ withTimezone: true }),
@@ -168,6 +205,12 @@ export const users = pgTable(
   (table) => [
     uniqueIndex('users_email_lower_key').on(sql`lower(${table.email})`),
     index('users_roles_idx').using('gin', table.roles),
+    // Self-reference, declared here rather than inline to avoid a circular type.
+    foreignKey({
+      name: 'users_guardian_id_fk',
+      columns: [table.guardianId],
+      foreignColumns: [table.id],
+    }).onDelete('set null'),
   ],
 );
 
@@ -276,8 +319,16 @@ export const tutorProfiles = pgTable(
     promoStartsAt: timestamp({ withTimezone: true }),
     promoEndsAt: timestamp({ withTimezone: true }),
 
-    /** Platform take rate in basis points. 2000 = 20%. */
-    commissionBps: integer().notNull().default(2_000),
+    /**
+     * A rate negotiated with this tutor during recruitment, in basis points, or
+     * null — which is most of them.
+     *
+     * A **floor**, not the rate: the effective commission is the lower of this
+     * and the retention rate. Null means "no promise was made". It used to
+     * default to 2000, which was a stand-in for the same thing and became
+     * actively wrong the moment the first-booking rate rose above 20%.
+     */
+    commissionBps: integer(),
 
     // Trials (SPEC.md §6).
     offersTrial: boolean().notNull().default(false),
@@ -740,6 +791,8 @@ export const creditPacks = pgTable('credit_packs', {
   creditsCents: integer().notNull(),
   sortOrder: smallint().notNull().default(0),
   active: boolean().notNull().default(true),
+  /** Offered only as somebody's very first purchase. See `lib/money/packs.ts`. */
+  firstPurchaseOnly: boolean().notNull().default(false),
 });
 
 /**
@@ -755,9 +808,20 @@ export const slotHolds = pgTable(
   'slot_holds',
   {
     id: uuid().primaryKey().defaultRandom(),
-    studentId: uuid()
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Null while the person holding it has not signed up yet. */
+    studentId: uuid().references(() => users.id, { onDelete: 'cascade' }),
+    /**
+     * A cookie value identifying a visitor with no account.
+     *
+     * Somebody browsing signed out can pick a slot, and the slot has to survive
+     * the trip through signup — otherwise "sign up to book this" means "sign up
+     * and find out whether it is still there". On the way back the hold is
+     * claimed: `student_id` is set and this is cleared.
+     *
+     * It is not a credential. Guessing one wins nothing but a ten-minute claim
+     * on a slot that is already publicly visible as held.
+     */
+    guestToken: uuid(),
     tutorId: uuid()
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
@@ -767,9 +831,19 @@ export const slotHolds = pgTable(
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    /** One student, one hold on a given slot — re-picking it just extends theirs. */
-    uniqueIndex('slot_holds_student_slot').on(table.studentId, table.tutorId, table.startAtUtc),
+    /** One holder, one hold on a given slot — re-picking it just extends theirs. */
+    uniqueIndex('slot_holds_student_slot')
+      .on(table.studentId, table.tutorId, table.startAtUtc)
+      .where(sql`student_id is not null`),
+    uniqueIndex('slot_holds_guest_slot')
+      .on(table.guestToken, table.tutorId, table.startAtUtc)
+      .where(sql`guest_token is not null`),
     index('slot_holds_slot_idx').on(table.tutorId, table.startAtUtc, table.expiresAt),
+    /** Exactly one holder: an account or a guest, never both and never neither. */
+    check(
+      'slot_holds_one_holder',
+      sql`(student_id is null) <> (guest_token is null)`,
+    ),
   ],
 );
 
@@ -825,12 +899,27 @@ export const creditPurchases = pgTable(
     status: purchaseStatusEnum().notNull().default('pending'),
     /** Webhooks arrive twice. This index is what makes the second one a no-op. */
     idempotencyKey: varchar({ length: 200 }).notNull(),
+    /**
+     * Snapshotted from the pack, so the restriction survives an admin later
+     * editing or retiring it — and so the index below has a column to stand on.
+     */
+    firstPurchaseOnly: boolean().notNull().default(false),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp({ withTimezone: true }),
   },
   (table) => [
     uniqueIndex('credit_purchases_idempotency_key').on(table.idempotencyKey),
     index('credit_purchases_user_idx').on(table.userId, table.createdAt),
+    /**
+     * One first-purchase-only pack per person, ever.
+     *
+     * A check in the server action would pass twice in two tabs. This does not.
+     * Failed attempts are excluded so a card decline does not permanently burn
+     * somebody's one cheap pack.
+     */
+    uniqueIndex('credit_purchases_first_only_key')
+      .on(table.userId)
+      .where(sql`first_purchase_only and status <> 'failed'`),
   ],
 );
 

@@ -28,6 +28,7 @@ import { loadTutorDossier } from '@/db/tutors';
 import { unsupportedSubjects } from '@/lib/curriculum/credential-match';
 import { requireRole } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
+import { takeHomeFor } from '@/lib/money/commission';
 import { objectUrl, SIGNED_URL_TTL_SECONDS } from '@/lib/storage';
 import { languageName, PROFICIENCY_LABELS, type LanguageProficiency } from '@/lib/tutors/languages';
 import { CHECKLIST_ITEMS } from '@/lib/tutors/verification';
@@ -61,6 +62,7 @@ export default async function VerificationReviewPage({
   if (!tutor) notFound();
 
   const positions = await getTutorCurriculum(tutorId);
+  const takeHome = takeHomeFor(tutor.hourlyCents, tutor.commissionBps);
   const flags = unsupportedSubjects(tutor.subjects, tutor.credentials);
   const flagged = new Set(flags.map((flag) => flag.subjectSlug));
 
@@ -163,9 +165,12 @@ export default async function VerificationReviewPage({
                   )}
                 </Claim>
                 <Claim label="Rates">
-                  {formatCents(tutor.hourlyCents)}/hr · {formatCents(tutor.halfHourCents)} per 30 min ·{' '}
-                  {tutor.commissionBps / 100}% negotiated commission (a floor: they pay the lower of
-                  this and the retention rate)
+                  {formatCents(tutor.hourlyCents)}/hr · {formatCents(tutor.halfHourCents)} per 30 min ·
+                  they receive {formatCents(takeHome.firstCents)} of an hour from a new student,{' '}
+                  {formatCents(takeHome.rebookingCents)} from a returning one
+                  {tutor.commissionBps === null
+                    ? ''
+                    : ` · ${tutor.commissionBps / 100}% negotiated floor (they pay the lower of this and the retention rate)`}
                 </Claim>
                 <Claim label="Free trial">
                   {tutor.offersTrial ? `Yes, ${tutor.trialMinutes} minutes` : 'No'}

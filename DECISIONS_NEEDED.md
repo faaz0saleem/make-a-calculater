@@ -452,7 +452,7 @@ what they meant.
 
 ## 26. Which classes line up with which, across boards
 
-**Default in place:** the mapping below is live and drives the near-match tier.
+**Settled.** The mapping below is right, and tier 1 stays the weakest tier.
 
 A class only means something inside its board, so a match across boards needs a
 board-independent rung to compare on. Every level carries one:
@@ -464,14 +464,18 @@ board-independent rung to compare on. Every level carries one:
 | Advanced, first year | AS Level | Class 11 (FSc I) | Class 11 | DP 1 | Grade 11 |
 | Advanced, final year | A2 Level | Class 12 (FSc II) | Class 12 | DP 2 | Grade 12 |
 
-This is the one part of the curriculum model where I am guessing at something
-you know first-hand. It only affects the weakest tier — "same subject, same
-rung, different board" — never an exact match, and being wrong costs a slightly
-odd suggestion rather than a wrong price or a lost booking. But if FSc Part I
-does not really sit where AS Level sits for a Lahore student, the near matches
-will feel off and you will notice it before I do.
+**Your answer, which the code now carries:** FSc Part I is *not* equivalent to
+AS Level. It is Class 11, taken at 16-17, broader and more memorisation-heavy.
+Content overlaps in maths and physics, but exam technique is completely
+different — and exam technique is a large part of what a student is paying a
+tutor for.
 
-Changing it is one column: `curriculum_levels.stage`, editable from
+So the rung is right (nearer AS than A2, which is where age puts it) and the
+tier is right (1, the weakest), and it is deliberately never promoted above
+that. The reasoning is written into `src/lib/curriculum/boards.ts` and
+`match.ts` so the next person to look at the table does not "fix" it.
+
+Changing a rung is one column: `curriculum_levels.stage`, editable from
 `/admin/curriculum`.
 
 **Also settled, and worth disagreeing with if you do:** the catch-all "Other /
@@ -481,8 +485,8 @@ out of an absence.
 
 ## 27. How much a workable hour is worth against a rating
 
-**Default in place:** up to 1200 basis points, earned in full at six overlapping
-hours a week.
+**Settled.** Up to 1200 basis points, earned in full at **three** overlapping
+hours, graduated all the way down.
 
 The feed now adds a timezone-overlap bonus to the nightly score: a tutor whose
 free hours land in the student's evening ranks above one whose land at 3am. The
@@ -492,14 +496,23 @@ two numbers behind it are judgement calls:
   ~225 points between a 4.6 and a 4.9 tutor. So being reachable outranks three
   tenths of a star. That feels right for live tutoring and would be wrong for
   almost any other kind of marketplace.
-- **`OVERLAP_TARGET_HOURS = 6`** — enough overlap to find a slot on any day of
-  the week. Past six the term stops paying, so a tutor who is simply emptier
-  does not out-rank one who is bookable.
+- **`OVERLAP_TARGET_HOURS = 3`** — was six, which was measured against a world
+  where tutor and student share a working day. The actual market does not:
+  Lahore to London is a five-hour offset, so a London tutor teaching their own
+  evening shares barely an hour with a Karachi student's day, and a bar that
+  fails that pair fails the corridor this product is for. Three passes it.
 
-Both are in `src/lib/ranking/overlap.ts` and both are one-line changes. The
-number worth watching once there is real traffic is whether cross-continent
-bookings that *do* happen are being suppressed by it — if a Karachi student
-happily takes a 7am lesson with a London tutor, six hours is too demanding.
+The term is **graduated, not a threshold**: one shared hour earns a third of it
+rather than falling off a cliff, because one shared hour is one lesson a week
+that actually happens. Only genuinely no shared hour scores nothing.
+
+And it can never overturn a curriculum match, because the match tier is a
+separate leading key: a tutor teaching the exact board, class and subject with
+two workable evening hours stays above a tutor with neither, whatever the term
+returns. That is asserted in `src/lib/curriculum/ordering.test.ts` rather than
+left as an arithmetic coincidence.
+
+Both numbers are in `src/lib/ranking/overlap.ts` and both are one-line changes.
 
 A tutor who has published no hours at all scores the midpoint rather than zero,
 because an empty calendar is missing information and not a bad tutor. That one I

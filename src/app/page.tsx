@@ -48,6 +48,7 @@ import {
   type BoardOption,
   type StudentCurriculumEntry,
 } from '@/db/curriculum';
+import { CURRICULUM_PROMPT_COOKIE } from '@/lib/students/prompts';
 import { TIMEZONE_COOKIE, TimezoneProbe } from '@/components/timezone-probe';
 import { currentUser } from '@/lib/auth/guards';
 import { countryFromTimeZone } from '@/lib/geo/timezone-country';
@@ -252,6 +253,9 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   );
 
   const curriculum = chooseCurriculum(params, declared, boards, subjects);
+  // "Not now" hides the class prompt for a fortnight. A cookie, because a
+  // dismissal is a browsing preference and it should wear off.
+  const promptDismissed = jar.get(CURRICULUM_PROMPT_COOKIE)?.value === 'later';
 
   const viewerContext: ViewerContext = {
     timezone: knownTimezone,
@@ -335,7 +339,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
         <CategoryChips subjects={subjects} active={filters.subject} buildHref={buildHref} />
 
-        {viewer && declared.length === 0 ? (
+        {viewer && declared.length === 0 && !promptDismissed ? (
           <CurriculumPrompt
             boards={boards}
             subjects={subjects}

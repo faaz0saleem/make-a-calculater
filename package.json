@@ -28,6 +28,7 @@
     "prove:booking": "tsx src/scripts/prove-no-double-booking.ts",
     "prove:commission": "tsx src/scripts/prove-commission.ts",
     "prove:curriculum": "tsx src/scripts/prove-curriculum.ts",
+    "prove:rates": "tsx src/scripts/prove-rates-frozen.ts",
     "measure:regions": "tsx src/scripts/measure-regions.ts"
   },
   "dependencies": {

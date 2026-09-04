@@ -35,6 +35,8 @@ import { db } from '@/db/client';
 import { bookings, studentWallets, users } from '@/db/schema';
 import { openReschedulesFor } from '@/db/bookings';
 import { getStudentCurriculum } from '@/db/curriculum';
+import { loadStudentProfile } from '@/db/students';
+import { ReminderPreference } from '@/components/students/reminders';
 import { reviewableSessionsFor } from '@/db/reviews';
 import { pendingTrialsForStudent, recentTrialToConvert } from '@/db/trials';
 import { getAvailability } from '@/lib/availability';
@@ -60,6 +62,8 @@ export default async function DashboardPage({
     declined?: string;
     reported?: string;
     credited?: string;
+    reminders?: string;
+    reminderError?: string;
     error?: string;
   }>;
 }) {
@@ -133,13 +137,15 @@ export default async function DashboardPage({
     .orderBy(desc(bookings.startAtUtc))
     .limit(10);
 
-  const [outgoingTrials, reviewable, trialToConvert, reschedules, studentPositions] = await Promise.all([
-    pendingTrialsForStudent(user.id, now),
-    reviewableSessionsFor(user.id),
-    recentTrialToConvert(user.id, now),
-    openReschedulesFor(user.id, now),
-    getStudentCurriculum(user.id),
-  ]);
+  const [outgoingTrials, reviewable, trialToConvert, reschedules, studentPositions, student] =
+    await Promise.all([
+      pendingTrialsForStudent(user.id, now),
+      reviewableSessionsFor(user.id),
+      recentTrialToConvert(user.id, now),
+      openReschedulesFor(user.id, now),
+      getStudentCurriculum(user.id),
+      loadStudentProfile(user.id),
+    ]);
 
   // Times each upcoming session could move to. One engine call per distinct
   // tutor-and-duration rather than per booking, so a student with six sessions
@@ -314,6 +320,15 @@ export default async function DashboardPage({
             </CardContent>
           </Card>
         </div>
+
+        {upcoming.length > 0 || student?.phone ? (
+          <ReminderPreference
+            phone={student?.phone ?? null}
+            returnTo="/dashboard"
+            saved={query.reminders === '1'}
+            error={query.reminderError === '1'}
+          />
+        ) : null}
 
         <Card>
           <CardHeader>

@@ -37,11 +37,16 @@ export const STUDY_WINDOW_END_HOUR = 22;
 /**
  * Overlapping hours at which the term is fully earned.
  *
- * Six is enough to find a slot on any day of the week. Past that a tutor is not
- * more bookable for this student, just more awake, and the term should stop
- * paying for it.
+ * Three, not six. Six was measured against a world where tutor and student
+ * share a working day; the actual market does not. Lahore to London is a five
+ * hour offset, so a London tutor teaching their own evening shares barely an
+ * hour with a Karachi student's — and a bar that fails that pair fails the
+ * corridor the product is being built for.
+ *
+ * Past three the term stops paying: a tutor free all day is not more bookable
+ * for this student than one free for an afternoon, just more awake.
  */
-export const OVERLAP_TARGET_HOURS = 6;
+export const OVERLAP_TARGET_HOURS = 3;
 
 /** The most the term can move a score, in basis points of the 0-10000 range. */
 export const OVERLAP_MAX_BPS = 1_200;
@@ -124,6 +129,16 @@ export function overlapHours(tutorMask: number, viewerMask: number): number {
  * between a 4.6 and a 4.9 tutor, which is roughly 225 points. That ordering is
  * intentional: being reachable at a workable hour matters more than three
  * tenths of a star.
+ *
+ * **Graduated, not a threshold.** A single shared hour is not nothing — it is
+ * one lesson a week that actually happens — so it earns a third of the term
+ * rather than falling off a cliff to zero. Only genuinely no shared hour scores
+ * nothing.
+ *
+ * And the term can never overturn a curriculum match, because the match tier is
+ * a separate leading key in the ordering: a tutor teaching the student's exact
+ * board, class and subject with two workable hours stays above a tutor with
+ * neither, whatever this returns.
  */
 export function overlapBonusBps(tutorMask: number, viewerMask: number): number {
   if (tutorMask === 0) return OVERLAP_UNKNOWN_BPS;

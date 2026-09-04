@@ -285,25 +285,40 @@ export type HoldResult =
   | { ok: false; problem: 'slot_taken' };
 
 /**
- * Claim a slot for ten minutes while the student buys credits.
+ * Who is holding a slot: somebody with an account, or somebody who has not
+ * signed up yet.
+ *
+ * Both are real holders. A visitor who picks a time before they have an account
+ * is the *most* important person to hold a slot for — they are one form away
+ * from their first booking, and "sign up and find out whether it is still
+ * there" is where that stops happening.
+ */
+export type Holder = { studentId: string; guestToken?: never } | { guestToken: string; studentId?: never };
+
+/**
+ * Claim a slot for ten minutes while somebody signs up or buys credits.
  *
  * Re-picking a slot they already hold just extends it — the unique index on
- * (student, tutor, slot) turns that into an update rather than a second row.
+ * (holder, tutor, slot) turns that into an update rather than a second row.
  */
 export async function holdSlot(
-  input: { studentId: string; tutorId: string; startAtUtc: Date; durationMinutes: number },
+  input: Holder & { tutorId: string; startAtUtc: Date; durationMinutes: number },
   now = new Date(),
   database: DbLike = defaultDb,
 ): Promise<HoldResult> {
+  const mine = input.studentId
+    ? eq(slotHolds.studentId, input.studentId)
+    : eq(slotHolds.guestToken, input.guestToken!);
+
   const [otherHold] = await database
-    .select({ studentId: slotHolds.studentId })
+    .select({ id: slotHolds.id })
     .from(slotHolds)
     .where(
       and(
         eq(slotHolds.tutorId, input.tutorId),
         eq(slotHolds.startAtUtc, input.startAtUtc),
-        ne(slotHolds.studentId, input.studentId),
         gt(slotHolds.expiresAt, now),
+        sql`not (${mine})`,
       ),
     )
     .limit(1);
@@ -315,18 +330,63 @@ export async function holdSlot(
   await database
     .insert(slotHolds)
     .values({
-      studentId: input.studentId,
+      studentId: input.studentId ?? null,
+      guestToken: input.guestToken ?? null,
       tutorId: input.tutorId,
       startAtUtc: input.startAtUtc,
       durationMinutes: input.durationMinutes,
       expiresAt,
     })
     .onConflictDoUpdate({
-      target: [slotHolds.studentId, slotHolds.tutorId, slotHolds.startAtUtc],
+      target: input.studentId
+        ? [slotHolds.studentId, slotHolds.tutorId, slotHolds.startAtUtc]
+        : [slotHolds.guestToken, slotHolds.tutorId, slotHolds.startAtUtc],
+      targetWhere: input.studentId
+        ? sql`student_id is not null`
+        : sql`guest_token is not null`,
       set: { expiresAt, durationMinutes: input.durationMinutes, createdAt: now },
     });
 
   return { ok: true, expiresAt };
+}
+
+/**
+ * Hand a guest's holds to the account they just created.
+ *
+ * Called once, on the way back from signup. A hold that expired while they were
+ * filling the form is simply not claimed — `expires_at > now` is still the
+ * whole expiry mechanism — and one they already hold as themselves wins, which
+ * is what `onConflictDoNothing` on the delete-and-move means here.
+ */
+export async function claimGuestHolds(
+  guestToken: string,
+  studentId: string,
+  now = new Date(),
+  database: DbLike = defaultDb,
+): Promise<number> {
+  const rows = await database
+    .update(slotHolds)
+    .set({ studentId, guestToken: null })
+    .where(
+      and(
+        eq(slotHolds.guestToken, guestToken),
+        gt(slotHolds.expiresAt, now),
+        // Not if this account already holds that slot: the unique index would
+        // refuse it, and their own hold is the one to keep.
+        sql`not exists (
+          select 1 from slot_holds mine
+          where mine.student_id = ${studentId}
+            and mine.tutor_id = ${slotHolds.tutorId}
+            and mine.start_at_utc = ${slotHolds.startAtUtc}
+        )`,
+      ),
+    )
+    .returning({ id: slotHolds.id });
+
+  // Anything left under the token is a duplicate of a hold they already have.
+  await database.delete(slotHolds).where(eq(slotHolds.guestToken, guestToken));
+
+  return rows.length;
 }
 
 export type LiveHold = {
@@ -368,6 +428,7 @@ export async function heldSlotsFor(
   viewerId: string | null,
   now = new Date(),
   database: DbLike = defaultDb,
+  guestToken?: string | null,
 ): Promise<Date[]> {
   const rows = await database
     .select({ startAtUtc: slotHolds.startAtUtc })
@@ -376,7 +437,8 @@ export async function heldSlotsFor(
       and(
         eq(slotHolds.tutorId, tutorId),
         gt(slotHolds.expiresAt, now),
-        viewerId ? ne(slotHolds.studentId, viewerId) : sql`true`,
+        viewerId ? sql`${slotHolds.studentId} is distinct from ${viewerId}::uuid` : sql`true`,
+        guestToken ? sql`${slotHolds.guestToken} is distinct from ${guestToken}::uuid` : sql`true`,
       ),
     );
 
@@ -384,18 +446,52 @@ export async function heldSlotsFor(
 }
 
 export async function releaseHold(
-  input: { studentId: string; tutorId: string; startAtUtc: Date },
+  input: Holder & { tutorId: string; startAtUtc: Date },
   database: DbLike = defaultDb,
 ): Promise<void> {
   await database
     .delete(slotHolds)
     .where(
       and(
-        eq(slotHolds.studentId, input.studentId),
+        input.studentId
+          ? eq(slotHolds.studentId, input.studentId)
+          : eq(slotHolds.guestToken, input.guestToken!),
         eq(slotHolds.tutorId, input.tutorId),
         eq(slotHolds.startAtUtc, input.startAtUtc),
       ),
     );
+}
+
+/**
+ * The slot a guest is holding with this tutor, if any.
+ *
+ * The profile page reads it so a signed-out visitor's own pick is called out
+ * rather than greyed out along with everybody else's.
+ */
+export async function guestHoldFor(
+  guestToken: string,
+  tutorId: string,
+  now = new Date(),
+  database: DbLike = defaultDb,
+): Promise<{ startAtUtc: Date; durationMinutes: number; expiresAt: Date } | null> {
+  const [row] = await database
+    .select({
+      startAtUtc: slotHolds.startAtUtc,
+      durationMinutes: slotHolds.durationMinutes,
+      expiresAt: slotHolds.expiresAt,
+    })
+    .from(slotHolds)
+    .where(
+      and(
+        eq(slotHolds.guestToken, guestToken),
+        eq(slotHolds.tutorId, tutorId),
+        gt(slotHolds.expiresAt, now),
+      ),
+    )
+    .orderBy(slotHolds.expiresAt)
+    .limit(1);
+
+  return row ?? null;
 }
 
 // ---------------------------------------------------------------------------

@@ -111,6 +111,7 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm prove:booking` | Fire N parallel bookings at one slot and print the result. `--clients 4` |
 | `pnpm prove:commission` | What commission a booking between two people would carry right now |
 | `pnpm prove:curriculum` | Show the database refusing a class from the wrong board, and a second primary position |
+| `pnpm prove:rates` | Show that a commission change reached no booking that already existed |
 | `pnpm measure:regions` | Median latency to each candidate media region. **Run it from the market** |
 
 ---
@@ -152,6 +153,33 @@ calendar. The port still answers three ways rather than two: `unknown` now means
 *their week is full*. The first deserves silence on a card, the second an honest
 "nothing free" — a wrong "Next free: Today 6:30 PM" costs more trust than a
 missing one.
+
+### Signing up, and where the paywall sits
+
+Signup asks for an email, a password, and **whether you are 18 or over** — the
+only question that cannot wait, because the answer changes what we are legally
+allowed to do with the account. Country and timezone are inferred from the
+browser, shown, and correctable; they are never asked. Everything else arrives
+where it pays the student back: the class from a dismissible prompt on the
+feed, the name on the booking form, the phone at the reminder step framed as
+WhatsApp reminders.
+
+The paywall is at the **end**. Browsing, opening a profile and picking a time
+all work signed out; auth is required only at the commit. A visitor who picks a
+slot gets a real ten-minute hold under a guest token before they have an
+account, and `/api/auth/land` claims it on the way back in — so "sign up to
+book this" means the slot is still there, not that they can look for it again.
+Topping up happens inline on the booking page, never as a detour.
+
+### Paying
+
+`src/lib/payments/catalogue.ts` is one table of methods: a card, JazzCash and
+Easypaisa. Countries decide **order, not availability** — a Karachi student
+sees the wallets first because most of them have no card at all, a London
+student sees the card first, and both see everything. Adding a provider is an
+entry in that table and its own webhook endpoint; nothing in the app branches
+on a provider name. Every implementation is still a mock (item 1); the routing
+is not.
 
 ### Curriculum: board, class, subject
 
@@ -510,6 +538,10 @@ These come from `SPEC.md` §13 and are not negotiable:
 9. A class belongs to its board at the database level — a composite foreign key
    onto `curriculum_levels (board_id, id)`, so an AS Level under CBSE cannot be
    stored whatever the app does. `pnpm prove:curriculum`.
+10. A price change never reaches a booking that already happened. The rate is
+    snapshotted at creation, and `pnpm prove:rates` checks the ledger rather
+    than the row — zero drift would not catch a wrong rewrite, because both
+    sides would agree with each other.
 
 ---
 

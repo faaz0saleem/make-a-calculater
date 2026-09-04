@@ -75,7 +75,19 @@ function britishLevels(board: string, gcseName: string): LevelSeed[] {
   ];
 }
 
-/** Levels for the Pakistani and Indian boards, in the words they use. */
+/**
+ * Levels for the Pakistani and Indian boards, in the words they use.
+ *
+ * Class 11 maps to `advanced_1`, alongside AS Level and IB DP 1 — nearer AS
+ * than A2, which is where it sits by age. That is **not** a claim that FSc Part
+ * I and AS Level are the same qualification. They are not: FSc is broader, more
+ * memorisation-heavy, and its exam technique is a different skill entirely,
+ * which is precisely the thing a tutor is hired to teach. Content overlaps in
+ * maths and physics; papers do not.
+ *
+ * So the mapping earns only the weakest match tier — "same subject, same rung,
+ * another board" — and is deliberately never upgraded above it.
+ */
 function southAsianLevels(board: string, matric: string, intermediate: string): LevelSeed[] {
   return [
     { id: `${board}:class-9`, name: 'Class 9', stage: 'lower_secondary', sortOrder: 1 },

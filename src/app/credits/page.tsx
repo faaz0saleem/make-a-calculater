@@ -9,19 +9,17 @@
 
 import Link from 'next/link';
 
-import { beginCheckout } from '@/app/credits/actions';
+import { TopUp } from '@/components/credits/top-up';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardMetric, CardTitle } from '@/components/ui/card';
 import { db } from '@/db/client';
-import { listCreditPacks, purchaseHistoryFor } from '@/db/purchases';
-import { studentWallets } from '@/db/schema';
+import { packsForUser, purchaseHistoryFor } from '@/db/purchases';
+import { studentWallets, users } from '@/db/schema';
 import { requireUser } from '@/lib/auth/guards';
 import { eq } from 'drizzle-orm';
 import { formatCents } from '@/lib/money/cents';
-import { packBonusBps } from '@/lib/money/packs';
-import { getPaymentProvider } from '@/lib/payments';
+import { findMethod, methodsForCountry } from '@/lib/payments';
 import { formatInTimeZone } from '@/lib/time';
 
 export const dynamic = 'force-dynamic';
@@ -34,19 +32,22 @@ export default async function CreditsPage({
 }) {
   const [user, query] = await Promise.all([requireUser(), searchParams]);
 
-  const [packs, history, wallet] = await Promise.all([
-    listCreditPacks(),
+  const [packs, history, wallet, profile] = await Promise.all([
+    packsForUser(user.id),
     purchaseHistoryFor(user.id),
     db
       .select({ creditsCents: studentWallets.creditsCents })
       .from(studentWallets)
       .where(eq(studentWallets.userId, user.id))
       .limit(1),
+    db.select({ country: users.country }).from(users).where(eq(users.id, user.id)).limit(1),
   ]);
 
   const balance = wallet[0]?.creditsCents ?? 0;
   const returnTo = query.returnTo ?? '/dashboard';
-  const provider = getPaymentProvider();
+  // Which ways of paying to offer, and in what order. Everyone sees all of
+  // them; the country only decides which is on top.
+  const methods = methodsForCountry(profile[0]?.country);
 
   return (
     <>
@@ -82,39 +83,11 @@ export default async function CreditsPage({
           </CardHeader>
         </Card>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          {packs.map((pack) => {
-            const bonus = packBonusBps(pack);
-            return (
-              <Card key={pack.id} data-testid="credit-pack">
-                <CardHeader>
-                  <div className="flex items-center justify-between gap-2">
-                    <CardTitle>{pack.name}</CardTitle>
-                    {bonus > 0 ? <Badge variant="success">+{(bonus / 100).toFixed(0)}%</Badge> : null}
-                  </div>
-                  <CardDescription>
-                    {formatCents(pack.creditsCents)} of credits for {formatCents(pack.paidCents)}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <form action={beginCheckout}>
-                    <input type="hidden" name="packId" value={pack.id} />
-                    <input type="hidden" name="returnTo" value={returnTo} />
-                    <Button type="submit" className="min-h-11 w-full" data-testid={`buy-${pack.id}`}>
-                      Buy {pack.name}
-                    </Button>
-                  </form>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
+        <TopUp packs={packs} methods={methods} returnTo={returnTo} />
 
         <p className="text-xs text-muted-foreground">
-          Payments run through the <strong>{provider.name}</strong> provider.
-          {provider.name === 'mock'
-            ? ' No card is taken and no money moves — this deployment has no real payment provider connected yet.'
-            : null}
+          Every provider here is a development stand-in — nothing is charged and no money moves. The
+          routing is real: {methods[0]!.label} is first because of where you are.
         </p>
 
         <Card>
@@ -138,6 +111,9 @@ export default async function CreditsPage({
                       </Badge>
                       <span className="tabular-nums">
                         {formatCents(purchase.paidCents)} → {formatCents(purchase.creditsCents)}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {findMethod(purchase.provider)?.label ?? purchase.provider}
                       </span>
                     </span>
                   </li>

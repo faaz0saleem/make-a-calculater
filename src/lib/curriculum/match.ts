@@ -19,6 +19,11 @@
  * Class 11 Physics under the Punjab Board has never seen the CAIE paper. The
  * syllabus is the expensive knowledge, the year is the cheap one.
  *
+ * Which is also why tier 1 stays the weakest tier and is never promoted. FSc
+ * Part I and AS Level sit on the same rung by age and overlap in content, but
+ * the papers and the exam technique are different skills — and exam technique
+ * is a large part of what a student is paying for.
+ *
  * Pure. Nothing here reads a database or a clock.
  */
 

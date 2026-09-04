@@ -66,6 +66,7 @@ import { BOARD_SEEDS } from '@/lib/curriculum/boards';
 import type { UserRole } from '@/lib/auth/roles';
 import { encryptSecret, last4 } from '@/lib/crypto';
 import { formatCents } from '@/lib/money/cents';
+import { commissionBpsFor, FIRST_BOOKING_COMMISSION_BPS } from '@/lib/money/commission';
 import {
   bookingEscrowEntries,
   creditPurchaseEntries,
@@ -387,7 +388,8 @@ type SeededTutor = {
   timezone: string;
   hourlyCents: number;
   halfHourCents: number;
-  commissionBps: number;
+  /** A negotiated floor, or null for the tutors who negotiated nothing. */
+  commissionBps: number | null;
   offersTrial: boolean;
   trialMinutes: number;
   ratingBias: number;
@@ -516,6 +518,7 @@ async function seedCreditPacks(): Promise<void> {
       creditsCents: pack.creditsCents,
       sortOrder: pack.sortOrder,
       active: true,
+      firstPurchaseOnly: pack.firstPurchaseOnly ?? false,
     })),
   );
 }
@@ -578,9 +581,21 @@ async function seedStudents(passwordHash: string, wallets: Wallets): Promise<See
       passwordHash,
       roles: ['student'] as UserRole[],
       name: student.name,
+      // Most students have given a name on a booking form by now. Index 3 has
+      // not: their name is still the placeholder signup derived from their
+      // email, so the booking form has a real case to ask in.
+      nameConfirmedAt: index === 3 ? null : NOW,
       timezone: student.timezone,
       country: LOCALES[index % LOCALES.length]!.country,
       city: LOCALES[index % LOCALES.length]!.city,
+      // The question signup cannot defer. Index 4 is under 18 with a guardian
+      // already on file; index 5 is under 18 and has not booked yet, so the
+      // guardian capture at first booking has somebody to happen to.
+      isAdult: index === 4 || index === 5 ? false : true,
+      guardianEmail: index === 4 ? 'guardian.four@tutorly.test' : null,
+      guardianLinkedAt: index === 4 ? daysFromNow(-20, 9) : null,
+      // A number for WhatsApp reminders, given at the reminder step by some.
+      phone: index % 3 === 0 ? `+9230012345${String(index).padStart(2, '0')}` : null,
       emailVerified: NOW,
     })),
   );
@@ -693,8 +708,10 @@ async function seedTutors(
       timezone: locale.timezone,
       hourlyCents,
       halfHourCents: deriveHalfHourCents(hourlyCents),
-      // A handful of early tutors negotiated 15%.
-      commissionBps: index % 9 === 0 ? 1_500 : 2_000,
+      // A handful of early tutors negotiated 15%. Everyone else negotiated
+      // nothing, which is null — not 20%, which would be a floor they never
+      // agreed to and would cap them at a rate we no longer charge.
+      commissionBps: index % 9 === 0 ? 1_500 : null,
       offersTrial: chance(0.6),
       trialMinutes: pick([10, 15, 20]),
       ratingBias: pick([4.1, 4.4, 4.6, 4.7, 4.8, 4.9, 5.0, 3.9]),
@@ -723,9 +740,12 @@ async function seedTutors(
   // are chosen so a single completed 60-minute session lands the balance exactly
   // on the number the test cares about.
   const fixtures: { index: number; email: string; name: string; hourlyCents: number; timezone: string }[] = [
-    { index: 0, email: 'payout.pending@tutorly.test', name: 'Sadia Mahmood', hourlyCents: 12_500, timezone: 'Asia/Karachi' },
-    { index: 1, email: 'payout.ready@tutorly.test', name: 'Daniel Okafor', hourlyCents: 12_500, timezone: 'Africa/Lagos' },
-    { index: 2, email: 'payout.short@tutorly.test', name: 'Mei Lin Zhang', hourlyCents: 12_437, timezone: 'Asia/Manila' },
+    // Rates chosen so one 60-minute session at the first-booking rate leaves
+    // the tutor exactly $100.00, $100.00 and $99.50. They move whenever the
+    // commission does, which is the point of writing the arithmetic down.
+    { index: 0, email: 'payout.pending@tutorly.test', name: 'Sadia Mahmood', hourlyCents: 12_820, timezone: 'Asia/Karachi' },
+    { index: 1, email: 'payout.ready@tutorly.test', name: 'Daniel Okafor', hourlyCents: 12_820, timezone: 'Africa/Lagos' },
+    { index: 2, email: 'payout.short@tutorly.test', name: 'Mei Lin Zhang', hourlyCents: 12_756, timezone: 'Asia/Manila' },
   ];
 
   for (const fixture of fixtures) {
@@ -735,7 +755,7 @@ async function seedTutors(
     tutor.hourlyCents = fixture.hourlyCents;
     tutor.halfHourCents = deriveHalfHourCents(fixture.hourlyCents);
     tutor.timezone = fixture.timezone;
-    tutor.commissionBps = 2_000;
+    tutor.commissionBps = null;
   }
 
   // A predictable Karachi tutor for the DST scenario and for manual clicking.
@@ -774,6 +794,10 @@ async function seedTutors(
         country: locale.country,
         city: locale.city,
         image: avatarUrls.get(tutor.id) ?? null,
+        nameConfirmedAt: NOW,
+        // A tutor is paid, signs contracts and teaches minors. Under-18 is not
+        // an account we create.
+        isAdult: true,
         emailVerified: NOW,
       };
     }),
@@ -1087,6 +1111,44 @@ function slotsInRange(
   return slotsWithin(subtractBusy(published, busy, bufferMinutes), durationMinutes);
 }
 
+/**
+ * The commission a seeded booking carries.
+ *
+ * Two things this gets right that a plain `tutor.commissionBps` did not.
+ *
+ * The **retention rule** actually applies: a student's first paid session with
+ * a tutor is charged the first-booking rate and every one after the rebooking
+ * rate, so the seeded world exercises the rule the product runs on rather than
+ * one flat number per tutor.
+ *
+ * And bookings made **before the repricing** carry the rates that were in force
+ * when they were made. A real database has years of them, and a proof that a
+ * price change does not reach settled bookings is worth nothing if every
+ * booking in the fixture was already at today's rate. `pnpm prove:rates` reads
+ * these.
+ */
+const REPRICED_AT = daysFromNow(-30, 0);
+const HISTORIC_FIRST_BOOKING_BPS = 2_000;
+const HISTORIC_REBOOKING_BPS = 1_500;
+
+/** Pairs that have already had a paid session, in the order the seed writes them. */
+const paidPairs = new Set<string>();
+
+function commissionForSeed(tutor: SeededTutor, studentId: string, startAt: Date): number {
+  const key = `${studentId}:${tutor.id}`;
+  const returning = paidPairs.has(key);
+  paidPairs.add(key);
+
+  const retention =
+    startAt < REPRICED_AT
+      ? returning
+        ? HISTORIC_REBOOKING_BPS
+        : HISTORIC_FIRST_BOOKING_BPS
+      : commissionBpsFor(returning, null);
+
+  return tutor.commissionBps === null ? retention : Math.min(tutor.commissionBps, retention);
+}
+
 // ---------------------------------------------------------------------------
 // Curriculum declarations
 // ---------------------------------------------------------------------------
@@ -1378,6 +1440,9 @@ async function seedHistory(
 
       const bookingId = randomUUID();
       const subjectSlug = tutor.subjectSlugs[0]!;
+      // Decided once, here, and used for both the row and the settlement — the
+      // same snapshot the real booking path takes.
+      const commissionBps = commissionForSeed(tutor, student.id, startAt);
 
       await ensureCredits(wallets, student.id, priceCents);
 
@@ -1391,7 +1456,7 @@ async function seedHistory(
         durationMinutes,
         status: 'confirmed',
         priceCents,
-        commissionBps: tutor.commissionBps,
+        commissionBps,
         studentTz: student.timezone,
         tutorTz: tutor.timezone,
         livekitRoom: `booking_${bookingId}`,
@@ -1449,7 +1514,7 @@ async function seedHistory(
         tutorId: tutor.id,
         isTrial: false,
         priceCents,
-        commissionBps: tutor.commissionBps,
+        commissionBps,
         startAtUtc: startAt,
         durationMinutes,
       };
@@ -1543,10 +1608,11 @@ async function seedHistory(
             isTrial: true,
             startAtUtc: startAt,
             durationMinutes: tutor.trialMinutes,
-            // A trial moves no money, so it settles the moment it is over.
+            // A trial moves no money, so it settles the moment it is over. The
+            // rate is what a first paid booking would have carried.
             status: 'settled',
             priceCents: 0,
-            commissionBps: tutor.commissionBps,
+            commissionBps: commissionBpsFor(false, tutor.commissionBps),
             escrowCents: 0,
             studentTz: trialStudent.timezone,
             tutorTz: tutor.timezone,
@@ -1593,7 +1659,7 @@ async function seedHistory(
           durationMinutes: 60,
           status: 'confirmed',
           priceCents,
-          commissionBps: tutor.commissionBps,
+          commissionBps: commissionForSeed(tutor, student.id, startAt),
           studentTz: student.timezone,
           tutorTz: tutor.timezone,
           livekitRoom: `booking_${bookingId}`,
@@ -1621,7 +1687,7 @@ async function seedHistory(
           durationMinutes: 15,
           status: 'pending_tutor',
           priceCents: 0,
-          commissionBps: tutor.commissionBps,
+          commissionBps: commissionBpsFor(false, tutor.commissionBps),
           escrowCents: 0,
           studentTz: student.timezone,
           tutorTz: tutor.timezone,
@@ -1669,7 +1735,7 @@ async function seedHistory(
         durationMinutes: 60,
         status: 'confirmed',
         priceCents,
-        commissionBps: liveTutor.commissionBps,
+        commissionBps: commissionForSeed(liveTutor, liveStudent.id, startAt),
         studentTz: liveStudent.timezone,
         tutorTz: liveTutor.timezone,
         livekitRoom: `booking_${bookingId}`,
@@ -1714,7 +1780,7 @@ async function seedHistory(
         durationMinutes: 60,
         status: 'completed',
         priceCents,
-        commissionBps: liveTutor.commissionBps,
+        commissionBps: commissionForSeed(liveTutor, liveStudent.id, startAt),
         studentTz: liveStudent.timezone,
         tutorTz: liveTutor.timezone,
         livekitRoom: `booking_${bookingId}`,
@@ -1800,7 +1866,7 @@ async function seedHistory(
         durationMinutes: conversionTutor.trialMinutes,
         status: 'settled',
         priceCents: 0,
-        commissionBps: conversionTutor.commissionBps,
+        commissionBps: commissionBpsFor(false, conversionTutor.commissionBps),
         escrowCents: 0,
         studentTz: liveStudent.timezone,
         tutorTz: conversionTutor.timezone,
@@ -1837,7 +1903,7 @@ async function seedHistory(
         durationMinutes: 60,
         status: 'confirmed',
         priceCents,
-        commissionBps: liveTutor.commissionBps,
+        commissionBps: commissionForSeed(liveTutor, liveStudent.id, startAt),
         studentTz: liveStudent.timezone,
         tutorTz: liveTutor.timezone,
         livekitRoom: `booking_${bookingId}`,
@@ -2043,7 +2109,9 @@ async function seedPayoutFixtures(
       durationMinutes: 60,
       status: 'confirmed',
       priceCents,
-      commissionBps: tutor.commissionBps,
+      // Pinned rather than inherited: this fixture's whole job is to land the
+      // balance on an exact number, so it states the rate it was priced at.
+      commissionBps: FIRST_BOOKING_COMMISSION_BPS,
       studentTz: student.timezone,
       tutorTz: tutor.timezone,
       livekitRoom: `booking_${bookingId}`,
@@ -2059,7 +2127,7 @@ async function seedPayoutFixtures(
         tutorId: tutor.id,
         isTrial: false,
         priceCents,
-        commissionBps: tutor.commissionBps,
+        commissionBps: FIRST_BOOKING_COMMISSION_BPS,
         startAtUtc: startAt,
         durationMinutes: 60,
       },

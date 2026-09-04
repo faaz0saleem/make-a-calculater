@@ -121,6 +121,28 @@ describe('timezone overlap inside a tier', () => {
     expect(adjustedScore(5_000, GOOD_HOURS, KARACHI)).toBe(5_000 + OVERLAP_MAX_BPS);
     expect(adjustedScore(5_000, BAD_HOURS, KARACHI)).toBe(5_000);
   });
+
+  it('never lets thin hours cost a tutor their curriculum match', () => {
+    // The guarantee behind lowering the overlap bar: a tutor teaching the
+    // student's exact board, class and subject with two workable evening hours
+    // stays above a tutor with neither, whatever the term returns. The tier is
+    // a key, so this holds by construction rather than by arithmetic.
+    const twoEveningHours = maskFromUtcHours([13, 14]);
+    const exact = tutor({
+      name: 'Exact, two hours',
+      tier: MATCH_TIERS.exact,
+      score: scoreForRating(4.0),
+      freeHoursMask: twoEveningHours,
+    });
+    const neither = tutor({
+      name: 'No match, all day',
+      tier: MATCH_TIERS.none,
+      score: 10_000,
+      freeHoursMask: GOOD_HOURS,
+    });
+
+    expect(compareForViewer(exact, neither, KARACHI)).toBeLessThan(0);
+  });
 });
 
 describe('a tutor with no nightly score', () => {

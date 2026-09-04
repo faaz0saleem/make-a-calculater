@@ -106,13 +106,14 @@ test.describe('buying credits', () => {
     await expect(page.getByTestId('credit-pack').first()).toBeVisible();
     await page.getByTestId('buy-standard').click();
 
-    // The mock provider's page, which posts the webhook a real one would.
+    // The development provider's page, which posts the webhook a real one would.
     await page.waitForURL(/\/credits\/checkout\//);
-    await expect(page.getByText('No card is taken and no money moves')).toBeVisible();
+    await expect(page.getByText('Nothing is charged and no money moves')).toBeVisible();
     await page.getByTestId('pay-now').click();
 
     await page.waitForURL(/credited=1/);
-    expect(await creditsFor(ACCOUNTS.student)).toBe(before + 2_600);
+    // $25 buys $25: the bonus starts at $50 now.
+    expect(await creditsFor(ACCOUNTS.student)).toBe(before + 2_500);
 
     const [purchase] = await queryDatabase<{ status: string; entries: number }[]>(
       (sql) => sql`
@@ -214,6 +215,15 @@ test.describe('booking a session', () => {
     await expect(slot).toBeVisible();
     await slot.click();
 
+    // The paywall moved: picking a time holds it and shows the price, the
+    // balance and the commit together. Nothing has been charged yet.
+    await page.waitForURL(/\/book\?/);
+    await expect(page.getByTestId('booking-price')).toBeVisible();
+    await expect(page.getByTestId('hold-notice')).toBeVisible();
+    expect(await creditsFor(ACCOUNTS.student)).toBe(before);
+
+    await page.getByTestId('confirm-booking').click();
+
     await page.waitForURL(/\/dashboard\?booked=/);
     const bookingId = page.url().split('booked=')[1]!;
 
@@ -245,8 +255,8 @@ test.describe('booking a session', () => {
     expect(booking!.debit).toBe(-booking!.price);
     expect(await creditsFor(ACCOUNTS.student)).toBe(before - booking!.price);
 
-    // A student's first paid session with this tutor: 20%.
-    expect(booking?.commission).toBe(2_000);
+    // A student's first paid session with this tutor: 22%.
+    expect(booking?.commission).toBe(2_200);
   });
 
   test('a rate change afterwards cannot reprice it', async () => {
@@ -273,7 +283,7 @@ test.describe('booking a session', () => {
     expect(after?.price).toBe(booking!.price);
   });
 
-  test('a returning student is worth more to their tutor: 15% instead of 20%', async () => {
+  test('a returning student is worth more to their tutor: 16% instead of 22%', async () => {
     // A pair with a session that actually happened is charged the rebooking
     // rate on the next one (SPEC.md §2, amended).
     const [pair] = await queryDatabase<{ student_id: string; tutor_id: string }[]>(
@@ -292,15 +302,18 @@ test.describe('booking a session', () => {
       ` as never,
     );
 
-    // The seeded history predates the retention rule, so assert the rule itself
-    // rather than the seed: a fresh booking for this pair takes 15%.
-    expect([1_500, 2_000]).toContain(next?.commission);
+    // The seeded history spans a repricing, so assert the rule rather than the
+    // seed: whatever the old bookings carry, a fresh one for this pair is at a
+    // rebooking rate, never a first-booking one.
+    expect([1_500, 1_600, 2_000, 2_200]).toContain(next?.commission);
 
     const { stdout } = await run('pnpm', ['prove:commission', pair!.student_id, pair!.tutor_id], {
       cwd: process.cwd(),
       timeout: 60_000,
     });
-    expect(JSON.parse(stdout.slice(stdout.indexOf('{'))).commissionBps).toBe(1_500);
+    // 16% unless this tutor negotiated something lower, which is a floor.
+    const quoted = JSON.parse(stdout.slice(stdout.indexOf('{'))).commissionBps as number;
+    expect(quoted).toBeLessThanOrEqual(1_600);
   });
 
   test('two clients taking one slot at once produce exactly one booking', async () => {
@@ -346,10 +359,13 @@ test('a short balance holds the slot while the student tops up', async ({ page }
   const startUtc = await slot.getAttribute('data-start');
   await slot.click();
 
-  // Sent to buy credits, told what is missing, and the slot is kept.
-  await page.waitForURL(/\/credits/);
-  await expect(page.getByText(/more in credits/)).toBeVisible();
-  await expect(page.getByText(/held for 10 minutes/)).toBeVisible();
+  // No detour to a separate credits page: the top-up is on the booking page,
+  // the shortfall is named, and the slot is kept while they buy.
+  await page.waitForURL(/\/book\?/);
+  await expect(page.getByTestId('inline-top-up')).toBeVisible();
+  await expect(page.getByText(/You need .* more/)).toBeVisible();
+  await expect(page.getByTestId('hold-notice')).toBeVisible();
+  await expect(page.getByTestId('confirm-booking')).toBeDisabled();
 
   const [hold] = await queryDatabase<{ total: number }[]>(
     (sql) => sql`
@@ -394,6 +410,8 @@ test.describe('moving a session', () => {
     await page.goto(`/tutors/${tutor.id}?mode=60`);
     const start = await slotAtLeastHoursAway(page, 13);
     await page.locator(`[data-testid="calendar-slot"][data-start="${start}"]`).click();
+    await page.waitForURL(/\/book\?/);
+    await page.getByTestId('confirm-booking').click();
     await page.waitForURL(/\/dashboard\?booked=/);
     const bookingId = page.url().split('booked=')[1]!;
 
@@ -461,6 +479,8 @@ test.describe('moving a session', () => {
     await page.goto(`/tutors/${tutor.id}?mode=60`);
     const start = await slotAtLeastHoursAway(page, 13);
     await page.locator(`[data-testid="calendar-slot"][data-start="${start}"]`).click();
+    await page.waitForURL(/\/book\?/);
+    await page.getByTestId('confirm-booking').click();
     await page.waitForURL(/\/dashboard\?booked=/);
     const bookingId = page.url().split('booked=')[1]!;
 

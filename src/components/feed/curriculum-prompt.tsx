@@ -5,11 +5,17 @@
  * exam board they sit before they have seen a single tutor is a wall, and a
  * wall is where people leave. Here the question arrives when the answer pays
  * the student back immediately, and skipping it costs them nothing.
+ *
+ * **Dismissible, and re-offered.** "Not now" hides it for a fortnight rather
+ * than for ever, because somebody browsing idly in January may be looking hard
+ * in February. Once they answer it never comes back, because then there is
+ * nothing left to ask.
  */
 
 import { CurriculumFields, type BoardChoice } from '@/components/curriculum/fields';
 import { Button } from '@/components/ui/button';
 import { declareMyCurriculum } from '@/app/curriculum/actions';
+import { dismissCurriculumPrompt } from '@/app/students/actions';
 
 export function CurriculumPrompt({
   boards,
@@ -55,10 +61,20 @@ export function CurriculumPrompt({
         />
       </div>
 
-      <div>
+      <div className="flex flex-wrap items-center gap-3">
         <Button type="submit" size="sm">
           Show tutors who teach this
         </Button>
+
+        <button
+          type="submit"
+          formAction={dismissCurriculumPrompt}
+          formNoValidate
+          className="text-sm text-muted-foreground underline underline-offset-4"
+          data-testid="dismiss-curriculum-prompt"
+        >
+          Not now
+        </button>
       </div>
     </form>
   );

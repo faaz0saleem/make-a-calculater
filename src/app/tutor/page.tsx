@@ -39,7 +39,7 @@ import { loadWizardSnapshot } from '@/db/tutors';
 import { requireRole } from '@/lib/auth/guards';
 import { wizardProgress } from '@/lib/tutors/wizard';
 import { formatCents } from '@/lib/money/cents';
-import { REBOOKING_COMMISSION_BPS, commissionBpsFor } from '@/lib/money/commission';
+import { takeHomeFor } from '@/lib/money/commission';
 import { canRequestPayout, PAYOUT_THRESHOLD_CENTS } from '@/lib/money/payouts';
 import { sessionWindow } from '@/lib/sessions/window';
 import { formatInTimeZone } from '@/lib/time';
@@ -153,6 +153,9 @@ export default async function TutorPage({
     .limit(5);
 
   const eligibility = canRequestPayout(profile.availableCents, profile.availableCents);
+
+  // What a tutor actually receives, not just what they charge.
+  const takeHome = takeHomeFor(profile.hourlyCents, profile.commissionBps);
 
   return (
     <>
@@ -330,13 +333,21 @@ export default async function TutorPage({
             <CardContent className="flex flex-col gap-1 text-sm">
               <p>60 minutes — {formatCents(profile.hourlyCents)}</p>
               <p>30 minutes — {formatCents(profile.halfHourCents)}</p>
+
+              <p data-testid="take-home">
+                <strong className="font-medium">
+                  You&rsquo;ll receive {formatCents(takeHome.firstCents)} of a{' '}
+                  {formatCents(profile.hourlyCents)} lesson
+                </strong>{' '}
+                from a new student, and {formatCents(takeHome.rebookingCents)} once they come back.
+              </p>
+
               <p className="text-muted-foreground">
-                Commission {(commissionBpsFor(false, profile.commissionBps) / 100).toFixed(0)}% on a
-                student&rsquo;s first session with you, then{' '}
-                {(commissionBpsFor(true, profile.commissionBps) / 100).toFixed(0)}% every time they come
-                back.
-                {profile.commissionBps < REBOOKING_COMMISSION_BPS
-                  ? ` Your negotiated rate of ${(profile.commissionBps / 100).toFixed(0)}% applies whichever it is.`
+                That is {(takeHome.firstBps / 100).toFixed(0)}% commission on a student&rsquo;s first
+                session with you and {(takeHome.rebookingBps / 100).toFixed(0)}% on every one after —
+                keeping a student is worth more to us than finding one.
+                {takeHome.negotiated
+                  ? ` Your negotiated rate of ${(takeHome.firstBps / 100).toFixed(0)}% applies whichever it is.`
                   : ''}
               </p>
               <p className="text-muted-foreground">

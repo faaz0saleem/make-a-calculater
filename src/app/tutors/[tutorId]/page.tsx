@@ -24,13 +24,14 @@ import { IntroPlayer } from '@/components/video/intro-player';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { heldSlotsFor, liveHoldsFor } from '@/db/bookings';
+import { guestHoldFor, heldSlotsFor, liveHoldsFor } from '@/db/bookings';
 import { isFollowing, followerCount } from '@/db/follows';
 import { ratingSummaryFor, reviewsForTutor } from '@/db/reviews';
 import { pairHasHadTrial } from '@/db/trials';
 import { getStudentCurriculum, getTutorCurriculum, toPosition } from '@/db/curriculum';
 import { loadTutorDossier } from '@/db/tutors';
 import { currentUser } from '@/lib/auth/guards';
+import { readGuestToken } from '@/lib/bookings/guest';
 import { formatCents } from '@/lib/money/cents';
 import { formatStars } from '@/lib/reviews/rules';
 import { languageName, PROFICIENCY_LABELS, type LanguageProficiency } from '@/lib/tutors/languages';
@@ -38,7 +39,7 @@ import { getAvailability } from '@/lib/availability';
 import { priceForBooking } from '@/lib/money/pricing';
 import { describeHold } from '@/lib/bookings/holds';
 import { describeResponseTime } from '@/lib/messaging/response-time';
-import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
+import { TRIAL_BUFFER_MINUTES, TRIAL_CUTOFF_MINUTES_BEFORE_START } from '@/lib/trials/rules';
 import { formatInTimeZone, isValidTimeZone } from '@/lib/time';
 import { bookabilityProblem, canViewProfile, isPubliclyVisible } from '@/lib/tutors/visibility';
 
@@ -118,6 +119,13 @@ export default async function TutorProfilePage({
     : await getAvailability().freeSlotsFor({
         tutorId: tutor.id,
         durationMinutes: mode === 'trial' ? durationMinutes + TRIAL_BUFFER_MINUTES : durationMinutes,
+        // A trial needs the tutor's answer before it starts, so a slot inside
+        // the cutoff is one the request would refuse. Offering it and then
+        // refusing it is a worse experience than not offering it (SPEC.md §6).
+        fromUtc:
+          mode === 'trial'
+            ? new Date(Date.now() + TRIAL_CUTOFF_MINUTES_BEFORE_START * 60_000)
+            : undefined,
         toUtc: new Date(Date.now() + 14 * 86_400_000),
         limit: 120,
       });
@@ -127,13 +135,19 @@ export default async function TutorProfilePage({
   // Slots somebody else is holding while they buy credits are not offered; the
   // student's own hold is, and is called out above the calendar.
   const now = new Date();
-  const [othersHolding, myHolds] = await Promise.all([
-    viewer ? heldSlotsFor(tutor.id, viewer.id, now) : heldSlotsFor(tutor.id, null, now),
+  // A visitor with no account can hold a slot too, so their own hold has to be
+  // excluded from "somebody else has this" the same way a member's is.
+  const guestToken = viewer ? null : await readGuestToken();
+  const [othersHolding, myHolds, guestHold] = await Promise.all([
+    heldSlotsFor(tutor.id, viewer?.id ?? null, now, undefined, guestToken),
     viewer ? liveHoldsFor(viewer.id, now) : Promise.resolve([]),
+    guestToken ? guestHoldFor(guestToken, tutor.id, now) : Promise.resolve(null),
   ]);
 
   const heldElsewhere = new Set(othersHolding.map((slot) => slot.getTime()));
-  const myHold = myHolds.find((hold) => hold.tutorId === tutor.id) ?? null;
+  const myHold =
+    myHolds.find((hold) => hold.tutorId === tutor.id) ??
+    (guestHold ? { ...guestHold, tutorId: tutor.id, tutorName: tutor.name } : null);
 
   const offered =
     slots && slots.known
@@ -350,19 +364,29 @@ export default async function TutorProfilePage({
           }
           error={query.error ?? null}
           select={
-            !viewer || problem
+            problem
               ? undefined
-              : mode === 'trial'
+              : mode === 'trial' && !viewer
+                ? {
+                    // A trial needs an account before it means anything — a
+                    // tutor is being asked to give up real time.
+                    action: bookSession.bind(null, tutor.id, 60),
+                    label: 'Sign up to ask for a free trial',
+                    note: 'Picking a time holds it for ten minutes while you create an account.',
+                  }
+                : mode === 'trial'
                 ? {
                     action: askForTrial.bind(null, tutor.id),
                     label: `Ask for a free ${tutor.trialMinutes}-minute trial`,
                     note: `Pick a time and ${tutor.name.split(' ')[0]} has 12 hours to accept. Nothing is charged, and you keep your credits either way.`,
                   }
-                : {
-                    action: bookSession.bind(null, tutor.id, mode),
-                    label: `Book ${mode} minutes for ${formatCents(priceCents)}`,
-                    note: `Pressing a time books it and moves ${formatCents(priceCents)} of your credits into escrow, where it stays until the session is over. Cancel more than 24 hours before and you get all of it back.`,
-                  }
+                  : {
+                      action: bookSession.bind(null, tutor.id, mode),
+                      label: `Choose ${mode} minutes — ${formatCents(priceCents)}`,
+                      note: viewer
+                        ? `Pressing a time holds it for ten minutes. Nothing is charged until you confirm on the next page.`
+                        : `Pressing a time holds it for ten minutes while you create an account. Nothing is charged until you confirm.`,
+                    }
           }
         />
 
@@ -383,12 +407,6 @@ export default async function TutorProfilePage({
             <Button disabled className="min-h-11">
               Book a session
             </Button>
-          ) : !viewer ? (
-            <Link href={`/signin?next=${encodeURIComponent(`/tutors/${tutor.id}?mode=${trialOffered ? 'trial' : 60}`)}`}>
-              <Button className="min-h-11">
-                {trialOffered ? 'Sign in to book a free trial' : 'Sign in to book'}
-              </Button>
-            </Link>
           ) : trialOffered ? (
             <Link href={`/tutors/${tutor.id}?mode=trial`}>
               <Button className="min-h-11">Book free trial</Button>

@@ -86,6 +86,27 @@ test('the signed-in pages fit a 360px screen', async ({ page }) => {
   await expectNoSidewaysScroll(page, 'the checkout page');
 });
 
+test('the booking confirm page fits a 360px screen', async ({ page }) => {
+  // Where the paywall now lives: price, balance, a top-up with five packs and
+  // three payment methods, and two extra fields. The busiest page in the flow.
+  await signIn(page, ACCOUNTS.student);
+
+  const tutorId = await queryDatabase<{ id: string }[]>(
+    (sql) => sql`
+      select user_id::text as id from tutor_profiles where status = 'verified' limit 1
+    ` as never,
+  ).then((rows) => rows[0]!.id);
+
+  await page.goto(`/tutors/${tutorId}?mode=60`);
+  const slot = page.getByTestId('calendar-slot').first();
+  await expect(slot).toBeVisible();
+  await slot.click();
+
+  await page.waitForURL(/\/book\?/);
+  await expect(page.getByRole('heading', { name: 'Confirm your booking' })).toBeVisible();
+  await expectNoSidewaysScroll(page, 'the booking confirm page');
+});
+
 test('the tutor pages fit a 360px screen', async ({ page }) => {
   await signIn(page, ACCOUNTS.verifiedTutor);
   await page.goto('/tutor');

@@ -183,7 +183,8 @@ export type TutorDossier = {
   promoCents: number | null;
   promoStartsAt: Date | null;
   promoEndsAt: Date | null;
-  commissionBps: number;
+  /** A negotiated floor, or null when the tutor negotiated nothing. */
+  commissionBps: number | null;
   offersTrial: boolean;
   trialMinutes: number;
   /** Median first reply, or null when nobody has messaged them yet. */

@@ -13,8 +13,10 @@ import { redirect } from 'next/navigation';
 
 import { createBooking, holdSlot, releaseHold } from '@/db/bookings';
 import { followTutor, unfollowTutor } from '@/db/follows';
+import { confirmStudentName, linkGuardian } from '@/db/students';
 import { requestTrial } from '@/db/trials';
-import { requireUser } from '@/lib/auth/guards';
+import { currentUser, requireUser } from '@/lib/auth/guards';
+import { ensureGuestToken, readGuestToken } from '@/lib/bookings/guest';
 import { formatCents } from '@/lib/money/cents';
 import { trialProblemMessage, type TrialRequestProblem } from '@/lib/trials/rules';
 
@@ -86,19 +88,55 @@ export async function bookSession(
   durationMinutes: 30 | 60,
   formData: FormData,
 ): Promise<void> {
-  const user = await requireUser();
-
   const startAtUtc = new Date(String(formData.get('startUtc') ?? ''));
   if (Number.isNaN(startAtUtc.getTime())) {
     redirect(`/tutors/${tutorId}?mode=${durationMinutes}&error=${encodeURIComponent('That slot could not be read.')}`);
   }
 
-  const result = await createBooking({
-    studentId: user.id,
-    tutorId,
-    startAtUtc,
-    durationMinutes,
-  });
+  const bookHere = `/tutors/${tutorId}/book?mode=${durationMinutes}&at=${encodeURIComponent(startAtUtc.toISOString())}`;
+  const user = await currentUser();
+
+  // Signed out: hold the slot, then send them to sign up. Holding *first* is
+  // the whole point — "create an account to book this" has to mean the slot is
+  // still there when they come back, not that they can look for it again.
+  if (!user) {
+    const guestToken = await ensureGuestToken();
+    await holdSlot({ guestToken, tutorId, startAtUtc, durationMinutes });
+    redirect(`/signup?next=${encodeURIComponent(bookHere)}&held=1`);
+  }
+
+  // Signed in: hold it and take them to the one page that shows the price, the
+  // balance and the top-up together. Committing happens there.
+  await holdSlot({ studentId: user.id, tutorId, startAtUtc, durationMinutes });
+  redirect(bookHere);
+}
+
+/**
+ * Commit: the booking itself.
+ *
+ * Split from picking a slot because that is where the paywall now sits. By the
+ * time somebody presses this they have seen the tutor, the time, the price and
+ * their balance — which is the moment to ask for money, and not before.
+ */
+export async function confirmBooking(
+  tutorId: string,
+  durationMinutes: 30 | 60,
+  formData: FormData,
+): Promise<void> {
+  const user = await requireUser();
+
+  const startAtUtc = new Date(String(formData.get('startUtc') ?? ''));
+  if (Number.isNaN(startAtUtc.getTime())) {
+    redirect(`/tutors/${tutorId}?error=${encodeURIComponent('That slot could not be read.')}`);
+  }
+
+  const name = String(formData.get('name') ?? '').trim();
+  if (name) await confirmStudentName(user.id, name);
+
+  const guardianEmail = String(formData.get('guardianEmail') ?? '').trim();
+  if (guardianEmail) await linkGuardian(user.id, guardianEmail);
+
+  const result = await createBooking({ studentId: user.id, tutorId, startAtUtc, durationMinutes });
 
   if (result.ok) {
     revalidatePath(`/tutors/${tutorId}`);
@@ -106,22 +144,16 @@ export async function bookSession(
     redirect(`/dashboard?booked=${result.bookingId}`);
   }
 
-  if (result.problem === 'insufficient_credits') {
-    // Hold the slot first, then send them to top up. Doing it the other way
-    // round means buying credits and losing the time you bought them for.
-    await holdSlot({ studentId: user.id, tutorId, startAtUtc, durationMinutes });
+  const back = `/tutors/${tutorId}/book?mode=${durationMinutes}&at=${encodeURIComponent(startAtUtc.toISOString())}`;
 
-    const back = `/tutors/${tutorId}?mode=${durationMinutes}&at=${encodeURIComponent(startAtUtc.toISOString())}`;
-    const short = formatCents(result.shortfallCents ?? 0);
-    redirect(
-      `/credits?returnTo=${encodeURIComponent(back)}&error=${encodeURIComponent(
-        `You need ${short} more in credits for that session. Your slot is held for 10 minutes.`,
-      )}`,
-    );
+  if (result.problem === 'insufficient_credits') {
+    // Not a redirect to a separate credits page any more: the top-up is on the
+    // booking page itself, so this just comes back with the shortfall named.
+    redirect(`${back}&short=${result.shortfallCents ?? 0}`);
   }
 
   redirect(
-    `/tutors/${tutorId}?mode=${durationMinutes}&error=${encodeURIComponent(
+    `${back}&error=${encodeURIComponent(
       BOOKING_MESSAGES[result.problem] ?? 'That session could not be booked.',
     )}`,
   );
@@ -129,11 +161,16 @@ export async function bookSession(
 
 /** Give up a held slot deliberately, rather than waiting the ten minutes out. */
 export async function dropHold(tutorId: string, formData: FormData): Promise<void> {
-  const user = await requireUser();
+  const user = await currentUser();
   const startAtUtc = new Date(String(formData.get('startUtc') ?? ''));
 
   if (!Number.isNaN(startAtUtc.getTime())) {
-    await releaseHold({ studentId: user.id, tutorId, startAtUtc });
+    if (user) {
+      await releaseHold({ studentId: user.id, tutorId, startAtUtc });
+    } else {
+      const guestToken = await readGuestToken();
+      if (guestToken) await releaseHold({ guestToken, tutorId, startAtUtc });
+    }
   }
 
   revalidatePath(`/tutors/${tutorId}`);
