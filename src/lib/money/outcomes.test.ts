@@ -9,6 +9,7 @@ import { assertBalanced, projectBalances, type LedgerEntryDraft } from './ledger
 import {
   classifyOutcome,
   minutesBeforeStart,
+  platformAbsorbsFailure,
   requiredOverlapSeconds,
   resolveBookingOutcome,
   type Attendance,
@@ -388,5 +389,133 @@ describe('trials', () => {
     expect(() => resolveBookingOutcome(booking({ isTrial: true, priceCents: 100 }), FULL_ATTENDANCE)).toThrow(
       MoneyError,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Connection failures the platform absorbs
+// ---------------------------------------------------------------------------
+
+describe('a technical failure the platform absorbs', () => {
+  const booking: BookingForOutcome = {
+    id: 'booking-absorb',
+    studentId: 'student-1',
+    tutorId: 'tutor-1',
+    isTrial: false,
+    priceCents: 5_000,
+    commissionBps: 2_000,
+    startAtUtc: new Date('2026-05-01T10:00:00Z'),
+    durationMinutes: 60,
+  };
+
+  // Both turned up; the link died four minutes in.
+  const attendance: Attendance = {
+    kind: 'session',
+    studentSeconds: 240,
+    tutorSeconds: 300,
+    bothPresentSeconds: 240,
+    tutorWaitedAloneSeconds: 60,
+  };
+
+  it('refunds the student in full and pays the tutor anyway', () => {
+    const outcome = resolveBookingOutcome(booking, attendance, { absorbFailure: true });
+
+    expect(outcome.resolution).toBe('technical_failure');
+    expect(outcome.platformAbsorbed).toBe(true);
+    expect(outcome.refundCents).toBe(5_000);
+    expect(outcome.tutorCents).toBe(4_000);
+    // Negative: this comes out of our revenue, not out of anybody else.
+    expect(outcome.platformCents).toBe(-4_000);
+  });
+
+  it('still balances to zero, which is the whole point of the ledger', () => {
+    const outcome = resolveBookingOutcome(booking, attendance, { absorbFailure: true });
+    const total = outcome.entries.reduce((sum, entry) => sum + entry.deltaCents, 0);
+    expect(total).toBe(0);
+  });
+
+  it('pays the returning-student share when that is what was snapshotted', () => {
+    const outcome = resolveBookingOutcome(
+      { ...booking, commissionBps: 1_500 },
+      attendance,
+      { absorbFailure: true },
+    );
+    expect(outcome.tutorCents).toBe(4_250);
+    expect(outcome.platformCents).toBe(-4_250);
+  });
+
+  it('falls back to the plain refund when the cap is spent', () => {
+    const outcome = resolveBookingOutcome(booking, attendance, { absorbFailure: false });
+
+    expect(outcome.platformAbsorbed).toBe(false);
+    expect(outcome.refundCents).toBe(5_000);
+    expect(outcome.tutorCents).toBe(0);
+    expect(outcome.platformCents).toBe(0);
+  });
+
+  it('defaults to not absorbing, so a caller that forgets cannot spend our money', () => {
+    expect(resolveBookingOutcome(booking, attendance).platformAbsorbed).toBe(false);
+  });
+
+  it('never absorbs a no-show, however the option is passed', () => {
+    const noShow: Attendance = {
+      kind: 'session',
+      studentSeconds: 0,
+      tutorSeconds: 900,
+      bothPresentSeconds: 0,
+      tutorWaitedAloneSeconds: 900,
+    };
+    const outcome = resolveBookingOutcome(booking, noShow, { absorbFailure: true });
+    expect(outcome.resolution).toBe('no_show_student');
+    expect(outcome.platformAbsorbed).toBe(false);
+  });
+});
+
+describe('platformAbsorbsFailure', () => {
+  it('allows two per student, then stops', () => {
+    expect(platformAbsorbsFailure(0)).toBe(true);
+    expect(platformAbsorbsFailure(1)).toBe(true);
+    expect(platformAbsorbsFailure(2)).toBe(false);
+    expect(platformAbsorbsFailure(9)).toBe(false);
+  });
+});
+
+describe('a booking already closed as completed', () => {
+  const attended: BookingForOutcome = {
+    ...booking(),
+    completedAt: new Date('2026-04-15T19:00:00.000Z'),
+  };
+
+  // What the events would say if some of them never arrived.
+  const nothingRecorded: Attendance = {
+    kind: 'session',
+    studentSeconds: 0,
+    tutorSeconds: 0,
+    bothPresentSeconds: 0,
+    tutorWaitedAloneSeconds: 0,
+  };
+
+  it('stays completed even if the events later look empty', () => {
+    expect(classifyOutcome(attended, nothingRecorded)).toBe('completed');
+  });
+
+  it('pays the tutor rather than refunding and striking them', () => {
+    const outcome = resolveBookingOutcome(attended, nothingRecorded);
+    expect(outcome.refundCents).toBe(0);
+    expect(outcome.tutorCents).toBeGreaterThan(0);
+    expect(outcome.tutorStrike).toBe(false);
+  });
+
+  it('changes nothing for a booking that was never closed', () => {
+    expect(classifyOutcome({ ...attended, completedAt: null }, nothingRecorded)).toBe('no_show_tutor');
+  });
+
+  it('does not override a cancellation, which happened before the session', () => {
+    const cancelled = resolveBookingOutcome(attended, {
+      kind: 'cancellation',
+      by: 'student',
+      atUtc: new Date('2026-04-14T18:00:00.000Z'),
+    });
+    expect(cancelled.resolution).toBe('cancelled_by_student');
   });
 });

@@ -3,12 +3,14 @@
  *
  * `pnpm settle` runs it now. `pnpm settle --at 2026-04-17T00:00:00Z` runs it as
  * if it were that moment, which is how the 24-hour window gets exercised
- * without waiting a day.
+ * without waiting a day. `--dry-run` lists what it would touch and stops —
+ * the only way to ask whether one booking is due without settling every other
+ * booking that also is.
  */
 
 import './bootstrap';
 
-import { formatSettlementRun, runSettlement } from '@/db/settlement';
+import { formatSettlementRun, previewSettlement, runSettlement } from '@/db/settlement';
 
 async function main() {
   const index = process.argv.indexOf('--at');
@@ -18,6 +20,12 @@ async function main() {
   if (Number.isNaN(now.getTime())) {
     console.error(`"${at}" is not a date`);
     process.exit(1);
+  }
+
+  if (process.argv.includes('--dry-run')) {
+    const due = await previewSettlement(now);
+    console.log(JSON.stringify({ dryRun: true, at: now.toISOString(), due }, null, 2));
+    process.exit(0);
   }
 
   const run = await runSettlement(now);

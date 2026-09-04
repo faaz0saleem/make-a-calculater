@@ -242,8 +242,18 @@ costs a little write amplification and keeps the spec's shape.
 
 ## 18. A session both people showed up for, that the connection ruined
 
-**Blocks:** nothing. **Default in place:** full refund to the student, nothing
-to the tutor, no strike (`technical_failure` in `src/lib/money/outcomes.ts`).
+**Settled — you chose the second option.** The platform absorbs it: the student
+is refunded in full *and* the tutor is paid their full share out of platform
+revenue, capped at **two per student per 90 days**. Past the cap the student is
+still made whole and the tutor is not paid from our revenue.
+
+It is the one outcome in `resolveBookingOutcome` that does not reduce to a
+refund percentage, so it is the single branch that builds its own entries, and
+the ledger row is named `technical_failure_absorbed` so a negative revenue line
+is never a mystery. Worth watching the rate: if absorbed failures climb, the cap
+is the dial, and the count is a one-line query against the ledger.
+
+The original question, for the record:
 
 `SPEC.md` §2 names the outcome but not who carries it. Today the student is made
 whole and the tutor is paid nothing — they gave up the hour and earned zero.
@@ -265,9 +275,19 @@ rate in front of us. `resolveBookingOutcome` is the only place it would change.
 
 ## 19. Nobody can raise a dispute yet
 
-**Blocks:** nothing today; blocks trusting the 24-hour window. **Default in
-place:** the `disputed` status exists and settlement walks through it, but no
-screen creates one.
+**Built.** Either side can report a problem during the 24 hours after a session.
+It moves the booking to `disputed`, which stops settlement by construction —
+`disputed` is not a status `findBookingsAwaitingSettlement` looks for. An admin
+resolves it at `/admin/moderation`, settling as it stands or refunding the
+student, and either decision writes an `admin_audit` row with a reason.
+
+Two of the four questions below are still open: **how long the window really
+is** (24 hours is what the spec says, and a student in another timezone may
+sleep through most of it), and **what evidence an admin should be shown** —
+today they see the reason and the session, not the `session_events` timeline
+that would settle most of these without argument.
+
+The original question, for the record:
 
 Escrow is held for twenty-four hours "in case anything went wrong" — and for
 those twenty-four hours there is no way for anyone to say that something did.
@@ -284,8 +304,22 @@ this, decide:
 
 ## 20. Where LiveKit runs
 
-**Blocks:** launch. **Default in place:** `LIVEKIT_URL` points at whatever you
-give it; development runs a server locally.
+**Instrument built; the reading has not been taken.** `pnpm measure:regions`
+times TCP and TLS handshakes to each candidate region — Dubai first, then
+Bahrain, Mumbai, Frankfurt, Singapore — takes a median over N samples, and ranks
+them.
+
+**It cannot produce a valid reading from the sandbox this was built in.**
+Outbound traffic there goes through a local egress proxy, so every region
+measures about 4ms and the ranking describes the proxy rather than the
+geography. Publishing that number would have been worse than publishing none.
+
+What is needed is someone running it **from the market**: a laptop in Karachi, a
+phone on Jazz or Zong, a machine in Dubai. Ten minutes of somebody's time, and
+then this decision is made on numbers. Until then Dubai remains the reasonable
+guess, and a guess is what it is.
+
+The original question, for the record:
 
 The media path is the product here. Two choices, and they are not equivalent for
 this market:
@@ -306,8 +340,15 @@ one is down, are worth settling before a launch date rather than after.
 
 ## 21. How long we keep the raw webhook payloads
 
-**Blocks:** nothing. **Default in place:** forever
-(`session_events.raw`, a `jsonb` column).
+**Settled — 90 days, then the body goes and the event stays.** A daily cron at
+`/api/cron/retention` nulls `session_events.raw` past the window.
+
+Deliberately an `update` and not a `delete`: what remains — which event, whose,
+when, and the provider's id — is everything `summariseAttendance` computes from,
+so a five-year-old booking can still be explained. What goes is the payload,
+which is only useful while a dispute is live, and the dispute window is a day.
+
+The original question, for the record:
 
 Every LiveKit webhook is stored whole, which is what lets a dispute be answered
 from evidence rather than memory. It also means participant identities, IP-level
@@ -376,3 +417,35 @@ listed, worst first, with what was typed beside what was shown. If off-platform
 leakage turns out to matter more than that, the next step is a classifier on the
 raw text rather than more regexes — but that is a real cost, and worth deciding
 with numbers rather than in advance.
+
+
+## 25. Commission is retention-based now, and the negotiated rate is a floor
+
+**Settled, and a change to SPEC.md §2 rather than an implementation of it.**
+
+The spec said commission was a per-tutor rate, 20% by default, 15% for early or
+high-volume tutors. It is now **retention-based**: 20% on a student's first paid
+booking with a tutor, 15% on every one after. Keeping a student is worth more to
+us than acquiring one.
+
+`tutor_profiles.commission_bps` did not become dead — it is a **floor**. The
+effective rate is the lower of the negotiated rate and the retention rate, so a
+tutor recruited on 12% pays 12% whichever session it is, and the column's
+default of 2000 means the floor never binds for anybody who negotiated nothing.
+That keeps recruitment able to offer a rate without that offer quietly costing
+the tutor their retention discount.
+
+Two consequences worth keeping an eye on:
+
+- **The rate turns on a session that actually happened**, not one that is
+  booked. A student who books two sessions in one sitting pays the first-booking
+  rate on both, because the first has not happened yet when the second is
+  created. That is the strict reading of the rule and it is what the code does;
+  if it feels wrong in practice, the change is one line in
+  `hasCompletedPaidSession`.
+- **A tutor's effective rate is now visible to them** on their own page, as two
+  numbers rather than one. If sales wants to quote a single figure during
+  recruitment, that figure is the floor.
+
+The old per-tutor snapshots on existing bookings are untouched and still mean
+what they meant.

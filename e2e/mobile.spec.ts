@@ -72,6 +72,14 @@ test('the signed-in pages fit a 360px screen', async ({ page }) => {
   await page.goto('/notifications');
   await expect(page.getByRole('heading', { name: 'Notifications' })).toBeVisible();
   await expectNoSidewaysScroll(page, 'notifications');
+
+  await page.goto('/credits');
+  await expect(page.getByRole('heading', { name: 'Buy credits' })).toBeVisible();
+  await expectNoSidewaysScroll(page, 'the credits page');
+
+  await page.getByTestId('buy-starter').click();
+  await page.waitForURL(/\/credits\/checkout\//);
+  await expectNoSidewaysScroll(page, 'the checkout page');
 });
 
 test('the tutor pages fit a 360px screen', async ({ page }) => {

@@ -13,16 +13,22 @@
 
 import Link from 'next/link';
 
-import { hideReviewAction, unhideReviewAction } from '@/app/admin/moderation/actions';
+import {
+  hideReviewAction,
+  resolveDisputeAction,
+  unhideReviewAction,
+} from '@/app/admin/moderation/actions';
 import { SiteHeader } from '@/components/site-header';
 import { Stars } from '@/components/reviews/review-list';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { db } from '@/db/client';
+import { openDisputes } from '@/db/disputes';
 import { flaggedMessages } from '@/db/moderation';
 import { reviews, users } from '@/db/schema';
 import { requireRole } from '@/lib/auth/guards';
+import { formatCents } from '@/lib/money/cents';
 import { desc, eq } from 'drizzle-orm';
 import { formatInTimeZone } from '@/lib/time';
 
@@ -32,7 +38,8 @@ export const metadata = { title: 'Moderation' };
 export default async function ModerationPage() {
   const admin = await requireRole('admin');
 
-  const [flagged, recentReviews] = await Promise.all([
+  const [disputes, flagged, recentReviews] = await Promise.all([
+    openDisputes(),
     flaggedMessages(admin),
     db
       .select({
@@ -62,6 +69,83 @@ export default async function ModerationPage() {
             Everything on this page is logged. Hiding a review writes an audit row with your reason.
           </p>
         </div>
+
+        <Card className={disputes.length > 0 ? 'border-destructive' : undefined}>
+          <CardHeader>
+            <CardTitle>Disputed sessions</CardTitle>
+            <CardDescription>
+              {disputes.length === 0
+                ? 'Nothing waiting.'
+                : `${disputes.length} waiting. Money on these sessions is frozen until you decide — settlement skips them entirely.`}
+            </CardDescription>
+          </CardHeader>
+
+          <CardContent>
+            {disputes.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Either side can report a problem during the 24 hours after a session. Nothing pays out or
+                refunds while a report is open.
+              </p>
+            ) : (
+              <ul className="flex flex-col divide-y divide-border">
+                {disputes.map((dispute) => (
+                  <li key={dispute.reportId} className="flex flex-col gap-2 py-3 text-sm" data-testid="dispute">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{dispute.reason}</span>
+                      <Badge variant="secondary">
+                        reported by {dispute.reporterName}
+                      </Badge>
+                      <span className="text-muted-foreground">
+                        {dispute.studentName} with {dispute.tutorName} ·{' '}
+                        {formatInTimeZone(dispute.startAtUtc, admin.timezone)} ·{' '}
+                        {formatCents(dispute.priceCents)}
+                      </span>
+                    </div>
+
+                    {dispute.body ? (
+                      <p className="whitespace-pre-wrap text-muted-foreground">{dispute.body}</p>
+                    ) : null}
+
+                    <form action={resolveDisputeAction} className="flex flex-wrap items-end gap-2">
+                      <input type="hidden" name="reportId" value={dispute.reportId} />
+                      <label className="flex-1">
+                        <span className="sr-only">Your reason</span>
+                        <input
+                          name="reason"
+                          required
+                          placeholder="What did you decide, and why?"
+                          className="min-h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        />
+                      </label>
+                      <Button
+                        type="submit"
+                        name="decision"
+                        value="refund"
+                        size="sm"
+                        variant="destructive"
+                        className="min-h-11"
+                        data-testid="dispute-refund"
+                      >
+                        Refund the student
+                      </Button>
+                      <Button
+                        type="submit"
+                        name="decision"
+                        value="settle"
+                        size="sm"
+                        variant="outline"
+                        className="min-h-11"
+                        data-testid="dispute-settle"
+                      >
+                        Settle as it stands
+                      </Button>
+                    </form>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>

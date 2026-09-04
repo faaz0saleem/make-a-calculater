@@ -46,6 +46,7 @@ import {
   payoutMethods,
   payouts,
   reviews,
+  sessionEvents,
   studentWallets,
   subjects,
   tutorLanguages,
@@ -1346,6 +1347,94 @@ async function seedHistory(
     }
   }
 
+  // A paid session that finished two hours ago: inside its 24-hour dispute
+  // window and not yet settled, so "report a problem" has something to act on
+  // and the settlement freeze can be seen working.
+  if (liveStudent && liveTutor) {
+    const startAt = new Date(Math.floor((NOW.getTime() - 3 * 60 * 60_000) / 60_000) * 60_000);
+
+    if (reserve(liveTutor.id, startAt)) {
+      const bookingId = randomUUID();
+      const { priceCents } = priceForBooking({
+        rates: {
+          hourlyCents: liveTutor.hourlyCents,
+          halfHourCents: liveTutor.halfHourCents,
+          promoCents: null,
+          promoStartsAt: null,
+          promoEndsAt: null,
+        },
+        durationMinutes: 60,
+        isTrial: false,
+        now: NOW,
+      });
+
+      await ensureCredits(wallets, liveStudent.id, priceCents);
+
+      await db.insert(bookings).values({
+        id: bookingId,
+        studentId: liveStudent.id,
+        tutorId: liveTutor.id,
+        subjectId: subjectIds.get(liveTutor.subjectSlugs[0]!)!,
+        isTrial: false,
+        startAtUtc: startAt,
+        durationMinutes: 60,
+        status: 'completed',
+        priceCents,
+        commissionBps: liveTutor.commissionBps,
+        studentTz: liveStudent.timezone,
+        tutorTz: liveTutor.timezone,
+        livekitRoom: `booking_${bookingId}`,
+        completedAt: new Date(startAt.getTime() + 60 * 60_000),
+      });
+
+      // Real attendance behind the `completed` stamp: without it the row would
+      // claim a session that the events do not support.
+      const room = `booking_${bookingId}`;
+      await db.insert(sessionEvents).values([
+        {
+          bookingId,
+          userId: liveTutor.id,
+          event: 'participant_joined',
+          atUtc: startAt,
+          externalId: `seed:${bookingId}:tutor:join`,
+        },
+        {
+          bookingId,
+          userId: liveStudent.id,
+          event: 'participant_joined',
+          atUtc: new Date(startAt.getTime() + 60_000),
+          externalId: `seed:${bookingId}:student:join`,
+        },
+        {
+          bookingId,
+          userId: liveStudent.id,
+          event: 'participant_left',
+          atUtc: new Date(startAt.getTime() + 59 * 60_000),
+          externalId: `seed:${bookingId}:student:leave`,
+        },
+        {
+          bookingId,
+          userId: liveTutor.id,
+          event: 'participant_left',
+          atUtc: new Date(startAt.getTime() + 60 * 60_000),
+          externalId: `seed:${bookingId}:tutor:leave`,
+        },
+        {
+          bookingId,
+          userId: null,
+          event: 'room_finished',
+          atUtc: new Date(startAt.getTime() + 60 * 60_000),
+          externalId: `seed:${bookingId}:room:finished`,
+          raw: { room } as never,
+        },
+      ]);
+
+      await appendLedger(db, bookingEscrowEntries({ bookingId, studentId: liveStudent.id, priceCents }));
+      wallets.set(liveStudent.id, (wallets.get(liveStudent.id) ?? 0) - priceCents);
+      counts.awaitingSettlement += 1;
+    }
+  }
+
   // A free trial the demo student took yesterday with the demo tutor, so the
   // post-trial conversion screen (SPEC.md §6) has something to show without
   // waiting for a trial to happen.
@@ -1800,6 +1889,18 @@ async function main() {
     rulesByTutor,
     exceptionsByTutor,
   );
+  // A few students left with money to spend, so booking can be tried by hand —
+  // and so the double-booking proof has students who can afford the same slot.
+  // Through a real purchase, so the ledger stays the source of truth.
+  const spenders = [students.find((s) => s.email === 'student@tutorly.test'), ...students.slice(0, 8)]
+    .filter((student): student is SeededStudent => Boolean(student))
+    .filter((student, index, all) => all.findIndex((other) => other.id === student.id) === index)
+    .slice(0, 6);
+
+  for (const student of spenders) {
+    await ensureCredits(wallets, student.id, 20_000);
+  }
+
   const conversations = await seedConversations(NOW);
   await seedNotifications(students, NOW);
 

@@ -165,6 +165,11 @@ export default async function AdminPage() {
                       Moderation
                     </Button>
                   </Link>
+                  <Link href="/admin/packs">
+                    <Button size="sm" variant="outline">
+                      Packs
+                    </Button>
+                  </Link>
                 </div>
               </div>
             </CardHeader>

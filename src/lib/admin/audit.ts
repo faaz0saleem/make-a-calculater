@@ -27,7 +27,10 @@ export type AuditAction =
   | 'payout.reject'
   | 'payout.paid'
   | 'review.hide'
-  | 'review.unhide';
+  | 'review.unhide'
+  | 'dispute.settle'
+  | 'dispute.refund'
+  | 'pack.update';
 
 export type AuditEntry = {
   actorId: string;

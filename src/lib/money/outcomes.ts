@@ -17,6 +17,15 @@
  *
  * That is why "50% refund / tutor keeps 50% of their share" needs no special
  * case: halving the chargeable amount halves both shares.
+ *
+ * There is exactly one exception, and it is deliberate. When a session fails on
+ * the connection, **the platform absorbs it**: the student is refunded in full
+ * *and* the tutor is paid their full share, out of platform revenue. Both of
+ * them did nothing wrong and neither should pay for our transport failing. That
+ * cannot be expressed as a refund percentage — the chargeable amount is zero
+ * and the tutor is still paid — so it is the one branch that computes its own
+ * entries. It is capped per student (see `MAX_ABSORBED_FAILURES_PER_STUDENT`),
+ * because "my connection broke" is also the easiest free lesson to claim.
  */
 
 import type { BookingStatus } from '@/lib/bookings/status';
@@ -33,6 +42,23 @@ export const NO_SHOW_WAIT_SECONDS = 10 * 60;
 /** Share of the booked duration both parties must overlap for a session to count. */
 export const MIN_ATTENDANCE_BPS = 5_000; // 50%
 
+/**
+ * How many connection failures the platform will absorb for one student before
+ * it stops, and over what window.
+ *
+ * Past the cap the outcome falls back to the plain refund: the student still
+ * gets every cent back, but the tutor is not paid out of our revenue for the
+ * third failed session in three months with the same person.
+ */
+export const MAX_ABSORBED_FAILURES_PER_STUDENT = 2;
+export const ABSORBED_FAILURE_WINDOW_DAYS = 90;
+
+/** Whether this student's next technical failure is still on us. */
+export function platformAbsorbsFailure(absorbedInWindow: number): boolean {
+  assertNonNegativeInt(absorbedInWindow, 'absorbedInWindow');
+  return absorbedInWindow < MAX_ABSORBED_FAILURES_PER_STUDENT;
+}
+
 export type BookingForOutcome = {
   id: string;
   studentId: string;
@@ -44,6 +70,12 @@ export type BookingForOutcome = {
   commissionBps: number;
   startAtUtc: Date;
   durationMinutes: number;
+  /**
+   * Stamped when the session was closed as having happened — both people
+   * present for at least half of it (SPEC.md §7). Once set, it is the record
+   * that the lesson took place.
+   */
+  completedAt?: Date | null;
 };
 
 /**
@@ -72,6 +104,16 @@ export type BookingResolution =
   | 'no_show_tutor'
   | 'technical_failure';
 
+export type OutcomeOptions = {
+  /**
+   * Whether the platform pays the tutor for a technical failure out of its own
+   * revenue. Decided by the caller, because the cap is a count of that
+   * student's recent failures and this function does not read the database.
+   * Left out, it is false — the older, stricter behaviour.
+   */
+  absorbFailure?: boolean;
+};
+
 export type BookingOutcome = {
   resolution: BookingResolution;
   /** Where the state machine should move the booking. */
@@ -82,6 +124,8 @@ export type BookingOutcome = {
   platformCents: number;
   /** The tutor gets a strike: 3 in 90 days triggers a review. */
   tutorStrike: boolean;
+  /** True when the platform paid the tutor for a session it did not charge for. */
+  platformAbsorbed: boolean;
   /** The student is owed one free session (tutor no-show). */
   freeSessionCredit: boolean;
   /** Human-readable reason, stored on the ledger rows and shown in admin. */
@@ -124,6 +168,14 @@ export function classifyOutcome(booking: BookingForOutcome, attendance: Attendan
   assertNonNegativeInt(bothPresentSeconds, 'bothPresentSeconds');
   assertNonNegativeInt(tutorWaitedAloneSeconds, 'tutorWaitedAloneSeconds');
 
+  // Already closed as having happened. `completed_at` is only ever stamped by
+  // this same classifier agreeing, at the time, that both people were there for
+  // half the session — so a later reading that says otherwise means the events
+  // are incomplete, not that the lesson stopped having happened. Trusting the
+  // stamp is what stops a tutor losing a session's pay, and taking a strike,
+  // because a webhook went missing afterwards.
+  if (booking.completedAt) return 'completed';
+
   // The tutor never showed up. This is on the tutor whatever the student did.
   if (tutorSeconds === 0) return 'no_show_tutor';
 
@@ -135,6 +187,61 @@ export function classifyOutcome(booking: BookingForOutcome, attendance: Attendan
 
   const requiredSeconds = requiredOverlapSeconds(booking.durationMinutes);
   return bothPresentSeconds >= requiredSeconds ? 'completed' : 'technical_failure';
+}
+
+/**
+ * An admin resolving a dispute in the student's favour (SPEC.md §10).
+ *
+ * Not derived from attendance — that is the point of a dispute: a human looked
+ * at it and decided. It still comes from this module, because the rule is that
+ * nothing outside here builds a ledger entry that moves a refund.
+ *
+ * The tutor is paid nothing and takes no strike: a dispute upheld is not the
+ * same as a no-show, and if it were, the tutor would be able to appeal a strike
+ * they never earned.
+ */
+export function adminRefundOutcome(booking: BookingForOutcome): BookingOutcome {
+  assertNonNegativeInt(booking.priceCents, 'priceCents');
+
+  const outcome: BookingOutcome = {
+    resolution: 'technical_failure',
+    terminalStatus: 'refunded',
+    refundCents: booking.priceCents,
+    chargeableCents: 0,
+    tutorCents: 0,
+    platformCents: 0,
+    tutorStrike: false,
+    freeSessionCredit: false,
+    platformAbsorbed: false,
+    reason: 'dispute_refund',
+    entries: [],
+  };
+
+  if (booking.isTrial || booking.priceCents === 0) return outcome;
+
+  const entries: LedgerEntryDraft[] = [
+    {
+      account: 'escrow',
+      ownerId: booking.studentId,
+      deltaCents: -booking.priceCents,
+      reason: 'dispute_refund',
+      idempotencyKey: `booking:${booking.id}:settle:escrow`,
+      bookingId: booking.id,
+    },
+    {
+      account: 'student_credits',
+      ownerId: booking.studentId,
+      deltaCents: booking.priceCents,
+      reason: 'dispute_refund:refund',
+      idempotencyKey: `booking:${booking.id}:settle:refund`,
+      bookingId: booking.id,
+    },
+  ];
+
+  assertUniqueKeys(entries);
+  assertBalanced(entries, `dispute refund for booking ${booking.id}`);
+  outcome.entries = entries;
+  return outcome;
 }
 
 /** Seconds of overlap needed for a session to auto-complete. */
@@ -174,6 +281,16 @@ export function refundForResolution(
   }
 }
 
+/**
+ * An absorbed failure: the tutor is paid exactly what a completed session would
+ * have paid them, and the platform's share of that is negative — we are the
+ * ones paying it.
+ */
+function absorbedSplit(booking: BookingForOutcome): { tutorCents: number; platformCents: number } {
+  const { tutorCents } = applyCommission(booking.priceCents, booking.commissionBps);
+  return { tutorCents, platformCents: -tutorCents };
+}
+
 const REASONS: Record<BookingResolution, string> = {
   completed: 'session_completed',
   cancelled_by_student: 'cancelled_by_student',
@@ -193,6 +310,7 @@ const REASONS: Record<BookingResolution, string> = {
 export function resolveBookingOutcome(
   booking: BookingForOutcome,
   attendance: Attendance,
+  options: OutcomeOptions = {},
 ): BookingOutcome {
   assertNonNegativeInt(booking.priceCents, 'priceCents');
   assertNonNegativeInt(booking.commissionBps, 'commissionBps');
@@ -205,7 +323,14 @@ export function resolveBookingOutcome(
   const resolution = classifyOutcome(booking, attendance);
   const refundCents = refundForResolution(booking, resolution, attendance);
   const chargeableCents = booking.priceCents - refundCents;
-  const { tutorCents, platformCents } = applyCommission(chargeableCents, booking.commissionBps);
+
+  // The one branch that does not follow from the refund: a connection failure
+  // we are absorbing pays the tutor what a completed session would have, and
+  // takes it out of platform revenue rather than out of the student.
+  const absorbed = resolution === 'technical_failure' && options.absorbFailure === true;
+  const { tutorCents, platformCents } = absorbed
+    ? absorbedSplit(booking)
+    : applyCommission(chargeableCents, booking.commissionBps);
 
   const outcome: BookingOutcome = {
     resolution,
@@ -216,7 +341,8 @@ export function resolveBookingOutcome(
     platformCents,
     tutorStrike: resolution === 'cancelled_by_tutor' || resolution === 'no_show_tutor',
     freeSessionCredit: resolution === 'no_show_tutor',
-    reason: REASONS[resolution],
+    platformAbsorbed: absorbed,
+    reason: absorbed ? 'technical_failure_absorbed' : REASONS[resolution],
     entries: [],
   };
 
@@ -258,12 +384,14 @@ export function resolveBookingOutcome(
     });
   }
 
-  if (platformCents > 0) {
+  if (platformCents !== 0) {
     entries.push({
       account: 'platform_revenue',
       ownerId: null,
       deltaCents: platformCents,
-      reason: `${outcome.reason}:commission`,
+      // Negative when we are absorbing: revenue paying for a session nobody was
+      // charged for. Naming it differently keeps that visible in the ledger.
+      reason: absorbed ? `${outcome.reason}:absorbed` : `${outcome.reason}:commission`,
       idempotencyKey: `booking:${booking.id}:settle:platform`,
       bookingId: booking.id,
     });

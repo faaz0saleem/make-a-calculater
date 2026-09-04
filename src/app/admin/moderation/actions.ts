@@ -9,6 +9,7 @@
 
 import { revalidatePath } from 'next/cache';
 
+import { resolveDispute, type DisputeDecision } from '@/db/disputes';
 import { hideReview, unhideReview } from '@/db/reviews';
 import { requireRole } from '@/lib/auth/guards';
 import { requestIp } from '@/lib/admin/audit';
@@ -35,4 +36,30 @@ export async function unhideReviewAction(formData: FormData): Promise<void> {
   }
 
   revalidatePath('/admin/moderation');
+}
+
+/**
+ * Resolve a disputed session.
+ *
+ * `settle` runs the ordinary settlement — whatever the attendance says. `refund`
+ * overrides it and returns the student's credits. Either way it writes an
+ * `admin_audit` row with the reason, because this moves money.
+ */
+export async function resolveDisputeAction(formData: FormData): Promise<void> {
+  const admin = await requireRole('admin');
+  const reportId = String(formData.get('reportId') ?? '');
+  const decision = String(formData.get('decision') ?? '') === 'refund' ? 'refund' : 'settle';
+  const reason = String(formData.get('reason') ?? '');
+
+  if (reportId && reason.trim()) {
+    await resolveDispute({
+      reportId,
+      admin: { id: admin.id, ip: await requestIp() },
+      decision: decision as DisputeDecision,
+      reason,
+    });
+  }
+
+  revalidatePath('/admin/moderation');
+  revalidatePath('/admin');
 }

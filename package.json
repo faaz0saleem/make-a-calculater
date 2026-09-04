@@ -2,7 +2,7 @@
   "name": "tutorly",
   "version": "0.1.0",
   "private": true,
-  "description": "Tutorly — a discovery-first tutoring marketplace.",
+  "description": "Tutorly \u2014 a discovery-first tutoring marketplace.",
   "engines": {
     "node": ">=20.11"
   },
@@ -24,7 +24,10 @@
     "e2e": "tsx src/db/seed.ts && playwright test",
     "e2e:ui": "playwright test --ui",
     "rank": "tsx src/scripts/rank-tutors.ts",
-    "settle": "tsx src/scripts/settle.ts"
+    "settle": "tsx src/scripts/settle.ts",
+    "prove:booking": "tsx src/scripts/prove-no-double-booking.ts",
+    "prove:commission": "tsx src/scripts/prove-commission.ts",
+    "measure:regions": "tsx src/scripts/measure-regions.ts"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",

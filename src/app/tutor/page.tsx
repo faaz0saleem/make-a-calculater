@@ -4,10 +4,17 @@
  * The wizard from SPEC.md §3 and the earnings history land in phases 1 and 6.
  */
 
-import { and, desc, eq, gte, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import Link from 'next/link';
 
+import {
+  answerRescheduleAction,
+  cancelBookingAction,
+  reportProblemAction,
+  requestRescheduleAction,
+} from '@/app/dashboard/actions';
 import { answerTrial, postReviewReply } from '@/app/tutor/actions';
+import { BookingActions, RescheduleInbox } from '@/components/bookings/booking-actions';
 import { withdrawProfile } from '@/app/tutor/onboarding/actions';
 import { TutorReviews } from '@/components/reviews/tutor-reviews';
 import { TrialRequests } from '@/components/trials/trial-requests';
@@ -25,13 +32,16 @@ import {
 } from '@/components/ui/card';
 import { db } from '@/db/client';
 import { bookings, payouts, tutorProfiles, users } from '@/db/schema';
+import { openReschedulesFor } from '@/db/bookings';
 import { ratingSummaryFor, reviewsForTutor } from '@/db/reviews';
 import { pendingTrialsForTutor } from '@/db/trials';
 import { loadWizardSnapshot } from '@/db/tutors';
 import { requireRole } from '@/lib/auth/guards';
 import { wizardProgress } from '@/lib/tutors/wizard';
 import { formatCents } from '@/lib/money/cents';
+import { REBOOKING_COMMISSION_BPS, commissionBpsFor } from '@/lib/money/commission';
 import { canRequestPayout, PAYOUT_THRESHOLD_CENTS } from '@/lib/money/payouts';
+import { sessionWindow } from '@/lib/sessions/window';
 import { formatInTimeZone } from '@/lib/time';
 
 export const dynamic = 'force-dynamic';
@@ -45,9 +55,14 @@ const STATUS_COPY: Record<string, string> = {
   suspended: 'Suspended. Contact support.',
 };
 
-export default async function TutorPage() {
+export default async function TutorPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string; moved?: string; reported?: string; cancelled?: string }>;
+}) {
   const user = await requireRole('tutor');
   const now = new Date();
+  const query = await searchParams;
 
   const [profile] = await db
     .select()
@@ -91,18 +106,44 @@ export default async function TutorPage() {
     .where(
       and(
         eq(bookings.tutorId, user.id),
-        gte(bookings.startAtUtc, now),
+        sql`${bookings.startAtUtc} + make_interval(mins => ${bookings.durationMinutes}) >= now()`,
         inArray(bookings.status, ['pending_tutor', 'confirmed', 'in_progress']),
       ),
     )
     .orderBy(bookings.startAtUtc)
     .limit(10);
 
-  const [trialRequests, ratings, reviews] = await Promise.all([
+  const [trialRequests, ratings, reviews, reschedules] = await Promise.all([
     pendingTrialsForTutor(user.id, now),
     ratingSummaryFor(user.id),
     reviewsForTutor(user.id),
+    openReschedulesFor(user.id, now),
   ]);
+
+  // Sessions recent enough that either side can still report a problem.
+  const recent = await db
+    .select({
+      id: bookings.id,
+      startAtUtc: bookings.startAtUtc,
+      durationMinutes: bookings.durationMinutes,
+      status: bookings.status,
+      isTrial: bookings.isTrial,
+      priceCents: bookings.priceCents,
+      rescheduleCount: bookings.rescheduleCount,
+      completedAt: bookings.completedAt,
+      settledAt: bookings.settledAt,
+      studentName: users.name,
+    })
+    .from(bookings)
+    .innerJoin(users, eq(users.id, bookings.studentId))
+    .where(
+      and(
+        eq(bookings.tutorId, user.id),
+        sql`${bookings.startAtUtc} + make_interval(mins => ${bookings.durationMinutes}) < now()`,
+      ),
+    )
+    .orderBy(desc(bookings.startAtUtc))
+    .limit(5);
 
   const payoutHistory = await db
     .select()
@@ -186,6 +227,33 @@ export default async function TutorPage() {
           </p>
         ) : null}
 
+        {query.error ? (
+          <p role="alert" className="rounded-md bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {query.error}
+          </p>
+        ) : null}
+
+        {query.moved ? (
+          <p role="status" className="rounded-md bg-[var(--success)]/10 px-4 py-3 text-sm">
+            Done — the session has moved.
+          </p>
+        ) : null}
+
+        {query.reported ? (
+          <p role="status" className="rounded-md bg-secondary px-4 py-3 text-sm">
+            Reported. Nothing settles on that session until our team has looked at it.
+          </p>
+        ) : null}
+
+        <RescheduleInbox
+          requests={reschedules}
+          userId={user.id}
+          timezone={user.timezone}
+          now={now}
+          returnTo="/tutor"
+          action={answerRescheduleAction}
+        />
+
         <TrialRequests
           requests={trialRequests}
           timezone={user.timezone}
@@ -263,8 +331,13 @@ export default async function TutorPage() {
               <p>60 minutes — {formatCents(profile.hourlyCents)}</p>
               <p>30 minutes — {formatCents(profile.halfHourCents)}</p>
               <p className="text-muted-foreground">
-                Platform commission {(profile.commissionBps / 100).toFixed(0)}% · you keep{' '}
-                {((10_000 - profile.commissionBps) / 100).toFixed(0)}%
+                Commission {(commissionBpsFor(false, profile.commissionBps) / 100).toFixed(0)}% on a
+                student&rsquo;s first session with you, then{' '}
+                {(commissionBpsFor(true, profile.commissionBps) / 100).toFixed(0)}% every time they come
+                back.
+                {profile.commissionBps < REBOOKING_COMMISSION_BPS
+                  ? ` Your negotiated rate of ${(profile.commissionBps / 100).toFixed(0)}% applies whichever it is.`
+                  : ''}
               </p>
               <p className="text-muted-foreground">
                 {profile.offersTrial
@@ -310,6 +383,53 @@ export default async function TutorPage() {
             </CardContent>
           </Card>
         </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Recent sessions</CardTitle>
+            <CardDescription>
+              If one of these went wrong, say so while the money is still held.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {recent.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Nothing yet.</p>
+            ) : (
+              <ul className="flex flex-col divide-y divide-border text-sm">
+                {recent.map((booking) => (
+                  <li key={booking.id} className="flex flex-col gap-2 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                      <div className="min-w-0">
+                        <p className="font-medium">{booking.studentName}</p>
+                        <p className="text-muted-foreground">
+                          {formatInTimeZone(booking.startAtUtc, user.timezone)} ·{' '}
+                          {booking.durationMinutes} min
+                        </p>
+                      </div>
+                      <Badge variant="outline">{booking.status}</Badge>
+                    </div>
+
+                    <BookingActions
+                      booking={booking}
+                      now={now}
+                      timezone={user.timezone}
+                      returnTo="/tutor"
+                      freeSlots={[]}
+                      canReport={
+                        !booking.settledAt &&
+                        booking.status !== 'disputed' &&
+                        now < sessionWindow(booking.startAtUtc, booking.durationMinutes).settlesAfterUtc
+                      }
+                      cancelAction={cancelBookingAction}
+                      rescheduleAction={requestRescheduleAction}
+                      reportAction={reportProblemAction}
+                    />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+
         <TutorReviews
           summary={ratings}
           reviews={reviews}

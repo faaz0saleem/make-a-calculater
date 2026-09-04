@@ -23,9 +23,38 @@ import { bookings, tutorProfiles } from './schema';
 import { findBookingsAwaitingSettlement, loadSessionEvents, type SettleableBooking } from './sessions';
 import { transitionBooking, type BookingStatus } from '@/lib/bookings/status';
 import { pendingToAvailableEntries } from '@/lib/money/ledger';
-import { resolveBookingOutcome, type BookingResolution } from '@/lib/money/outcomes';
+import {
+  ABSORBED_FAILURE_WINDOW_DAYS,
+  platformAbsorbsFailure,
+  resolveBookingOutcome,
+  type BookingResolution,
+} from '@/lib/money/outcomes';
 import { summariseAttendance } from '@/lib/sessions/attendance';
 import { sessionWindow } from '@/lib/sessions/window';
+
+/**
+ * How many connection failures we have already absorbed for this student inside
+ * the window. Counted from the ledger, which is the only record that cannot
+ * disagree with what was actually paid.
+ */
+export async function absorbedFailureCount(
+  studentId: string,
+  now: Date,
+  database: DbLike = defaultDb,
+): Promise<number> {
+  const since = new Date(now.getTime() - ABSORBED_FAILURE_WINDOW_DAYS * 86_400_000);
+
+  const rows = (await database.execute(sql`
+    select count(*)::int as total
+    from ledger_entries l
+    join bookings b on b.id = l.booking_id
+    where b.student_id = ${studentId}::uuid
+      and l.reason = 'technical_failure_absorbed:absorbed'
+      and l.at >= ${since.toISOString()}::timestamptz
+  `)) as unknown as { total: number }[];
+
+  return rows[0]?.total ?? 0;
+}
 
 export type SettlementLine = {
   bookingId: string;
@@ -35,6 +64,8 @@ export type SettlementLine = {
   platformCents: number;
   status: BookingStatus;
   strike: boolean;
+  /** The platform paid the tutor for a session nobody was charged for. */
+  absorbed: boolean;
 };
 
 export type SettlementRun = {
@@ -64,6 +95,11 @@ export async function settleBooking(
     now,
   });
 
+  // The connection-failure policy: we pay for our own transport failing, twice
+  // per student per ninety days. The count is a database fact, so it is read
+  // here and the pure function is told the answer.
+  const absorbed = await absorbedFailureCount(booking.studentId, now, database);
+
   const outcome = resolveBookingOutcome(
     {
       id: booking.id,
@@ -74,24 +110,31 @@ export async function settleBooking(
       commissionBps: booking.commissionBps,
       startAtUtc: booking.startAtUtc,
       durationMinutes: booking.durationMinutes,
+      completedAt: booking.completedAt,
     },
     attendance,
+    { absorbFailure: platformAbsorbsFailure(absorbed) },
   );
 
   // The status machine will not jump straight from `confirmed` to a terminal
   // state, so walk the intermediate hop the same way a live session would.
+  // A booking already in `disputed` goes straight to its terminal state: an
+  // admin has decided, and `disputed -> completed` is not a move backwards the
+  // machine allows.
   const path: BookingStatus[] = [];
   let status = booking.status;
 
-  if (outcome.resolution === 'completed' && status !== 'completed') {
-    if (status === 'confirmed') path.push('in_progress');
-    path.push('completed');
-  } else if (outcome.resolution === 'no_show_student' && status !== 'no_show_student') {
-    path.push('no_show_student');
-  } else if (outcome.resolution === 'no_show_tutor' && status !== 'no_show_tutor') {
-    path.push('no_show_tutor');
-  } else if (outcome.resolution === 'technical_failure' && status !== 'disputed') {
-    path.push('disputed');
+  if (status !== 'disputed') {
+    if (outcome.resolution === 'completed' && status !== 'completed') {
+      if (status === 'confirmed') path.push('in_progress');
+      path.push('completed');
+    } else if (outcome.resolution === 'no_show_student' && status !== 'no_show_student') {
+      path.push('no_show_student');
+    } else if (outcome.resolution === 'no_show_tutor' && status !== 'no_show_tutor') {
+      path.push('no_show_tutor');
+    } else if (outcome.resolution === 'technical_failure') {
+      path.push('disputed');
+    }
   }
 
   path.push(outcome.terminalStatus);
@@ -146,7 +189,26 @@ export async function settleBooking(
     platformCents: outcome.platformCents,
     status,
     strike: outcome.tutorStrike,
+    absorbed: outcome.platformAbsorbed,
   };
+}
+
+/**
+ * What tonight's run would touch, without touching it.
+ *
+ * Useful before a change to the money rules, and the only way to ask "is this
+ * booking due?" without settling every other booking that also is.
+ */
+export async function previewSettlement(
+  now = new Date(),
+  database: DbLike = defaultDb,
+): Promise<{ bookingId: string; startAtUtc: Date; status: BookingStatus }[]> {
+  const due = await findBookingsAwaitingSettlement(now, database);
+  return due.map((booking) => ({
+    bookingId: booking.id,
+    startAtUtc: booking.startAtUtc,
+    status: booking.status,
+  }));
 }
 
 /**

@@ -133,7 +133,8 @@ export default async function VerificationReviewPage({
                 </Claim>
                 <Claim label="Rates">
                   {formatCents(tutor.hourlyCents)}/hr · {formatCents(tutor.halfHourCents)} per 30 min ·{' '}
-                  {tutor.commissionBps / 100}% commission
+                  {tutor.commissionBps / 100}% negotiated commission (a floor: they pay the lower of
+                  this and the retention rate)
                 </Claim>
                 <Claim label="Free trial">
                   {tutor.offersTrial ? `Yes, ${tutor.trialMinutes} minutes` : 'No'}

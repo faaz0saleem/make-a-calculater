@@ -28,7 +28,7 @@ genuinely blocked on a human.
 | ORM | Drizzle + drizzle-kit migrations |
 | Auth | Auth.js v5 — email/password and Google |
 | UI | Tailwind v4 + shadcn/ui tokens |
-| Live video | LiveKit — a server you run, or LiveKit Cloud |
+| Live video | LiveKit — a server you run, or LiveKit Cloud *(region undecided — `pnpm measure:regions`, run from the market)* |
 | Intro video transcode | ffmpeg locally; Mux or Cloudflare Stream in production *(undecided — see DECISIONS_NEEDED.md)* |
 | Storage | Cloudflare R2 — private bucket for credentials, local filesystem in dev |
 | Email | Resend *(phase 7)* |
@@ -36,8 +36,9 @@ genuinely blocked on a human.
 | Hosting | Vercel |
 
 Payments are deliberately not tied to a provider. Everything goes through a
-`PaymentProvider` interface with a `MockProvider` that credits the wallet
-instantly in development; the real one drops in behind it once chosen.
+`PaymentProvider` interface with a `MockProvider`; the real one drops in behind
+it once chosen (DECISIONS_NEEDED.md item 1). The mock is not a bypass — it posts
+the same signed webhook to the same route a real provider would.
 
 ---
 
@@ -106,7 +107,10 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm seed` | Truncate and rebuild the development world |
 | `pnpm reconcile` | The nightly ledger check — exits non-zero on drift |
 | `pnpm rank` | The nightly ranking job — recomputes `tutor_ranking` |
-| `pnpm settle` | Release escrow on sessions past their dispute window. `--at <iso>` runs it as if it were then |
+| `pnpm settle` | Release escrow on sessions past their dispute window. `--at <iso>` runs it as if it were then; `--dry-run` lists what it would touch |
+| `pnpm prove:booking` | Fire N parallel bookings at one slot and print the result. `--clients 4` |
+| `pnpm prove:commission` | What commission a booking between two people would carry right now |
+| `pnpm measure:regions` | Median latency to each candidate media region. **Run it from the market** |
 
 ---
 
@@ -214,6 +218,108 @@ and quietly falls apart a few seconds in.
 
 Without these variables the classroom refuses to start and says so, rather than
 dropping a student into a room that will never connect.
+
+## Credits and booking
+
+**Credits are the only thing a student buys.** One credit is one dollar; the
+larger packs carry a bonus. Prices live in `credit_packs` and an admin edits
+them at `/admin/packs`, so a price change is a form submission rather than a
+deploy — and every purchase snapshots both numbers, so changing them never
+reaches a purchase already made.
+
+Nothing in the codebase names a payment provider. Everything goes through the
+`PaymentProvider` interface in `src/lib/payments/`, and the only implementation
+today is a mock that settles instantly. It is deliberately not a shortcut: it
+sends the browser to a page that posts a **real, signed webhook** to the same
+route a real provider would, so development and the tests exercise the
+production path rather than a bypass of it.
+
+A webhook that arrives three times credits once. Two guards do that, neither of
+them a check-then-act:
+
+- the signature, verified against the raw bytes before anything is parsed
+- `ledger_entries.idempotency_key`, unique, derived from the purchase
+
+`e2e/booking.spec.ts` fires three deliveries **in parallel** and asserts one
+`credit_purchases` row, one ledger entry, one lot of credits.
+
+### Booking is one transaction
+
+Checking the slot, debiting the credits into escrow, and inserting the booking
+happen together or not at all, at `serializable` isolation. Three independent
+things stop a double booking, which is deliberate:
+
+1. `booking_no_overlap` — a partial unique index on `(tutor_id, start_at_utc)`
+   over live statuses. This is the guarantee; the rest are politeness.
+2. `serializable` isolation, so the read that decided the slot was free is part
+   of what gets serialised.
+3. The availability engine, run against the transaction's own view — not the
+   pool's, which would be a read outside the isolation the whole thing exists
+   to get.
+
+Whoever loses that race gets `slot_taken`, whether Postgres said so through the
+unique index (23505) or a serialization failure (40001). `pnpm prove:booking`
+fires N genuinely parallel bookings at one slot and prints what happened; with
+four clients, one booking and one escrow entry come out the other side.
+
+A 60-minute session needs two contiguous free slots, which falls out of asking
+the engine for 60 minutes rather than being a rule of its own.
+
+### Commission is retention-based
+
+A tutor pays **20%** the first time a student books them and **15%** every time
+after — keeping a student is worth more to us than acquiring one, and the
+pricing says so. The rate turns on one fact: a paid session between those two
+that actually happened (`bookings.completed_at is not null`). A free trial does
+not count, and neither does a session that is booked but has not happened yet.
+
+`tutor_profiles.commission_bps` is still read, as a **floor**: the effective
+rate is the lower of the tutor's negotiated rate and the retention rate. A rate
+agreed during recruitment is a promise — "you will never pay more than this" —
+and the retention discount stacks on top of it. At the column's default of 2000
+the floor never binds, so it costs nothing for tutors who negotiated nothing.
+
+Both numbers are snapshotted onto the booking at creation. A rate change
+tomorrow cannot reach a booking made today, and `e2e/booking.spec.ts` proves it
+by raising a tutor's rate afterwards and re-reading the row.
+
+### Not enough credits
+
+Picking a slot you cannot afford puts a **ten-minute hold** on it and sends you
+to buy credits — the other way round means buying credits and coming back to
+find the slot gone. A hold blocks everybody except its owner, and it expires
+**when it is read** (`expires_at > now()`), not when a sweeper gets round to it:
+a job every five minutes leaves five minutes in which the calendar is lying.
+
+### Moving and cancelling
+
+A session can be moved once, more than twelve hours before it starts, and the
+other side has six hours to agree — or until the proposed time arrives,
+whichever comes first. The original booking stands until they do. Unanswered
+requests expire on the next read, the same way trial requests do.
+
+Cancelling settles immediately through `resolveBookingOutcome`, so the refund a
+student is shown before they press the button is computed by the same function
+that then moves the cents.
+
+### When something goes wrong
+
+Either side can **report a problem** during the 24 hours after a session. That
+moves the booking to `disputed`, which needs no new code in the settlement job:
+`disputed` is not one of the statuses `findBookingsAwaitingSettlement` looks
+for, so the money simply stops. An admin resolves it — settle as it stands, or
+refund the student — and either decision writes an `admin_audit` row with a
+reason. `pnpm settle --dry-run` lists what tonight would touch without touching
+it.
+
+**A connection failure is on us.** When both people turned up and the link died,
+the student is refunded in full *and* the tutor is paid their full share, out of
+platform revenue. That is the one outcome that cannot be expressed as a refund
+percentage — the chargeable amount is zero and the tutor is still paid — so it
+is the single branch in `resolveBookingOutcome` that computes its own entries.
+It is capped at two per student per 90 days, because "my connection broke" is
+also the easiest free lesson to claim; past the cap the student is still made
+whole and the tutor is not paid from our revenue.
 
 ## Trials, messages, reviews and follows
 
@@ -338,7 +444,9 @@ Every row of that table has a test in `src/lib/money/outcomes.test.ts`.
 
 **Prices are snapshotted.** `bookings.price_cents` and `bookings.commission_bps`
 are copied at creation time, so a tutor raising their rate cannot reprice a
-booking that already exists.
+booking that already exists — and neither can a change to the commission rules.
+The commission is retention-based (20% first, 15% after), floored by any rate
+negotiated with that tutor; see *Credits and booking* above.
 
 ---
 
@@ -374,6 +482,7 @@ src/
     api/uploads/        signed direct uploads (development stand-in for R2)
     api/cron/           ranking, reconciliation and settlement, on a schedule
     api/livekit/        the webhook attendance is measured from
+    credits/            buying credits, and the mock provider's checkout
     messages/           conversations, masked on write
     notifications/      the in-app bell
     sessions/           the classroom
@@ -385,7 +494,11 @@ src/
     ledger.ts           the only writer of balance columns; reconciliation
     discovery.ts        the feed, search, filters and the rails
     ranking.ts          the nightly ranking job
+    bookings.ts         creating, moving and cancelling, in one transaction
+    disputes.ts         reporting a problem, and the settlement freeze
     moderation.ts       the only reader of raw message bodies
+    purchases.ts        credit packs, checkout, and the idempotent webhook
+    retention.ts        dropping raw webhook bodies after 90 days
     trials.ts           free-trial requests and the tutor's answer
     tutors.ts           every query that decides who is visible
     seed.ts             the development world
@@ -394,14 +507,15 @@ src/
   lib/
     admin/audit.ts      the admin_audit writer
     auth/               password policy, roles, server-side guards
-    bookings/status.ts  the booking state machine
+    bookings/           the state machine, slot holds, reschedule rules
     availability/       the scheduling engine, and the port discovery reads
     livekit/            room names and access tokens
     messaging/          contact-info masking, response-time medians
     reviews/            who may review, and what the stars add up to
     sessions/           the session window, attendance, connection grading
     trials/             the free-trial rules and their abuse guards
-    money/              cents, pricing, outcomes, ledger drafts, packs, payouts
+    money/              cents, pricing, commission, outcomes, ledger drafts, packs, payouts
+    payments/           the PaymentProvider interface and the mock
     ranking/            the §4 score, pure and tested
     storage/            object stores, keys, signed URLs, direct uploads
     tutors/             profile status machine, wizard model, visibility, badges

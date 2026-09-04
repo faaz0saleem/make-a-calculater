@@ -329,12 +329,18 @@ test.describe('the classroom', () => {
       timeout: 120_000,
     });
 
-    expect(stdout).toContain('2 of 2 settled');
+    // Not "2 of 2": other bookings may also be due by then, and how many is a
+    // detail of whatever else the suite has done. What matters is that the run
+    // finished cleanly and that both of these two were resolved as they should
+    // have been — asserted to the cent below.
+    expect(stdout).not.toContain('FAILED');
     expect(stdout).toContain('technical_failure');
     expect(stdout).toContain('completed');
 
     // The real call: two browsers in the room for seconds, not for half of a
-    // booked hour. Nobody is charged for a lesson that did not happen.
+    // booked hour. The student is not charged for a lesson that did not happen
+    // — and since phase 3B, the tutor is paid anyway and the platform carries
+    // it, because neither of them broke the connection.
     const liveRow = only(
       await queryDatabase<{ status: string; settled_at: Date | null }[]>(
         (sql) => sql`select status, settled_at from bookings where id = ${live.id}` as never,
@@ -344,11 +350,15 @@ test.describe('the classroom', () => {
     expect(liveRow.status).toBe('refunded');
     expect(liveRow.settled_at).not.toBeNull();
 
+    const liveTutorShare =
+      live.price_cents - Math.floor((live.price_cents * live.commission_bps) / 10_000);
+
     const liveAfter = await balances(live);
     expect(liveAfter.credits - liveBefore.credits).toBe(live.price_cents);
     expect(liveAfter.escrow).toBe(0);
-    expect(liveAfter.available - liveBefore.available).toBe(0);
-    expect(liveAfter.platform).toBe(0);
+    expect(liveAfter.available - liveBefore.available).toBe(liveTutorShare);
+    // Negative: our revenue paid for it.
+    expect(liveAfter.platform).toBe(-liveTutorShare);
 
     // The attended hour: no refund, the tutor keeps their share, the platform
     // takes the commission that was snapshotted onto the booking.

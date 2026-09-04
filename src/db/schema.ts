@@ -109,6 +109,14 @@ export const reportTargetEnum = pgEnum('report_target', [
 
 export const reportStatusEnum = pgEnum('report_status', ['open', 'reviewing', 'resolved', 'dismissed']);
 
+export const rescheduleStatusEnum = pgEnum('reschedule_status', [
+  'pending',
+  'accepted',
+  'declined',
+  'expired',
+  'cancelled',
+]);
+
 /**
  * The in-app bell (SPEC.md §11). Email templates arrive in Phase 7; these are
  * the events Phase 5 actually produces.
@@ -573,6 +581,71 @@ export const creditPacks = pgTable('credit_packs', {
   sortOrder: smallint().notNull().default(0),
   active: boolean().notNull().default(true),
 });
+
+/**
+ * A ten-minute claim on a slot while a student buys the credits for it
+ * (SPEC.md §5).
+ *
+ * Not a booking, and no substitute for one: the guarantee that two people
+ * cannot take the same slot is the partial unique index on `bookings`. This
+ * only stops a second student *starting* down that path. Expiry is checked by
+ * every query that reads it — `expires_at > now()` — rather than by a sweeper.
+ */
+export const slotHolds = pgTable(
+  'slot_holds',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    studentId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tutorId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    startAtUtc: timestamp({ withTimezone: true }).notNull(),
+    durationMinutes: smallint().notNull(),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    /** One student, one hold on a given slot — re-picking it just extends theirs. */
+    uniqueIndex('slot_holds_student_slot').on(table.studentId, table.tutorId, table.startAtUtc),
+    index('slot_holds_slot_idx').on(table.tutorId, table.startAtUtc, table.expiresAt),
+  ],
+);
+
+/**
+ * A proposed new time, waiting on the other side (SPEC.md §5).
+ *
+ * The original booking stands until this is accepted, so nothing about the
+ * booking changes while a request is open — which is why the new time lives
+ * here rather than on the booking row.
+ */
+export const rescheduleRequests = pgTable(
+  'reschedule_requests',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    bookingId: uuid()
+      .notNull()
+      .references(() => bookings.id, { onDelete: 'cascade' }),
+    requestedById: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    requestedBy: partyEnum().notNull(),
+    newStartAtUtc: timestamp({ withTimezone: true }).notNull(),
+    status: rescheduleStatusEnum().notNull().default('pending'),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    note: varchar({ length: 300 }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    respondedAt: timestamp({ withTimezone: true }),
+  },
+  (table) => [
+    /** One open request per booking, enforced where it cannot be raced. */
+    uniqueIndex('reschedule_one_open_per_booking')
+      .on(table.bookingId)
+      .where(sql`status = 'pending'`),
+    index('reschedule_booking_idx').on(table.bookingId, table.createdAt),
+  ],
+);
 
 export const creditPurchases = pgTable(
   'credit_purchases',

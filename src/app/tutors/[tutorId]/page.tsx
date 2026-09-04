@@ -14,7 +14,7 @@ import Link from 'next/link';
 import { cookies } from 'next/headers';
 import { notFound } from 'next/navigation';
 
-import { askForTrial, toggleFollow } from '@/app/tutors/[tutorId]/actions';
+import { askForTrial, bookSession, dropHold, toggleFollow } from '@/app/tutors/[tutorId]/actions';
 import { BookingCalendar, type CalendarMode } from '@/components/booking/calendar';
 import { FollowButton } from '@/components/tutors/follow-button';
 import { ReviewList } from '@/components/reviews/review-list';
@@ -24,6 +24,7 @@ import { IntroPlayer } from '@/components/video/intro-player';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { heldSlotsFor, liveHoldsFor } from '@/db/bookings';
 import { isFollowing, followerCount } from '@/db/follows';
 import { ratingSummaryFor, reviewsForTutor } from '@/db/reviews';
 import { pairHasHadTrial } from '@/db/trials';
@@ -34,9 +35,10 @@ import { formatStars } from '@/lib/reviews/rules';
 import { languageName, PROFICIENCY_LABELS, type LanguageProficiency } from '@/lib/tutors/languages';
 import { getAvailability } from '@/lib/availability';
 import { priceForBooking } from '@/lib/money/pricing';
+import { describeHold } from '@/lib/bookings/holds';
 import { describeResponseTime } from '@/lib/messaging/response-time';
 import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
-import { isValidTimeZone } from '@/lib/time';
+import { formatInTimeZone, isValidTimeZone } from '@/lib/time';
 import { bookabilityProblem, canViewProfile, isPubliclyVisible } from '@/lib/tutors/visibility';
 
 export const dynamic = 'force-dynamic';
@@ -48,7 +50,7 @@ export default async function TutorProfilePage({
   searchParams,
 }: {
   params: Promise<{ tutorId: string }>;
-  searchParams: Promise<{ mode?: string; duration?: string; error?: string }>;
+  searchParams: Promise<{ mode?: string; duration?: string; error?: string; at?: string }>;
 }) {
   const { tutorId } = await params;
   const [tutor, viewer, jar, query] = await Promise.all([
@@ -112,6 +114,22 @@ export default async function TutorProfilePage({
       });
 
   const respondsIn = describeResponseTime(tutor.responseMedianSeconds ?? null);
+
+  // Slots somebody else is holding while they buy credits are not offered; the
+  // student's own hold is, and is called out above the calendar.
+  const now = new Date();
+  const [othersHolding, myHolds] = await Promise.all([
+    viewer ? heldSlotsFor(tutor.id, viewer.id, now) : heldSlotsFor(tutor.id, null, now),
+    viewer ? liveHoldsFor(viewer.id, now) : Promise.resolve([]),
+  ]);
+
+  const heldElsewhere = new Set(othersHolding.map((slot) => slot.getTime()));
+  const myHold = myHolds.find((hold) => hold.tutorId === tutor.id) ?? null;
+
+  const offered =
+    slots && slots.known
+      ? slots.value.filter((slot) => !heldElsewhere.has(slot.startUtc.getTime()))
+      : null;
 
   return (
     <>
@@ -254,8 +272,33 @@ export default async function TutorProfilePage({
 
         <ReviewList summary={ratings} reviews={reviews} timezone={studentTimezone} />
 
+        {myHold && mode !== 'trial' ? (
+          <div
+            role="status"
+            data-testid="slot-hold"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-primary bg-card px-4 py-3 text-sm"
+          >
+            <p>
+              <strong>
+                {formatInTimeZone(myHold.startAtUtc, studentTimezone, {
+                  weekday: 'short',
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })}
+              </strong>{' '}
+              is held for you — {describeHold(myHold, now)}. Nobody else can take it until then.
+            </p>
+            <form action={dropHold.bind(null, tutor.id)}>
+              <input type="hidden" name="startUtc" value={myHold.startAtUtc.toISOString()} />
+              <Button type="submit" variant="ghost" size="sm" className="min-h-11">
+                Give it up
+              </Button>
+            </form>
+          </div>
+        ) : null}
+
         <BookingCalendar
-          slots={slots && slots.known ? slots.value : null}
+          slots={offered}
           studentTimezone={studentTimezone}
           tutorTimezone={tutor.timezone}
           mode={mode}
@@ -271,13 +314,19 @@ export default async function TutorProfilePage({
           }
           error={query.error ?? null}
           select={
-            mode === 'trial' && viewer
-              ? {
-                  action: askForTrial.bind(null, tutor.id),
-                  label: `Ask for a free ${tutor.trialMinutes}-minute trial`,
-                  note: `Pick a time and ${tutor.name.split(' ')[0]} has 12 hours to accept. Nothing is charged, and you keep your credits either way.`,
-                }
-              : undefined
+            !viewer || problem
+              ? undefined
+              : mode === 'trial'
+                ? {
+                    action: askForTrial.bind(null, tutor.id),
+                    label: `Ask for a free ${tutor.trialMinutes}-minute trial`,
+                    note: `Pick a time and ${tutor.name.split(' ')[0]} has 12 hours to accept. Nothing is charged, and you keep your credits either way.`,
+                  }
+                : {
+                    action: bookSession.bind(null, tutor.id, mode),
+                    label: `Book ${mode} minutes for ${formatCents(priceCents)}`,
+                    note: `Pressing a time books it and moves ${formatCents(priceCents)} of your credits into escrow, where it stays until the session is over. Cancel more than 24 hours before and you get all of it back.`,
+                  }
           }
         />
 
@@ -289,23 +338,29 @@ export default async function TutorProfilePage({
                 : 'This tutor has not completed verification yet, so they cannot be booked.'
               : trialOffered
                 ? `A free ${tutor.trialMinutes}-minute trial, no credits, no card.`
-                : alreadyTrialled
-                  ? 'You have already had your free trial with this tutor.'
-                  : 'Pick a slot above. Paying with credits arrives with booking.'}
+                : `${alreadyTrialled ? 'You have already had your free trial with this tutor. ' : ''}${formatCents(priceCents)} for ${durationMinutes} minutes, paid from your credits.`}
           </p>
 
-          {trialOffered && viewer ? (
+          {problem ? (
+            // A profile that cannot be booked does not offer a button that
+            // looks like it can.
+            <Button disabled className="min-h-11">
+              Book a session
+            </Button>
+          ) : !viewer ? (
+            <Link href={`/signin?next=${encodeURIComponent(`/tutors/${tutor.id}?mode=${trialOffered ? 'trial' : 60}`)}`}>
+              <Button className="min-h-11">
+                {trialOffered ? 'Sign in to book a free trial' : 'Sign in to book'}
+              </Button>
+            </Link>
+          ) : trialOffered ? (
             <Link href={`/tutors/${tutor.id}?mode=trial`}>
               <Button className="min-h-11">Book free trial</Button>
             </Link>
-          ) : trialOffered && !viewer ? (
-            <Link href={`/signin?next=${encodeURIComponent(`/tutors/${tutor.id}?mode=trial`)}`}>
-              <Button className="min-h-11">Sign in to book a free trial</Button>
-            </Link>
           ) : (
-            <Button disabled title="Paying with credits arrives with booking" className="min-h-11">
-              Book session
-            </Button>
+            <Link href={`/tutors/${tutor.id}?mode=60`}>
+              <Button className="min-h-11">Book a session</Button>
+            </Link>
           )}
         </div>
 

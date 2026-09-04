@@ -8,11 +8,135 @@ Phases follow `SPEC.md` §15.
 | 1 — tutor onboarding wizard + admin verification queue | **Done** |
 | 2 — discovery feed, search, filters, tutor profile | **Done** |
 | 3A — availability engine | **Done** |
-| 3B — credits and booking | **Not started** — see the note below |
+| 3B — credits and booking | **Done** |
 | 4 — LiveKit calls + session state machine + settlement | **Done** |
 | 5 — trials, messaging, reviews, follows | **Done** |
 | 6 — payouts + admin dashboard + audit log | Not started |
 | 7 — real payment provider, notifications, SEO, analytics | Not started |
+
+---
+
+## Phase 3, checkpoint B — done
+
+The gap every earlier phase had to work around. A student can now buy credits
+and book a tutor, which is what makes the rest of it real.
+
+### Credits
+
+`PaymentProvider` with one implementation, a mock. The mock is not a shortcut
+past the real path: pressing "pay" posts a genuinely signed webhook to
+`/api/payments/webhook`, the same route and the same signature check a real
+provider would use. Which provider we end up with is still
+DECISIONS_NEEDED.md item 1, and nothing in the codebase names one.
+
+**Three deliveries, one credit.** The test fires them in parallel, not in
+sequence — sequential calls would pass against a check-then-act that a real
+provider's retries would break. One `credit_purchases` row, one ledger entry,
+one lot of credits, because `ledger_entries.idempotency_key` is unique and
+`appendLedger` only moves balances for rows it actually inserted.
+
+Pack prices moved out of the constant and into the table an admin edits at
+`/admin/packs`. The constants remain as the shipped defaults for an empty
+database.
+
+### Booking
+
+One `serializable` transaction: check the slot, debit the credits into escrow,
+insert the booking. The availability engine runs against the transaction's own
+view rather than the pool's — reading outside the isolation would defeat the
+point of having it.
+
+`pnpm prove:booking --clients 4` fires four genuinely parallel bookings at one
+slot: **one succeeds, three get `slot_taken`, and the database holds one booking
+and one escrow entry.** Getting there found a real bug: Drizzle wraps a driver
+error, so the serialization failure (40001) never matched a top-level `code`
+check and surfaced as a 500. A race that reads as a crash is a race the student
+experiences as a broken site.
+
+### Commission, as you specified it
+
+20% on a student's first paid booking with a tutor, 15% on every one after,
+decided by whether a paid session between them has actually happened
+(`completed_at is not null`). Snapshotted at creation.
+
+You then asked whether `tutor_profiles.commission_bps` was dead. It was — read
+only for display. It is now a **floor**: the effective rate is the lower of the
+negotiated rate and the retention rate, so a tutor recruited on 12% pays 12%
+either way, and the column's default of 2000 means the floor never binds for
+anybody who negotiated nothing. The tutor's own rates card and the admin
+verification screen now say what will actually be charged rather than quoting a
+number nothing used.
+
+### Slot holds, rescheduling, disputes
+
+A short balance holds the slot for ten minutes and sends the student to top up.
+Expiry is read-time — `expires_at > now()` — so no sweeper can leave the
+calendar lying about a slot.
+
+Rescheduling: once, more than twelve hours out, six hours to answer, expiring on
+the next read. The original booking stands until the other side agrees.
+
+Disputes needed no change to the settlement job at all: `disputed` is not a
+status `findBookingsAwaitingSettlement` looks for, so reporting a problem stops
+the money by construction. `pnpm settle --dry-run` was added so "is this booking
+due?" can be asked without settling every other booking that also is.
+
+### The connection-failure policy you chose
+
+The platform absorbs it: student refunded in full, tutor paid their full share
+out of platform revenue, capped at two per student per 90 days. This is the one
+outcome that does not reduce to a refund percentage — chargeable is zero and the
+tutor is still paid — so it is the single branch in `resolveBookingOutcome` that
+builds its own entries, and the ledger row is named `technical_failure_absorbed`
+so a negative revenue line is never a mystery.
+
+The Phase 4 test that asserted the tutor got nothing for a failed call now
+asserts they are paid and that platform revenue goes negative by the same
+amount. That is the policy changing, not a regression.
+
+### A bug the change surfaced
+
+Settlement threw `completed -> no_show_tutor` on a booking whose events did not
+support the `completed` stamp it already carried. `classifyOutcome` now trusts
+`completed_at`: it is only ever written by that same classifier agreeing at the
+time, so a later reading that disagrees means the events are incomplete, not
+that the lesson stopped having happened. Without it, a lost webhook could cost a
+tutor a session's pay and a strike.
+
+### Two things fixed on the way
+
+- A session in progress fell out of "upcoming" the moment it started and
+  appeared under "recent" — so the join link vanished exactly when it was needed
+  and the product offered to file a dispute about a lesson still running.
+- The dashboard only computed movable slots for the first three sessions, so a
+  fourth could not be rescheduled for no reason a user could see. It is now one
+  engine call per distinct tutor-and-duration, and every session on the page can
+  be moved.
+
+### Region measurement: instrument built, reading not taken
+
+`pnpm measure:regions` times TCP and TLS handshakes to each candidate region,
+Dubai first. **It cannot produce a valid reading from this sandbox**: outbound
+traffic goes through a local egress proxy, so every region measures ~4ms and the
+ranking is about the proxy. Run it from Karachi, from the Gulf, and from a
+phone on mobile data — the numbers that decide this are the ones a student's
+connection produces, not a data centre's. DECISIONS_NEEDED.md item 20 now says
+so explicitly.
+
+### Retention: decided
+
+Raw LiveKit webhook bodies are dropped after 90 days and the events kept —
+`pnpm`-less, on a daily cron at `/api/cron/retention`. Deliberately an `update`,
+not a `delete`: losing the event would lose the attendance it proves, and with
+it the ability to explain a payment years later.
+
+### The gate
+
+Typecheck clean, **509 unit tests**, build clean, **59 e2e tests**, ledger
+reconciled to zero drift, migrations replay from an empty database. Lighthouse
+on the new surfaces: credits **99 / 100**, dashboard **99 / 100**, tutor profile
+**99 / 100**, feed **97 / 100**. The 360px suite now covers the credits page and
+the checkout.
 
 ---
 
@@ -138,13 +262,12 @@ the test now asserts what SPEC.md §4 actually promises: the exploration slot.
 It checks the **New tutors** rail, and that the tutor is genuinely in
 `tutor_ranking` rather than only in a rail.
 
-### Still owed
+### Still owed at the time
 
-Phase 3 checkpoint B. There is no `PaymentProvider`, no credit purchase, and no
-paid booking creation — so the conversion screen's call to action opens the
-tutor's calendar instead of taking payment, and says so rather than pretending.
-Trials proved out the booking-creation path (availability check, partial unique
-index, state machine); what is missing is the money half.
+Phase 3 checkpoint B — no `PaymentProvider`, no credit purchase, no paid
+booking creation. Built since; see the checkpoint B entry above. The trial
+conversion screen's call to action now leads to a calendar that can actually
+take the booking.
 
 ---
 
