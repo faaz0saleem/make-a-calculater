@@ -20,7 +20,7 @@ export default async function SignUpPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Create an account</CardTitle>
+          <CardTitle as="h1">Create an account</CardTitle>
           <CardDescription>
             Learners buy credits and book sessions. Tutors set their own rates and go through verification
             before they appear in the feed.

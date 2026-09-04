@@ -7,13 +7,22 @@
 
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 
+import { JoinLink } from '@/components/sessions/join-link';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardMetric,
+  CardTitle,
+} from '@/components/ui/card';
 import { db } from '@/db/client';
 import { bookings, studentWallets, users } from '@/db/schema';
 import { requireUser } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
+import { cancellationConsequence } from '@/lib/sessions/cancellation';
 import { formatInTimeZone } from '@/lib/time';
 
 export const dynamic = 'force-dynamic';
@@ -21,6 +30,7 @@ export const metadata = { title: 'Your dashboard' };
 
 export default async function DashboardPage() {
   const user = await requireUser();
+  const now = new Date();
 
   const [wallet] = await db
     .select({
@@ -48,7 +58,7 @@ export default async function DashboardPage() {
     .where(
       and(
         eq(bookings.studentId, user.id),
-        gte(bookings.startAtUtc, new Date()),
+        gte(bookings.startAtUtc, now),
         inArray(bookings.status, ['pending_tutor', 'confirmed', 'in_progress']),
       ),
     )
@@ -74,7 +84,7 @@ export default async function DashboardPage() {
     <>
       <SiteHeader />
 
-      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-10">
+      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 sm:px-6 py-10">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Hello, {user.name}</h1>
           <p className="text-sm text-muted-foreground">
@@ -86,7 +96,7 @@ export default async function DashboardPage() {
           <Card>
             <CardHeader>
               <CardDescription>Credit balance</CardDescription>
-              <CardTitle className="text-3xl">{formatCents(wallet?.creditsCents ?? 0)}</CardTitle>
+              <CardMetric className="text-3xl">{formatCents(wallet?.creditsCents ?? 0)}</CardMetric>
             </CardHeader>
             <CardContent className="text-sm text-muted-foreground">
               Credits never expire. Refunds come back as credits, not cash.
@@ -96,9 +106,9 @@ export default async function DashboardPage() {
           <Card>
             <CardHeader>
               <CardDescription>Bought all time</CardDescription>
-              <CardTitle className="text-3xl">
+              <CardMetric className="text-3xl">
                 {formatCents(wallet?.lifetimePurchasedCents ?? 0)}
-              </CardTitle>
+              </CardMetric>
             </CardHeader>
             <CardContent className="text-sm text-muted-foreground">
               Top-ups run through the mock payment provider until a real one is wired up.
@@ -117,18 +127,24 @@ export default async function DashboardPage() {
             ) : (
               <ul className="flex flex-col divide-y divide-border">
                 {upcoming.map((booking) => (
-                  <li key={booking.id} className="flex items-center justify-between gap-4 py-3 text-sm">
-                    <div>
-                      <p className="font-medium">{booking.name}</p>
-                      <p className="text-muted-foreground">
-                        {formatInTimeZone(booking.startAtUtc, user.timezone)} · {booking.durationMinutes} min
-                      </p>
+                  <li key={booking.id} className="flex flex-col gap-2 py-3 text-sm">
+                    <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+                      <div className="min-w-0">
+                        <p className="font-medium">{booking.name}</p>
+                        <p className="text-muted-foreground">
+                          {formatInTimeZone(booking.startAtUtc, user.timezone)} · {booking.durationMinutes} min
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {booking.isTrial ? <Badge variant="success">Free trial</Badge> : null}
+                        <Badge variant="secondary">{booking.status}</Badge>
+                        <span className="tabular-nums">{formatCents(booking.priceCents)}</span>
+                        <JoinLink booking={booking} timezone={user.timezone} now={now} />
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      {booking.isTrial ? <Badge variant="success">Free trial</Badge> : null}
-                      <Badge variant="secondary">{booking.status}</Badge>
-                      <span className="tabular-nums">{formatCents(booking.priceCents)}</span>
-                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {cancellationConsequence(booking, now)}
+                    </p>
                   </li>
                 ))}
               </ul>
@@ -146,8 +162,8 @@ export default async function DashboardPage() {
             ) : (
               <ul className="flex flex-col divide-y divide-border">
                 {past.map((booking) => (
-                  <li key={booking.id} className="flex items-center justify-between gap-4 py-3 text-sm">
-                    <div>
+                  <li key={booking.id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 text-sm">
+                    <div className="min-w-0">
                       <p className="font-medium">{booking.name}</p>
                       <p className="text-muted-foreground">
                         {formatInTimeZone(booking.startAtUtc, user.timezone)} · {booking.durationMinutes} min

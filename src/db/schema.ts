@@ -491,10 +491,19 @@ export const sessionEvents = pgTable(
     userId: uuid().references(() => users.id, { onDelete: 'set null' }),
     event: sessionEventEnum().notNull(),
     atUtc: timestamp({ withTimezone: true }).notNull(),
+    /**
+     * LiveKit's own event id. Webhooks are delivered more than once, and a
+     * redelivered join that counted twice would inflate attendance and so the
+     * tutor's pay.
+     */
+    externalId: varchar({ length: 200 }).notNull(),
     /** The raw LiveKit webhook body, kept verbatim for disputes. */
     raw: jsonb().notNull().default(sql`'{}'::jsonb`),
   },
-  (table) => [index('session_events_booking_idx').on(table.bookingId, table.atUtc)],
+  (table) => [
+    uniqueIndex('session_events_external_id').on(table.externalId),
+    index('session_events_booking_idx').on(table.bookingId, table.atUtc),
+  ],
 );
 
 // ---------------------------------------------------------------------------

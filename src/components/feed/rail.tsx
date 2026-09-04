@@ -35,7 +35,7 @@ export function Rail({
           {pending}
         </p>
       ) : (
-        <div className="-mx-6 overflow-x-auto px-6 pb-2">
+        <div data-scroll-x className="-mx-4 overflow-x-auto px-4 pb-2 sm:-mx-6 sm:px-6">
           <div className="flex gap-4">
             {tutors!.map((tutor) => (
               <TutorCard key={tutor.id} tutor={tutor} className="w-64 shrink-0" />

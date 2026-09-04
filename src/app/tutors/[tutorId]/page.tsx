@@ -92,7 +92,7 @@ export default async function TutorProfilePage({
       <SiteHeader />
       <TimezoneProbe current={cookieTimezone ?? null} />
 
-      <main className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-10">
+      <main className="mx-auto flex max-w-4xl flex-col gap-6 px-4 sm:px-6 py-10">
         {isPreview ? (
           <p className="rounded-md bg-secondary px-3 py-2 text-sm">
             Preview — this profile is <strong>{tutor.status}</strong>, so nobody else can see it and it

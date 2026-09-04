@@ -230,3 +230,81 @@ The `start_time_utc` / `end_time_utc` columns `SPEC.md` §12 asks for are still
 written and still useful for coarse SQL filtering, but nothing reads them to
 decide availability. If that stays true they could be dropped; leaving them
 costs a little write amplification and keeps the spec's shape.
+
+## 18. A session both people showed up for, that the connection ruined
+
+**Blocks:** nothing. **Default in place:** full refund to the student, nothing
+to the tutor, no strike (`technical_failure` in `src/lib/money/outcomes.ts`).
+
+`SPEC.md` §2 names the outcome but not who carries it. Today the student is made
+whole and the tutor is paid nothing — they gave up the hour and earned zero.
+
+On a market whose students are on mobile networks that drop, this will not be
+rare. Three ways to go:
+
+- **As now.** Simple, and the student never pays for a lesson they did not get.
+  The cost lands entirely on tutors, who cannot control the student's link.
+- **Split it** — refund the student in full, pay the tutor their share out of
+  platform revenue. Costs us real money on every bad connection, and someone
+  will notice that.
+- **Pro-rate** on the overlap that did happen: twenty minutes of a sixty-minute
+  lesson pays a third. Fairest on paper, most arguable in practice, and it makes
+  a partial refund the common case rather than the exception.
+
+My recommendation is the first until there is data, then revisit with the actual
+rate in front of us. `resolveBookingOutcome` is the only place it would change.
+
+## 19. Nobody can raise a dispute yet
+
+**Blocks:** nothing today; blocks trusting the 24-hour window. **Default in
+place:** the `disputed` status exists and settlement walks through it, but no
+screen creates one.
+
+Escrow is held for twenty-four hours "in case anything went wrong" — and for
+those twenty-four hours there is no way for anyone to say that something did.
+Settlement then releases the money automatically. Before real money runs through
+this, decide:
+
+- who may open a dispute — the student only, or the tutor too
+- whether opening one **pauses** settlement (it should, and that is a one-line
+  addition to `findBookingsAwaitingSettlement`) or merely flags it after the fact
+- who resolves it, and against what evidence: `session_events` shows exactly who
+  was in the room and when, which settles most of these without argument
+- how long the window really is. Twenty-four hours is what the spec says; a
+  student in a different timezone may sleep through most of it.
+
+## 20. Where LiveKit runs
+
+**Blocks:** launch. **Default in place:** `LIVEKIT_URL` points at whatever you
+give it; development runs a server locally.
+
+The media path is the product here. Two choices, and they are not equivalent for
+this market:
+
+- **LiveKit Cloud.** No servers to run, but the nearest regions to Karachi and
+  the Gulf are Mumbai, Dubai and Frankfurt. A Karachi tutor and a Karachi student
+  would have their audio routed through another country and back. Billed per
+  participant-minute, so cost scales with lessons taught, which at least matches
+  revenue.
+- **Self-hosted**, on a VPS in Karachi, Dubai or Singapore. One box runs a lot of
+  one-to-one audio. Cheaper at volume, and the round trip is domestic. It is a
+  server somebody has to keep alive during lessons, and it needs a TURN server
+  for students behind restrictive networks.
+
+Nothing in the codebase prefers either — the only coupling is three environment
+variables and a webhook URL. But TURN, and whether a fallback region exists when
+one is down, are worth settling before a launch date rather than after.
+
+## 21. How long we keep the raw webhook payloads
+
+**Blocks:** nothing. **Default in place:** forever
+(`session_events.raw`, a `jsonb` column).
+
+Every LiveKit webhook is stored whole, which is what lets a dispute be answered
+from evidence rather than memory. It also means participant identities, IP-level
+metadata and connection details accumulate indefinitely.
+
+A sensible shape would be: keep the derived join/leave rows for as long as the
+booking's financial record, and drop `raw` after the dispute window plus a
+margin — ninety days, say. Say what your retention policy should be and it is a
+one-line job.

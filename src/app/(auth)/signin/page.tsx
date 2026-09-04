@@ -28,7 +28,7 @@ export default async function SignInPage({
 
       <Card>
         <CardHeader>
-          <CardTitle>Sign in</CardTitle>
+          <CardTitle as="h1">Sign in</CardTitle>
           <CardDescription>Use your email and password, or continue with Google.</CardDescription>
         </CardHeader>
 

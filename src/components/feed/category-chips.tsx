@@ -19,7 +19,11 @@ export function CategoryChips({
   buildHref: (slug: string | undefined) => string;
 }) {
   return (
-    <nav aria-label="Subjects" className="-mx-6 overflow-x-auto px-6">
+    <nav
+      aria-label="Subjects"
+      data-scroll-x
+      className="-mx-4 overflow-x-auto px-4 sm:-mx-6 sm:px-6"
+    >
       <ul className="flex gap-2 pb-1">
         <li>
           <Link

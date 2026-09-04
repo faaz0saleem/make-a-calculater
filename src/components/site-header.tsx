@@ -11,17 +11,19 @@ export async function SiteHeader() {
 
   return (
     <header className="border-b border-border">
-      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4 sm:gap-4 sm:px-6">
         <Link href="/" className="text-lg font-semibold tracking-tight">
           Tutorly
         </Link>
 
-        <nav className="flex items-center gap-3 text-sm">
+        <nav className="flex items-center gap-2 text-sm sm:gap-3">
           {session?.user ? (
             <>
+              {/* Email and roles are context, not navigation: on a 360px phone
+                  the buttons win the space. */}
               <span className="hidden text-muted-foreground sm:inline">{session.user.email}</span>
               {roles.map((role) => (
-                <Badge key={role} variant="secondary">
+                <Badge key={role} variant="secondary" className="hidden sm:inline-flex">
                   {role}
                 </Badge>
               ))}

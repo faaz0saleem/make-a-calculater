@@ -12,7 +12,14 @@ import Link from 'next/link';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardMetric,
+  CardTitle,
+} from '@/components/ui/card';
 import { db } from '@/db/client';
 import { payouts, tutorProfiles, users } from '@/db/schema';
 import { requireRole } from '@/lib/auth/guards';
@@ -132,7 +139,7 @@ export default async function AdminPage() {
             <Card key={metric.label}>
               <CardHeader>
                 <CardDescription>{metric.label}</CardDescription>
-                <CardTitle className="text-2xl tabular-nums">{metric.value}</CardTitle>
+                <CardMetric>{metric.value}</CardMetric>
                 {metric.note ? (
                   <p className="text-xs text-muted-foreground">{metric.note}</p>
                 ) : null}

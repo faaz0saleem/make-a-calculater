@@ -190,7 +190,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
       <SiteHeader />
       <TimezoneProbe current={cookieTimezone ?? null} />
 
-      <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-8">
+      <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 sm:px-6 py-8">
         <section>
           <h1 className="text-3xl font-semibold tracking-tight">Find a tutor worth your hour</h1>
           <p className="mt-2 max-w-2xl text-muted-foreground">
@@ -252,7 +252,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           {grid.length === 0 ? (
             <Card>
               <CardHeader>
-                <CardTitle>No matches</CardTitle>
+                <CardTitle as="h3">No matches</CardTitle>
                 <CardDescription>
                   Nothing matched those filters.{' '}
                   <Link href="/" className="underline underline-offset-4">
@@ -280,7 +280,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
       </main>
 
       <footer className="border-t border-border">
-        <div className="mx-auto max-w-6xl px-6 py-6 text-sm text-muted-foreground">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-6 text-sm text-muted-foreground">
           Credits never expire and are non-refundable to cash — refunds are returned as credits.{' '}
           <Link href="/signup" className="underline underline-offset-4">
             Create an account

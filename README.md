@@ -28,7 +28,7 @@ genuinely blocked on a human.
 | ORM | Drizzle + drizzle-kit migrations |
 | Auth | Auth.js v5 — email/password and Google |
 | UI | Tailwind v4 + shadcn/ui tokens |
-| Live video | LiveKit Cloud *(phase 4)* |
+| Live video | LiveKit — a server you run, or LiveKit Cloud |
 | Intro video transcode | ffmpeg locally; Mux or Cloudflare Stream in production *(undecided — see DECISIONS_NEEDED.md)* |
 | Storage | Cloudflare R2 — private bucket for credentials, local filesystem in dev |
 | Email | Resend *(phase 7)* |
@@ -78,6 +78,11 @@ Every seeded account uses the password `tutorly-dev-2026`.
 Five more tutors sit in the admin verification queue with documents attached, so
 `/admin/verification` has something real to review.
 
+`student@tutorly.test` and `tutor@tutorly.test` also share two sessions you can
+work with straight away: **one running right now**, so the classroom opens
+without waiting for a booking to come round, and **one that finished 26 hours
+ago and has not settled**, so `pnpm settle` has something to do.
+
 The seed also plants the payout boundary cases from `SPEC.md` §16:
 `payout.pending@tutorly.test` has a $100.00 request waiting for an admin,
 `payout.ready@tutorly.test` sits at exactly $100.00 and may request, and
@@ -101,6 +106,7 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm seed` | Truncate and rebuild the development world |
 | `pnpm reconcile` | The nightly ledger check — exits non-zero on drift |
 | `pnpm rank` | The nightly ranking job — recomputes `tutor_ranking` |
+| `pnpm settle` | Release escrow on sessions past their dispute window. `--at <iso>` runs it as if it were then |
 
 ---
 
@@ -114,10 +120,13 @@ There are no recorded lessons, no course content, and no library. If a change
 starts pulling in that direction it is the wrong change — the product is a
 marketplace for someone's time, not a catalogue of videos.
 
-The pipeline turns one upload into three things: an HLS ladder for the profile
-hero, a short muted MP4 for the card that autoplays in the feed, and three
-thumbnail candidates the tutor picks from. `pnpm seed` runs real clips through
-it, so the development feed has real media in it.
+The pipeline turns one upload into two fixed MP4 renditions — a small muted one
+for the card that autoplays in the feed, a larger one for the profile hero — plus
+three thumbnail candidates the tutor picks from. Two files rather than an HLS
+ladder is a cost decision: hosted transcoders bill per minute *delivered*, and a
+feed that autoplays on hover delivers minutes in proportion to browsing rather
+than to bookings. R2 charges nothing for egress. `pnpm seed` runs real clips
+through the pipeline, so the development feed has real media in it.
 
 Uploads go **straight to the bucket**, not through the app. A Server Action
 caps its body at 1 MB and a Vercel function at 4.5 MB, so a video posted to us
@@ -131,12 +140,80 @@ computes a ranking while a page is being rendered — that is the rule the job
 exists to keep. The score is the weighted sum from `SPEC.md` §4, in basis points,
 in `src/lib/ranking/score.ts`.
 
-Availability does not exist until Phase 3, and discovery does not pretend
-otherwise. "Available today", "Next free: …" and the "Available in the next
-hour" rail all go through `src/lib/availability/`, whose only implementation
-today answers **unknown** — so the badge is absent rather than wrong, and the
-rail says what it is waiting for. A wrong "Next free: Today 6:30 PM" costs more
-trust than a missing one.
+"Available today", "Next free: …" and the "Available in the next hour" rail all
+go through `src/lib/availability/`, which since Phase 3 reads the tutor's real
+calendar. The port still answers three ways rather than two: `unknown` now means
+*this tutor has published no hours at all*, which is genuinely different from
+*their week is full*. The first deserves silence on a card, the second an honest
+"nothing free" — a wrong "Next free: Today 6:30 PM" costs more trust than a
+missing one.
+
+## How a lesson runs
+
+The classroom is `/sessions/[bookingId]`. The room opens five minutes before the
+scheduled start and stays open ten minutes past the end; billing never follows
+it past the booked end. A non-participant asking for someone else's session gets
+a **404**, not a 403, so the URL cannot be used to find out that a session
+exists.
+
+**The client never reports attendance.** Everything the money depends on — who
+was in the room and for how long — comes from LiveKit's webhooks landing on
+`/api/livekit/webhook`, which verifies the signature before writing anything and
+stores LiveKit's own event id under a unique index, so a redelivery cannot
+inflate what a tutor is paid. Twenty-four hours after the scheduled end,
+`pnpm settle` (hourly on Vercel Cron) folds those events into an attendance
+summary, hands it to the same `resolveBookingOutcome` the rest of the system
+uses, and appends the ledger entries. There is no second copy of the money rules.
+
+### Built for the connection people actually have
+
+The market is on Pakistani and Gulf mobile networks, so the failure modes are
+300ms round trips, packet loss and a handover from wifi to cellular mid-lesson.
+That shapes four things:
+
+- **A pre-call check**, before the credits are at stake. It times a real download
+  from our own origin — with a three-second budget, so a slow line is not
+  punished with a long wait — and says plainly when a connection is too weak,
+  along with the fact that nobody has been charged.
+- **The session clock counts from the scheduled start**, corrected for device
+  clock skew. There is no local timer to restart, so a reconnect cannot reset it.
+- **A drop shows an explicit "Reconnecting…" panel**, never a frozen last frame:
+  someone talking to a still picture is worse than someone told to wait. If
+  LiveKit gives up entirely, the screen says so and offers the room back rather
+  than claiming the lesson ended.
+- **Poor quality turns the camera off automatically** and says why. A lesson
+  survives losing video; it does not survive losing audio.
+
+`e2e/session.spec.ts` drives two real browsers into a real room over a throttled
+connection, takes one of them offline mid-call, and checks it comes back with the
+clock intact — then settles the booking a simulated day later and asserts the
+ledger to the cent.
+
+### Running LiveKit locally
+
+Point the app at any LiveKit server:
+
+```
+LIVEKIT_URL="ws://localhost:7880"
+LIVEKIT_API_KEY="devkey"
+LIVEKIT_API_SECRET="…at least 32 characters…"
+```
+
+The server needs the webhook pointed back at the app, or attendance never
+arrives and every session settles as a no-show:
+
+```yaml
+webhook:
+  api_key: devkey
+  urls: [http://localhost:3000/api/livekit/webhook]
+```
+
+Use a recent server (1.12 or later). An old one and a current `livekit-client`
+negotiate, then time out and reconnect in a loop — the call looks like it works
+and quietly falls apart a few seconds in.
+
+Without these variables the classroom refuses to start and says so, rather than
+dropping a student into a room that will never connect.
 
 ## How files work
 
@@ -230,7 +307,9 @@ src/
     admin/verification/ the review queue and the approve / reject screen
     api/files/          private objects, behind a 60-second signature
     api/uploads/        signed direct uploads (development stand-in for R2)
-    api/cron/           the nightly ranking and reconciliation jobs
+    api/cron/           ranking, reconciliation and settlement, on a schedule
+    api/livekit/        the webhook attendance is measured from
+    sessions/           the classroom
   auth.ts               Auth.js: credentials + Google, Node runtime
   auth.config.ts        the edge-safe half, used by middleware
   components/           UI primitives and the wizard's step forms
@@ -247,12 +326,14 @@ src/
     admin/audit.ts      the admin_audit writer
     auth/               password policy, roles, server-side guards
     bookings/status.ts  the booking state machine
-    availability/       the port discovery reads; stubbed until Phase 3
+    availability/       the scheduling engine, and the port discovery reads
+    livekit/            room names and access tokens
+    sessions/           the session window, attendance, connection grading
     money/              cents, pricing, outcomes, ledger drafts, packs, payouts
     ranking/            the §4 score, pure and tested
     storage/            object stores, keys, signed URLs, direct uploads
     tutors/             profile status machine, wizard model, visibility, badges
-    video/              intro-video pipeline: probe, HLS, preview, thumbnails
+    video/              intro-video pipeline: probe, renditions, thumbnails
     crypto.ts           AES-256-GCM for payout details
     time.ts             IANA timezone conversion
     rate-limit.ts

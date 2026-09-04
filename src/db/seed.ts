@@ -921,6 +921,7 @@ type HistoryCounts = {
   upcoming: number;
   trials: number;
   reviews: number;
+  awaitingSettlement: number;
 };
 
 /**
@@ -959,7 +960,15 @@ async function seedHistory(
   rulesByTutor: Map<string, WeeklyRule[]>,
   exceptionsByTutor: Map<string, EngineException[]>,
 ): Promise<HistoryCounts> {
-  const counts: HistoryCounts = { settled: 0, cancelled: 0, noShow: 0, upcoming: 0, trials: 0, reviews: 0 };
+  const counts: HistoryCounts = {
+    settled: 0,
+    cancelled: 0,
+    noShow: 0,
+    upcoming: 0,
+    trials: 0,
+    reviews: 0,
+    awaitingSettlement: 0,
+  };
   const trialPairs = new Set<string>();
   const takenSlots = new Set<string>();
 
@@ -1206,6 +1215,91 @@ async function seedHistory(
         });
         counts.trials += 1;
       }
+    }
+  }
+
+  // A session that is live right now, between the two named demo accounts.
+  //
+  // Without this, opening the classroom means waiting for a booking to come
+  // round, and the end-to-end call test has nothing to join. It starts a few
+  // minutes ago so the room is open and the clock is already running.
+  const liveStudent = students.find((candidate) => candidate.email === 'student@tutorly.test');
+  const liveTutor = tutors.find((candidate) => candidate.email === 'tutor@tutorly.test');
+
+  if (liveStudent && liveTutor) {
+    const startAt = new Date(Math.floor((NOW.getTime() - 3 * 60_000) / 60_000) * 60_000);
+
+    if (reserve(liveTutor.id, startAt)) {
+      const bookingId = randomUUID();
+      const { priceCents } = priceForBooking({
+        rates: {
+          hourlyCents: liveTutor.hourlyCents,
+          halfHourCents: liveTutor.halfHourCents,
+          promoCents: null,
+          promoStartsAt: null,
+          promoEndsAt: null,
+        },
+        durationMinutes: 60,
+        isTrial: false,
+        now: NOW,
+      });
+
+      await ensureCredits(wallets, liveStudent.id, priceCents);
+
+      await db.insert(bookings).values({
+        id: bookingId,
+        studentId: liveStudent.id,
+        tutorId: liveTutor.id,
+        subjectId: subjectIds.get(liveTutor.subjectSlugs[0]!)!,
+        isTrial: false,
+        startAtUtc: startAt,
+        durationMinutes: 60,
+        status: 'confirmed',
+        priceCents,
+        commissionBps: liveTutor.commissionBps,
+        studentTz: liveStudent.timezone,
+        tutorTz: liveTutor.timezone,
+        livekitRoom: `booking_${bookingId}`,
+      });
+
+      await appendLedger(db, bookingEscrowEntries({ bookingId, studentId: liveStudent.id, priceCents }));
+      wallets.set(liveStudent.id, (wallets.get(liveStudent.id) ?? 0) - priceCents);
+      counts.upcoming += 1;
+    }
+  }
+
+  // A session that finished more than a day ago and has not settled yet, so
+  // `pnpm settle` has something to do and the settlement test has a booking
+  // whose dispute window has closed. It carries no session events: what
+  // happened in the room is decided by the webhooks, not by the seed.
+  if (liveStudent && liveTutor) {
+    const startAt = new Date(NOW.getTime() - 26 * 60 * 60_000);
+
+    if (reserve(liveTutor.id, startAt)) {
+      const bookingId = randomUUID();
+      const priceCents = liveTutor.hourlyCents;
+
+      await ensureCredits(wallets, liveStudent.id, priceCents);
+
+      await db.insert(bookings).values({
+        id: bookingId,
+        studentId: liveStudent.id,
+        tutorId: liveTutor.id,
+        subjectId: subjectIds.get(liveTutor.subjectSlugs[0]!)!,
+        isTrial: false,
+        startAtUtc: startAt,
+        durationMinutes: 60,
+        status: 'confirmed',
+        priceCents,
+        commissionBps: liveTutor.commissionBps,
+        studentTz: liveStudent.timezone,
+        tutorTz: liveTutor.timezone,
+        livekitRoom: `booking_${bookingId}`,
+      });
+
+      await appendLedger(db, bookingEscrowEntries({ bookingId, studentId: liveStudent.id, priceCents }));
+      wallets.set(liveStudent.id, (wallets.get(liveStudent.id) ?? 0) - priceCents);
+      counts.awaitingSettlement += 1;
     }
   }
 
@@ -1483,6 +1577,7 @@ async function main() {
   console.log(`  no-shows                 ${counts.noShow}`);
   console.log(`  upcoming (confirmed)     ${counts.upcoming}`);
   console.log(`  trial requests pending   ${counts.trials}`);
+  console.log(`  awaiting settlement      ${counts.awaitingSettlement}`);
   console.log(`  reviews                  ${totals.reviews}`);
   console.log('');
   console.log('Money');

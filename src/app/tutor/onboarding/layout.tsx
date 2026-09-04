@@ -58,7 +58,7 @@ export default async function OnboardingLayout({ children }: { children: React.R
                   className={cn(
                     'flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-medium',
                     step.state === 'complete'
-                      ? 'bg-[var(--success)] text-white'
+                      ? 'bg-[var(--success)] text-[var(--success-foreground)]'
                       : 'border border-border text-muted-foreground',
                   )}
                   aria-hidden

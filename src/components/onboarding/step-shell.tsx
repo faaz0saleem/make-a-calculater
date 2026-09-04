@@ -30,7 +30,7 @@ export function StepShell({
         <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           Step {step.number} of 10
         </p>
-        <CardTitle className="text-xl">{step.title}</CardTitle>
+        <CardTitle as="h1" className="text-xl">{step.title}</CardTitle>
         <CardDescription>{step.blurb}</CardDescription>
       </CardHeader>
 

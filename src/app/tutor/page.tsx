@@ -8,10 +8,18 @@ import { and, desc, eq, gte, inArray } from 'drizzle-orm';
 import Link from 'next/link';
 
 import { withdrawProfile } from '@/app/tutor/onboarding/actions';
+import { JoinLink } from '@/components/sessions/join-link';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardMetric,
+  CardTitle,
+} from '@/components/ui/card';
 import { db } from '@/db/client';
 import { bookings, payouts, tutorProfiles, users } from '@/db/schema';
 import { loadWizardSnapshot } from '@/db/tutors';
@@ -34,6 +42,7 @@ const STATUS_COPY: Record<string, string> = {
 
 export default async function TutorPage() {
   const user = await requireRole('tutor');
+  const now = new Date();
 
   const [profile] = await db
     .select()
@@ -45,7 +54,7 @@ export default async function TutorPage() {
     return (
       <>
         <SiteHeader />
-        <main className="mx-auto max-w-3xl px-6 py-10">
+        <main className="mx-auto max-w-3xl px-4 sm:px-6 py-10">
           <Card>
             <CardHeader>
               <CardTitle>No tutor profile yet</CardTitle>
@@ -77,7 +86,7 @@ export default async function TutorPage() {
     .where(
       and(
         eq(bookings.tutorId, user.id),
-        gte(bookings.startAtUtc, new Date()),
+        gte(bookings.startAtUtc, now),
         inArray(bookings.status, ['pending_tutor', 'confirmed', 'in_progress']),
       ),
     )
@@ -97,7 +106,7 @@ export default async function TutorPage() {
     <>
       <SiteHeader />
 
-      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-10">
+      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 sm:px-6 py-10">
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">Teaching</h1>
           <Badge variant={profile.status === 'verified' ? 'success' : 'secondary'}>{profile.status}</Badge>
@@ -170,25 +179,25 @@ export default async function TutorPage() {
           <Card>
             <CardHeader>
               <CardDescription>Available</CardDescription>
-              <CardTitle className="text-2xl">{formatCents(profile.availableCents)}</CardTitle>
+              <CardMetric>{formatCents(profile.availableCents)}</CardMetric>
             </CardHeader>
           </Card>
           <Card>
             <CardHeader>
               <CardDescription>Pending</CardDescription>
-              <CardTitle className="text-2xl">{formatCents(profile.pendingCents)}</CardTitle>
+              <CardMetric>{formatCents(profile.pendingCents)}</CardMetric>
             </CardHeader>
           </Card>
           <Card>
             <CardHeader>
               <CardDescription>Locked for payout</CardDescription>
-              <CardTitle className="text-2xl">{formatCents(profile.payoutLockedCents)}</CardTitle>
+              <CardMetric>{formatCents(profile.payoutLockedCents)}</CardMetric>
             </CardHeader>
           </Card>
           <Card>
             <CardHeader>
               <CardDescription>Earned all time</CardDescription>
-              <CardTitle className="text-2xl">{formatCents(profile.lifetimeEarnedCents)}</CardTitle>
+              <CardMetric>{formatCents(profile.lifetimeEarnedCents)}</CardMetric>
             </CardHeader>
           </Card>
         </div>
@@ -258,18 +267,24 @@ export default async function TutorPage() {
               ) : (
                 <ul className="flex flex-col divide-y divide-border text-sm">
                   {upcoming.map((booking) => (
-                    <li key={booking.id} className="flex items-center justify-between gap-3 py-2">
-                      <div>
+                    <li
+                      key={booking.id}
+                      className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 py-2"
+                    >
+                      <div className="min-w-0">
                         <p className="font-medium">{booking.studentName}</p>
                         <p className="text-muted-foreground">
                           {formatInTimeZone(booking.startAtUtc, user.timezone)} · {booking.durationMinutes} min
                         </p>
                       </div>
-                      {booking.isTrial ? (
-                        <Badge variant="success">Trial</Badge>
-                      ) : (
-                        <span className="tabular-nums">{formatCents(booking.priceCents)}</span>
-                      )}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {booking.isTrial ? (
+                          <Badge variant="success">Trial</Badge>
+                        ) : (
+                          <span className="tabular-nums">{formatCents(booking.priceCents)}</span>
+                        )}
+                        <JoinLink booking={booking} timezone={user.timezone} now={now} />
+                      </div>
                     </li>
                   ))}
                 </ul>
