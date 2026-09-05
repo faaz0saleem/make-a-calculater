@@ -14,6 +14,7 @@ import { sql } from 'drizzle-orm';
 import { recomputeAllResponseMedians } from './messages';
 import { getAvailability } from '@/lib/availability';
 import { computeRanking, type RankingInputs } from '@/lib/ranking/score';
+import { restrictedUserIds } from './reports';
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
 import { tutorRanking } from './schema';
@@ -125,6 +126,10 @@ export async function recomputeTutorRanking(
   const tutorIds = rows.map((row) => row.tutor_id);
   const signals = await availability.weeklySignals(tutorIds);
 
+  // Asked once for the whole run rather than per tutor. A restriction is rare,
+  // so this set is almost always empty and almost always free.
+  const restricted = await restrictedUserIds(database, now);
+
   const breakdowns = rows.map((row) => {
     const inputs: RankingInputs = {
       tutorId: row.tutor_id,
@@ -140,6 +145,7 @@ export async function recomputeTutorRanking(
       availabilityDensityBps: signals.known
         ? (signals.value.get(row.tutor_id)?.densityBps ?? null)
         : null,
+      restricted: restricted.has(row.tutor_id),
     };
     return {
       inputs,

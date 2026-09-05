@@ -283,6 +283,26 @@ describe('computeRanking', () => {
     expect(once).toEqual(twice);
   });
 
+  it('demotes a restricted tutor without removing them', () => {
+    const ordinary = computeRanking(inputs({ ratingSum: 24, reviewCount: 5 }), NOW);
+    const punished = computeRanking(
+      inputs({ ratingSum: 24, reviewCount: 5, restricted: true }),
+      NOW,
+    );
+
+    expect(punished.score).toBeLessThan(ordinary.score);
+    // Still in the feed. A delisted tutor keeps teaching the students they
+    // already have and stops being findable by anyone else, which helps nobody.
+    expect(punished.score).toBeGreaterThan(0);
+    expect(punished.restricted).toBe(true);
+  });
+
+  it('takes the new-tutor boost away from a restricted tutor', () => {
+    const fresh = { verifiedAt: new Date(NOW.getTime() - 86_400_000), settledCount: 0 };
+    expect(computeRanking(inputs(fresh), NOW).explorationBoost).toBeGreaterThan(0);
+    expect(computeRanking(inputs({ ...fresh, restricted: true }), NOW).explorationBoost).toBe(0);
+  });
+
   it('returns every term, so admin can see why a tutor ranks where they do', () => {
     const breakdown = computeRanking(inputs({ ratingSum: 20, reviewCount: 5 }), NOW);
     expect(Object.keys(breakdown).sort()).toEqual(
@@ -294,6 +314,7 @@ describe('computeRanking', () => {
         'explorationBoost',
         'recencyBps',
         'responseSpeedBps',
+        'restricted',
         'score',
         'trialToPaidBps',
         'tutorId',

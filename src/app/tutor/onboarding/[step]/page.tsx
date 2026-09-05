@@ -28,6 +28,7 @@ import {
   videos,
 } from '@/db/schema';
 import { curriculumContextFor, getTutorCurriculum, MAX_TUTOR_CURRICULUM } from '@/db/curriculum';
+import { payoutMethodFor } from '@/db/payouts';
 import { loadWizardSnapshot } from '@/db/tutors';
 import { TutorPositions } from '@/components/curriculum/tutor-positions';
 import { requireRole } from '@/lib/auth/guards';
@@ -264,20 +265,14 @@ export default async function WizardStepPage({
     }
 
     case 'payout': {
-      const [method] = await db
-        .select({
-          accountTitle: payoutMethods.accountTitle,
-          bankName: payoutMethods.bankName,
-          country: payoutMethods.country,
-          last4: payoutMethods.last4,
-        })
-        .from(payoutMethods)
-        .where(eq(payoutMethods.tutorId, user.id))
-        .limit(1);
+      // Through `payoutMethodFor`, which is the only shape that leaves the
+      // database — it carries `last4` and has no field an account number
+      // could hide in.
+      const method = await payoutMethodFor(user.id);
 
       return (
         <StepShell {...shell}>
-          <PayoutStep method={method ?? null} country={snapshot.country} />
+          <PayoutStep method={method} country={snapshot.country} />
         </StepShell>
       );
     }

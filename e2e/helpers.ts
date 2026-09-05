@@ -74,12 +74,52 @@ export async function createStudent(
       returning id
     `;
 
-    await sql`
-      insert into student_wallets (user_id, credits_cents)
-      values (${created!.id}, ${overrides.creditsCents ?? 0})
-    `;
+    await sql`insert into student_wallets (user_id, credits_cents) values (${created!.id}, 0)`;
+
+    if ((overrides.creditsCents ?? 0) > 0) {
+      await grantCredits(created!.id as string, overrides.creditsCents!);
+    }
 
     return created!.id as string;
+  });
+}
+
+/**
+ * Put credits in somebody's wallet, the only way credits are ever allowed to
+ * arrive: a paid purchase and a ledger entry, with the column following.
+ *
+ * Writing `student_wallets.credits_cents` directly is a one-line shortcut that
+ * costs the whole reconciliation job — `pnpm reconcile` would report drift
+ * after every e2e run, and a check that is expected to fail is a check nobody
+ * reads. It also widens the admin dashboard's float by inventing credits
+ * nobody paid for.
+ */
+export async function grantCredits(userId: string, cents: number): Promise<void> {
+  await queryDatabase(async (sql) => {
+    const [purchase] = await sql`
+      insert into credit_purchases
+        (user_id, pack_id, paid_cents, credits_cents, provider, provider_ref, status,
+         idempotency_key, settled_at)
+      values (
+        ${userId}, 'standard', ${cents}, ${cents}, 'mock',
+        ${`e2e_${randomUUID().slice(0, 8)}`}, 'paid',
+        ${`e2e:purchase:${randomUUID()}`}, now()
+      )
+      returning id
+    `;
+
+    await sql`
+      insert into ledger_entries (purchase_id, account, owner_id, delta_cents, reason, idempotency_key)
+      values (
+        ${purchase!.id}, 'student_credits', ${userId}, ${cents},
+        'credit_purchase', ${`purchase:${purchase!.id}:credit`}
+      )
+    `;
+
+    await sql`
+      update student_wallets set credits_cents = credits_cents + ${cents}
+      where user_id = ${userId}
+    `;
   });
 }
 

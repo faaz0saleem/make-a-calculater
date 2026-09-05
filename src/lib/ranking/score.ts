@@ -43,6 +43,15 @@ export const RECENCY_ZERO_DAYS = 90;
 
 /** Exploration boost for new tutors (SPEC.md §4). */
 export const EXPLORATION_MAX_BPS = 1_200;
+/**
+ * What a restriction costs in the feed.
+ *
+ * Fifteen percent of the score: enough that a restricted tutor drops below
+ * comparable ones, small enough that a genuinely excellent tutor is still
+ * findable by somebody looking for them. The number is a judgement, and it is
+ * one number in one place so it can be argued about.
+ */
+export const RESTRICTION_PENALTY_BPS = 1_500;
 export const EXPLORATION_DECAY_DAYS = 30;
 export const EXPLORATION_DECAY_SESSIONS = 20;
 
@@ -77,6 +86,15 @@ export type RankingInputs = {
   verifiedAt: Date | null;
   /** From the availability port; unknown until Phase 3. */
   availabilityDensityBps: number | null;
+  /**
+   * Under a live restriction (`lib/moderation/sanctions.ts`).
+   *
+   * They stay in the feed, stay searchable, and stay bookable — a restriction
+   * is a demotion, not a delisting. Delisting a tutor with regular students
+   * does not stop them teaching those students; it only stops new ones finding
+   * them here, which is a worse outcome for everybody including us.
+   */
+  restricted?: boolean;
 };
 
 export type RankingBreakdown = {
@@ -90,6 +108,7 @@ export type RankingBreakdown = {
   responseSpeedBps: number;
   recencyBps: number;
   explorationBoost: number;
+  restricted: boolean;
 };
 
 function clampBps(value: number): number {
@@ -185,7 +204,11 @@ export function computeRanking(inputs: RankingInputs, now: Date): RankingBreakdo
   const availability = inputs.availabilityDensityBps ?? AVAILABILITY_UNKNOWN_BPS;
   const response = responseSpeedBps(inputs.responseMedianSeconds);
   const recency = recencyBps(inputs.lastActiveAt, now);
-  const boost = explorationBoost(inputs.verifiedAt, inputs.settledCount, now);
+  // A restricted tutor loses the new-tutor boost outright: it exists to give
+  // somebody a chance, and this is the fortnight they are not being given one.
+  const boost = inputs.restricted
+    ? 0
+    : explorationBoost(inputs.verifiedAt, inputs.settledCount, now);
 
   const weighted =
     rating * WEIGHTS.bayesianRating +
@@ -195,10 +218,15 @@ export function computeRanking(inputs: RankingInputs, now: Date): RankingBreakdo
     response * WEIGHTS.responseSpeed +
     recency * WEIGHTS.recency;
 
+  const base = Math.round(weighted / 10_000) + boost;
+
   return {
     tutorId: inputs.tutorId,
-    // Weighted terms come back to 0-10000, then the boost is added on top.
-    score: Math.round(weighted / 10_000) + boost,
+    // Weighted terms come back to 0-10000, then the boost is added on top and
+    // a restriction, if there is one, is taken off the total.
+    score: inputs.restricted
+      ? Math.round((base * (10_000 - RESTRICTION_PENALTY_BPS)) / 10_000)
+      : base,
     bayesianRatingMilli: ratingMilli,
     bayesianRatingBps: rating,
     completionRateBps: completion,
@@ -207,5 +235,6 @@ export function computeRanking(inputs: RankingInputs, now: Date): RankingBreakdo
     responseSpeedBps: response,
     recencyBps: recency,
     explorationBoost: boost,
+    restricted: inputs.restricted === true,
   };
 }

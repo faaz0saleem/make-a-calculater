@@ -76,7 +76,10 @@ import {
 import { CREDIT_PACKS, type CreditPack } from '@/lib/money/packs';
 import { resolveBookingOutcome, type Attendance, type BookingForOutcome } from '@/lib/money/outcomes';
 import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
+import { scoreContactIntent, shouldQueueForReview } from '@/lib/messaging/contact-intent';
 import { maskContactInfo } from '@/lib/messaging/masking';
+import { methodsForCountry } from '@/lib/payments/catalogue';
+import { fileReport, recordContactFlag } from './reports';
 import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
 import {
   applyExceptions,
@@ -607,7 +610,7 @@ async function seedStudents(passwordHash: string, wallets: Wallets): Promise<See
   for (const [index, student] of students.entries()) {
     const packCount = index === 0 ? 3 : randInt(1, 2);
     for (let purchase = 0; purchase < packCount; purchase += 1) {
-      await recordPurchase(wallets, student.id, pick(CREDIT_PACKS));
+      await recordPurchase(wallets, student.id, packChoiceFor(student.id));
     }
   }
 
@@ -623,8 +626,57 @@ async function seedStudents(passwordHash: string, wallets: Wallets): Promise<See
  */
 type Wallets = Map<string, number>;
 
+/**
+ * Which rail a purchase went through.
+ *
+ * Chosen the way the checkout chooses: local methods lead for the student's
+ * country, and most people take the one on top. A seed where every purchase is
+ * a card would make the dashboard's provider split — and the margin-per-pack
+ * numbers that depend on the fee — a constant, and the whole point of the
+ * wallets is that a fixed 50c is what makes a $5 pack thin.
+ */
+/**
+ * How many packs each person has bought so far in this run.
+ *
+ * The $5 pack is `firstPurchaseOnly`, and the database enforces "once ever"
+ * with a partial unique index. "First" is stricter than "once", and only the
+ * seed can honour it — so it is honoured here rather than left to produce a
+ * world where a third of all purchases are the cheap pack.
+ */
+const purchasesMade = new Map<string, number>();
+
+function packsAvailableTo(userId: string): CreditPack[] {
+  const first = (purchasesMade.get(userId) ?? 0) === 0;
+  return CREDIT_PACKS.filter((pack) => first || !pack.firstPurchaseOnly);
+}
+
+/**
+ * What somebody actually reaches for.
+ *
+ * Most first purchases are the $5 pack — that is what it is for, and a seed
+ * where nobody took it would leave the thinnest-margin row off the admin
+ * dashboard, which is the one row worth arguing about.
+ */
+function packChoiceFor(userId: string): CreditPack {
+  const offered = packsAvailableTo(userId);
+  const taste = offered.find((pack) => pack.firstPurchaseOnly);
+  if (taste && chance(0.6)) return taste;
+  return pick(offered.filter((pack) => !pack.firstPurchaseOnly));
+}
+
+async function providerFor(userId: string): Promise<string> {
+  const [row] = (await db.execute(
+    sql`select country from users where id = ${userId}::uuid`,
+  )) as unknown as { country: string | null }[];
+
+  const offered = methodsForCountry(row?.country ?? null);
+  // Four in five take the method the checkout puts first.
+  return (chance(0.8) ? offered[0]! : pick(offered)).id;
+}
+
 async function recordPurchase(wallets: Wallets, userId: string, pack: CreditPack): Promise<void> {
   const purchaseId = randomUUID();
+  const provider = await providerFor(userId);
 
   await db.insert(creditPurchases).values({
     id: purchaseId,
@@ -632,12 +684,17 @@ async function recordPurchase(wallets: Wallets, userId: string, pack: CreditPack
     packId: pack.id,
     paidCents: pack.paidCents,
     creditsCents: pack.creditsCents,
-    provider: 'mock',
-    providerRef: `mock_${purchaseId.slice(0, 8)}`,
+    provider,
+    providerRef: `${provider}_${purchaseId.slice(0, 8)}`,
     status: 'paid',
-    idempotencyKey: `mock:purchase:${purchaseId}`,
+    idempotencyKey: `${provider}:purchase:${purchaseId}`,
+    // Snapshotted from the pack, exactly as the live path does, so the unique
+    // index has a column to stand on.
+    firstPurchaseOnly: pack.firstPurchaseOnly ?? false,
     settledAt: NOW,
   });
+
+  purchasesMade.set(userId, (purchasesMade.get(userId) ?? 0) + 1);
 
   await appendLedger(db, creditPurchaseEntries({ purchaseId, userId, creditsCents: pack.creditsCents }));
   wallets.set(userId, (wallets.get(userId) ?? 0) + pack.creditsCents);
@@ -647,9 +704,10 @@ async function recordPurchase(wallets: Wallets, userId: string, pack: CreditPack
 async function ensureCredits(wallets: Wallets, userId: string, needCents: number): Promise<void> {
   while ((wallets.get(userId) ?? 0) < needCents) {
     const shortfall = needCents - (wallets.get(userId) ?? 0);
+    const offered = packsAvailableTo(userId);
     const pack =
-      CREDIT_PACKS.find((candidate) => candidate.creditsCents >= shortfall) ??
-      CREDIT_PACKS[CREDIT_PACKS.length - 1]!;
+      offered.find((candidate) => candidate.creditsCents >= shortfall) ??
+      offered[offered.length - 1]!;
     await recordPurchase(wallets, userId, pack);
   }
 }
@@ -1931,6 +1989,193 @@ async function seedHistory(
  * A few notifications for the demo accounts, so the bell has something in it
  * without waiting for an event to happen (SPEC.md §11).
  */
+/**
+ * Regulars, and the ones who stopped (SPEC.md §8).
+ *
+ * The random history above gives most pairs one or two sessions, which is
+ * realistic and useless for the disintermediation signal: a pair has to become
+ * established before going quiet means anything.
+ *
+ * So these students belong to one tutor each and book nobody else — which is
+ * exactly the shape the signal looks for, and the reason it is deliberate
+ * rather than emergent. Two tutors get different ratios, because the number
+ * that matters is quiet against still-active and not the raw count: a tutor
+ * with a hundred students will always have more quiet pairs than one with five.
+ */
+async function seedRegularPairs(
+  tutors: SeededTutor[],
+  subjectIds: Map<string, string>,
+  wallets: Wallets,
+  rulesByTutor: Map<string, WeeklyRule[]>,
+  exceptionsByTutor: Map<string, EngineException[]>,
+  passwordHash: string,
+): Promise<{ quiet: number; active: number }> {
+  const eligible = tutors.filter(
+    (tutor) =>
+      !(PAYOUT_FIXTURE_EMAILS as readonly string[]).includes(tutor.email) &&
+      (rulesByTutor.get(tutor.id) ?? []).length > 0,
+  );
+
+  // Four gone and one still here, then one gone and two still here. Read as a
+  // ratio those are 80% and 33%, which is the difference the page is for.
+  const plan: { tutor: SeededTutor; quiet: number; active: number }[] = [
+    { tutor: eligible[0]!, quiet: 4, active: 1 },
+    { tutor: eligible[1]!, quiet: 1, active: 2 },
+  ].filter((entry) => entry.tutor);
+
+  let quietCount = 0;
+  let activeCount = 0;
+  let index = 0;
+
+  for (const entry of plan) {
+    const rules = rulesByTutor.get(entry.tutor.id) ?? [];
+    const exceptions = exceptionsByTutor.get(entry.tutor.id) ?? [];
+
+    // Slots this tutor already gave away, so the seeded regulars sit beside the
+    // random history rather than on top of it.
+    const existing = (await db.execute(sql`
+      select start_at_utc, duration_minutes from bookings where tutor_id = ${entry.tutor.id}::uuid
+    `)) as unknown as { start_at_utc: string; duration_minutes: number }[];
+
+    const busy: BusyInterval[] = existing.map((row) => ({
+      startUtc: new Date(row.start_at_utc),
+      endUtc: new Date(new Date(row.start_at_utc).getTime() + row.duration_minutes * 60_000),
+    }));
+
+    for (let n = 0; n < entry.quiet + entry.active; n += 1) {
+      const isQuiet = n < entry.quiet;
+      index += 1;
+
+      const student: SeededStudent = {
+        id: randomUUID(),
+        name: `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`,
+        email: `regular${index}@tutorly.test`,
+        timezone: entry.tutor.timezone,
+      };
+
+      await db.insert(users).values({
+        id: student.id,
+        email: student.email,
+        passwordHash,
+        roles: ['student'] as UserRole[],
+        name: student.name,
+        nameConfirmedAt: NOW,
+        timezone: student.timezone,
+        country: 'PK',
+        isAdult: true,
+        emailVerified: NOW,
+      });
+      await db.insert(studentWallets).values({ userId: student.id });
+
+      // A quiet pair stopped four months ago; an active one had a lesson last
+      // week. Three sessions either way, because that is the bar for "this was
+      // a real teaching relationship".
+      const windows: [number, number][] = isQuiet
+        ? [[-155, -140], [-138, -125], [-123, -110]]
+        : [[-70, -60], [-45, -35], [-14, -6]];
+
+      for (const [fromDay, toDay] of windows) {
+        const candidates = slotsInRange(
+          rules,
+          exceptions,
+          busy,
+          10,
+          60,
+          { startUtc: daysFromNow(fromDay, 0), endUtc: daysFromNow(toDay, 0) },
+        );
+        if (candidates.length === 0) continue;
+
+        const chosen = candidates[Math.floor(random() * candidates.length)]!;
+        busy.push({ startUtc: chosen.startUtc, endUtc: chosen.endUtc });
+
+        const { priceCents } = priceForBooking({
+          rates: {
+            hourlyCents: entry.tutor.hourlyCents,
+            halfHourCents: entry.tutor.halfHourCents,
+            promoCents: null,
+            promoStartsAt: null,
+            promoEndsAt: null,
+          },
+          durationMinutes: 60,
+          isTrial: false,
+          now: chosen.startUtc,
+        });
+
+        const bookingId = randomUUID();
+        const commissionBps = commissionForSeed(entry.tutor, student.id, chosen.startUtc);
+
+        await ensureCredits(wallets, student.id, priceCents);
+
+        await db.insert(bookings).values({
+          id: bookingId,
+          studentId: student.id,
+          tutorId: entry.tutor.id,
+          subjectId: subjectIds.get(entry.tutor.subjectSlugs[0]!)!,
+          isTrial: false,
+          startAtUtc: chosen.startUtc,
+          durationMinutes: 60,
+          status: 'confirmed',
+          priceCents,
+          commissionBps,
+          studentTz: student.timezone,
+          tutorTz: entry.tutor.timezone,
+          livekitRoom: `booking_${bookingId}`,
+          createdAt: new Date(chosen.startUtc.getTime() - 3 * 24 * 60 * 60 * 1000),
+        });
+
+        await appendLedger(db, bookingEscrowEntries({ bookingId, studentId: student.id, priceCents }));
+        wallets.set(student.id, (wallets.get(student.id) ?? 0) - priceCents);
+
+        const outcome = resolveBookingOutcome(
+          {
+            id: bookingId,
+            studentId: student.id,
+            tutorId: entry.tutor.id,
+            isTrial: false,
+            priceCents,
+            commissionBps,
+            startAtUtc: chosen.startUtc,
+            durationMinutes: 60,
+          },
+          {
+            kind: 'session',
+            studentSeconds: 3_600,
+            tutorSeconds: 3_600,
+            bothPresentSeconds: 3_540,
+            tutorWaitedAloneSeconds: 0,
+          },
+        );
+
+        await appendLedger(db, { entries: outcome.entries, external: false });
+        if (outcome.tutorCents > 0) {
+          await appendLedger(
+            db,
+            pendingToAvailableEntries({
+              bookingId,
+              tutorId: entry.tutor.id,
+              amountCents: outcome.tutorCents,
+            }),
+          );
+        }
+
+        await db
+          .update(bookings)
+          .set({
+            status: outcome.terminalStatus,
+            settledAt: chosen.startUtc,
+            completedAt: new Date(chosen.startUtc.getTime() + 3_600_000),
+          })
+          .where(sql`id = ${bookingId}`);
+      }
+
+      if (isQuiet) quietCount += 1;
+      else activeCount += 1;
+    }
+  }
+
+  return { quiet: quietCount, active: activeCount };
+}
+
 async function seedNotifications(students: SeededStudent[], now: Date): Promise<void> {
   const student = students.find((candidate) => candidate.email === 'student@tutorly.test');
   if (!student) return;
@@ -1976,7 +2221,7 @@ async function seedNotifications(students: SeededStudent[], now: Date): Promise<
  * masking is visible in the product and the moderation queue has something real
  * in it.
  */
-async function seedConversations(now: Date): Promise<{ threads: number; messages: number }> {
+async function seedConversations(now: Date): Promise<{ threads: number; messages: number; contactFlags: number }> {
   const pairs = (await db.execute(sql`
     select distinct on (student_id, tutor_id)
       student_id::text as student_id, tutor_id::text as tutor_id, start_at_utc
@@ -1992,6 +2237,28 @@ async function seedConversations(now: Date): Promise<{ threads: number; messages
     'Salaam! My exam is in three weeks. What should I focus on first?',
   ];
 
+  /**
+   * Real teaching, full of the digits a naive filter would flag.
+   *
+   * "Question 15 on page 240" is the most common sentence on a tutoring
+   * platform, and a moderation queue that contains it is a queue nobody reads.
+   */
+  const OFF_PLATFORM_ATTEMPTS = [
+    'Could we just do it over whatsapp? My number is +92 300 1234567, or email me at student@example.com',
+    'add me on telegram @studyhelp, easier than logging in here every time',
+    'my email is ayesha.tutor (at) gmail dot com if you want to send the papers directly',
+    'honestly it would be cheaper if we did it directly — no commission that way',
+    'can you send it to https://wa.me/923001234567 instead',
+  ];
+
+  const MATHS_CHATTER = [
+    'For next week: question 15 on page 240, then 18 to 22 on page 241.',
+    'If 2x + 3 = 11 then x = 4. Try the same method on Q7, Q8 and Q9.',
+    'Past paper 2019, paper 2, question 5 part b — bring your working.',
+    'Substitute u = 03 m/s into v = u + at and see what you get.',
+    'Chapter 4, section 4.2, problems 21 to 34. Skip 28, it is out of syllabus.',
+  ];
+
   const replies = [
     'Of course. Send over the paper beforehand and I will mark the tricky ones.',
     'Yes — bring your working and we will find where it goes wrong.',
@@ -2001,6 +2268,7 @@ async function seedConversations(now: Date): Promise<{ threads: number; messages
 
   let threadCount = 0;
   let messageCount = 0;
+  let flagCount = 0;
 
   for (const [index, pair] of pairs.entries()) {
     if (!chance(0.55)) continue;
@@ -2025,26 +2293,58 @@ async function seedConversations(now: Date): Promise<{ threads: number; messages
       },
     ];
 
-    // Every twelfth pair tries to take it off-platform.
+    // Every twelfth pair tries to take it off-platform — and not all the same
+    // way, so the moderation queue shows a range of evidence rather than five
+    // copies of one sentence. The last one has no number in it at all, which is
+    // the case a masking regex cannot see and the scorer can.
     if (index % 12 === 0) {
       exchange.push({
         senderId: pair.student_id,
-        body: 'Could we just do it over whatsapp? My number is +92 300 1234567, or email me at student@example.com',
+        // Cycled rather than sampled, so every variant is actually in the
+        // queue and the scorer can be judged on a range rather than on luck.
+        body: OFF_PLATFORM_ATTEMPTS[(index / 12) % OFF_PLATFORM_ATTEMPTS.length]!,
         at: new Date(started.getTime() + (replyMinutes + 30) * 60_000),
+      });
+    }
+
+    // And every fifth pair does ordinary maths, full of numbers, which must
+    // come out of the scorer at zero. These are in the seed on purpose: the
+    // moderation queue is only worth reading if it is not full of these.
+    if (index % 5 === 0) {
+      exchange.push({
+        senderId: pair.tutor_id,
+        body: pick(MATHS_CHATTER),
+        at: new Date(started.getTime() + (replyMinutes + 45) * 60_000),
       });
     }
 
     for (const message of exchange) {
       if (message.at > now) continue;
       const masked = maskContactInfo(message.body);
-      await db.insert(messages).values({
-        threadId,
-        senderId: message.senderId,
-        bodyMasked: masked.masked,
-        bodyRaw: message.body,
-        redactions: masked.redactions,
-        createdAt: message.at,
-      });
+      const intent = scoreContactIntent(message.body);
+
+      const [created] = await db
+        .insert(messages)
+        .values({
+          threadId,
+          senderId: message.senderId,
+          bodyMasked: masked.masked,
+          bodyRaw: message.body,
+          redactions: masked.redactions,
+          createdAt: message.at,
+        })
+        .returning({ id: messages.id });
+
+      // Exactly what the live path does: write a row for a person to read, and
+      // nothing else. No sanction is seeded, because none would be issued.
+      if (shouldQueueForReview(intent)) {
+        await recordContactFlag(
+          { messageId: created!.id, threadId, senderId: message.senderId, intent },
+          db,
+        );
+        flagCount += 1;
+      }
+
       messageCount += 1;
     }
 
@@ -2055,7 +2355,60 @@ async function seedConversations(now: Date): Promise<{ threads: number; messages
   // The medians the badge and the ranking term both read.
   await recomputeAllResponseMedians(now, db);
 
-  return { threads: threadCount, messages: messageCount };
+  return { threads: threadCount, messages: messageCount, contactFlags: flagCount };
+}
+
+/**
+ * A handful of reports for the queue.
+ *
+ * No sanctions are seeded, deliberately. Every notice in this product is issued
+ * by a named admin who has read the thing, and a seed that manufactured one
+ * would be seeding a decision nobody made.
+ */
+async function seedReports(
+  students: { id: string }[],
+  tutors: { id: string }[],
+): Promise<number> {
+  const cases: { reporterIndex: number; targetIndex: number; reason: string; body: string }[] = [
+    {
+      reporterIndex: 0,
+      targetIndex: 0,
+      reason: 'Asked me to pay or message off Tutorly',
+      body: 'He said it would be cheaper if I paid him directly and sent me a number.',
+    },
+    {
+      reporterIndex: 1,
+      targetIndex: 1,
+      reason: 'Did not teach what was booked',
+      body: 'I booked A-level chemistry and we spent the hour on GCSE material.',
+    },
+    {
+      reporterIndex: 2,
+      targetIndex: 2,
+      reason: 'Not who they say they are',
+      body: 'The person on the call was not the person in the profile photo.',
+    },
+  ];
+
+  let filed = 0;
+
+  for (const entry of cases) {
+    const reporter = students[entry.reporterIndex];
+    const target = tutors[entry.targetIndex];
+    if (!reporter || !target) continue;
+
+    const result = await fileReport({
+      reporterId: reporter.id,
+      targetType: 'tutor_profile',
+      targetId: target.id,
+      reason: entry.reason,
+      body: entry.body,
+    });
+
+    if (result.ok) filed += 1;
+  }
+
+  return filed;
 }
 
 /**
@@ -2182,6 +2535,23 @@ async function seedPayoutFixtures(
     })
     .returning({ id: payoutMethods.id });
 
+  // The tutor who *can* request already has somewhere to be paid, and it is a
+  // mobile wallet rather than a bank. For a large share of Pakistani tutors that
+  // is the only account they have, so the fixtures have to cover it.
+  const ready = byEmail.get('payout.ready@tutorly.test')!;
+  const walletNumber = '03001234567';
+
+  await db.insert(payoutMethods).values({
+    tutorId: ready.id,
+    kind: 'mobile_wallet',
+    accountTitle: ready.name,
+    walletProvider: 'easypaisa',
+    country: 'PK',
+    accountNumberEnc: encryptSecret(walletNumber),
+    last4: last4(walletNumber),
+    isDefault: true,
+  });
+
   const payoutId = randomUUID();
   await db.insert(payouts).values({
     id: payoutId,
@@ -2284,6 +2654,14 @@ async function main() {
     rulesByTutor,
     exceptionsByTutor,
   );
+  const regulars = await seedRegularPairs(
+    verified,
+    subjectIds,
+    wallets,
+    rulesByTutor,
+    exceptionsByTutor,
+    passwordHash,
+  );
   const payoutFixtures = await seedPayoutFixtures(
     verified,
     students,
@@ -2307,6 +2685,7 @@ async function main() {
   const curriculum = await seedCurriculumDeclarations([...verified, ...pending], students, subjectIds);
 
   const conversations = await seedConversations(NOW);
+  const reportCount = await seedReports(students, verified);
   await seedNotifications(students, NOW);
 
   await assertNoNegativeBalances();
@@ -2352,6 +2731,12 @@ async function main() {
   console.log(`  trial requests pending   ${counts.trials}`);
   console.log(`  trials taken             ${counts.trialsTaken} (${counts.trialsConverted} converted to paid)`);
   console.log(`  conversations            ${conversations.threads} threads, ${conversations.messages} messages`);
+  console.log(
+    `  moderation queue         ${conversations.contactFlags} contact flags, ${reportCount} open reports, no sanctions`,
+  );
+  console.log(
+    `  established pairs        ${regulars.quiet} that went quiet, ${regulars.active} still booking`,
+  );
   console.log(`  awaiting settlement      ${counts.awaitingSettlement}`);
   console.log(`  reviews                  ${totals.reviews}`);
   console.log('');

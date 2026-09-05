@@ -19,12 +19,14 @@ import { and, asc, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
 import { notify } from './notifications';
+import { recordContactFlag } from './reports';
 import { messages, threads, tutorProfiles, users } from './schema';
 import {
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
   MAX_MESSAGE_CHARS,
 } from '@/lib/messaging/limits';
+import { scoreContactIntent, shouldQueueForReview } from '@/lib/messaging/contact-intent';
 import { maskContactInfo } from '@/lib/messaging/masking';
 import { replyLatencies, medianSeconds } from '@/lib/messaging/response-time';
 
@@ -230,6 +232,7 @@ export async function sendMessage(
   }
 
   const masked = maskContactInfo(body);
+  const intent = scoreContactIntent(body);
   const recipientId = thread.studentId === input.senderId ? thread.tutorId : thread.studentId;
 
   const [created] = await database
@@ -246,6 +249,25 @@ export async function sendMessage(
     .returning({ id: messages.id });
 
   await database.update(threads).set({ lastMessageAt: now }).where(eq(threads.id, thread.id));
+
+  /**
+   * A high-confidence contact-info attempt goes in front of a person.
+   *
+   * Note where this sits: *after* the message is written, and outside anything
+   * that could undo it. The message is sent either way. A tutor mid-lesson is
+   * never interrupted by this, and a failure to write the flag loses a
+   * moderation row rather than a lesson — which is the right way round.
+   */
+  if (shouldQueueForReview(intent)) {
+    try {
+      await recordContactFlag(
+        { messageId: created!.id, threadId: thread.id, senderId: input.senderId, intent },
+        database,
+      );
+    } catch (error) {
+      console.error('could not record a contact flag; the message was still sent', error);
+    }
+  }
 
   await notify(
     {

@@ -18,6 +18,7 @@ import { askForTrial, bookSession, dropHold, toggleFollow } from '@/app/tutors/[
 import { BookingCalendar, type CalendarMode } from '@/components/booking/calendar';
 import { FollowButton } from '@/components/tutors/follow-button';
 import { ReviewList } from '@/components/reviews/review-list';
+import { ReportForm } from '@/components/reports/report-form';
 import { SiteHeader } from '@/components/site-header';
 import { TimezoneProbe, TIMEZONE_COOKIE } from '@/components/timezone-probe';
 import { IntroPlayer } from '@/components/video/intro-player';
@@ -52,7 +53,13 @@ export default async function TutorProfilePage({
   searchParams,
 }: {
   params: Promise<{ tutorId: string }>;
-  searchParams: Promise<{ mode?: string; duration?: string; error?: string; at?: string }>;
+  searchParams: Promise<{
+    mode?: string;
+    duration?: string;
+    error?: string;
+    at?: string;
+    reported?: string;
+  }>;
 }) {
   const { tutorId } = await params;
   const [tutor, viewer, jar, query, positions] = await Promise.all([
@@ -417,6 +424,22 @@ export default async function TutorProfilePage({
             </Link>
           )}
         </div>
+
+        {query.reported ? (
+          <p role="status" className="rounded-md bg-secondary px-4 py-3 text-sm" data-testid="reported">
+            Thanks. Somebody will read it, and we have not told them who reported it.
+          </p>
+        ) : null}
+
+        {viewer && viewer.id !== tutor.id ? (
+          <ReportForm
+            targetType="tutor_profile"
+            targetId={tutor.id}
+            returnTo={`/tutors/${tutor.id}`}
+            label={tutor.name ?? 'this tutor'}
+            summary="Report this tutor"
+          />
+        ) : null}
 
         <Link href="/" className="text-sm text-muted-foreground underline underline-offset-4">
           Back to all tutors

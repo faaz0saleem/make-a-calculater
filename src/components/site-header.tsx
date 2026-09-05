@@ -2,6 +2,7 @@ import Link from 'next/link';
 
 import { auth, signOut } from '@/auth';
 import { unreadCount } from '@/db/notifications';
+import { pendingNoticeFor } from '@/db/reports';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { defaultLandingPath } from '@/lib/auth/roles';
@@ -10,6 +11,11 @@ export async function SiteHeader() {
   const session = await auth();
   const roles = session?.user?.roles ?? [];
   const unread = session?.user?.id ? await unreadCount(session.user.id) : 0;
+
+  // Only rendered when there is one. A warning somebody has to acknowledge is
+  // not something to bury behind a settings page, and a nav item that is always
+  // there stops being noticed.
+  const notice = session?.user?.id ? await pendingNoticeFor(session.user.id) : null;
 
   return (
     <header className="border-b border-border">
@@ -29,6 +35,13 @@ export async function SiteHeader() {
                   {role}
                 </Badge>
               ))}
+              {notice ? (
+                <Link href="/settings/notices" data-testid="notice-nudge">
+                  <Button size="sm" variant="destructive">
+                    Notice
+                  </Button>
+                </Link>
+              ) : null}
               <Link href="/messages" className="hidden sm:block">
                 <Button size="sm" variant="ghost">
                   Messages

@@ -55,6 +55,7 @@ describe('trialRequestProblem', () => {
   const base: TrialRequestFacts = {
     offersTrial: true,
     verified: true,
+    tutorRestricted: false,
     maxTrialsPerWeek: 5,
     isSelf: false,
     pairHasTrial: false,
@@ -66,6 +67,17 @@ describe('trialRequestProblem', () => {
 
   it('lets a first-time student ask', () => {
     expect(trialRequestProblem(base, NOW)).toBeNull();
+  });
+
+  it('turns away a new trial request from a restricted tutor', () => {
+    expect(trialRequestProblem({ ...base, tutorRestricted: true }, NOW)).toBe('tutor_restricted');
+  });
+
+  it('tells the student they can still pay that tutor, because they can', () => {
+    // The restriction takes away the tutor's next student, not their current
+    // ones. A message that read like a ban would be wrong and would also send
+    // the student looking for them somewhere else.
+    expect(trialProblemMessage('tutor_restricted')).toContain('book a paid session');
   });
 
   it('refuses a second trial with the same tutor, ever', () => {

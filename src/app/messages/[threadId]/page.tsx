@@ -11,6 +11,7 @@ import { notFound } from 'next/navigation';
 
 import { postMessage } from '@/app/messages/actions';
 import { Composer } from '@/components/messaging/composer';
+import { ReportForm } from '@/components/reports/report-form';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
 import { loadThreadForViewer, markThreadRead } from '@/db/messages';
@@ -27,7 +28,7 @@ export default async function ThreadPage({
   searchParams,
 }: {
   params: Promise<{ threadId: string }>;
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; reported?: string }>;
 }) {
   const [{ threadId }, query, user] = await Promise.all([params, searchParams, requireUser()]);
 
@@ -62,6 +63,12 @@ export default async function ThreadPage({
         {query.error ? (
           <p role="alert" className="rounded-md bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {query.error}
+          </p>
+        ) : null}
+
+        {query.reported ? (
+          <p role="status" className="rounded-md bg-secondary px-4 py-3 text-sm" data-testid="reported">
+            Thanks. Somebody will read it. We have not told them you reported it.
           </p>
         ) : null}
 
@@ -116,6 +123,15 @@ export default async function ThreadPage({
                         contact details hidden
                       </Badge>
                     ) : null}
+                    {!mine ? (
+                      <ReportForm
+                        targetType="message"
+                        targetId={message.id}
+                        returnTo={`/messages/${thread.id}`}
+                        label={`this message from ${thread.otherName}`}
+                        summary="Report"
+                      />
+                    ) : null}
                   </div>
                 </li>
               );
@@ -124,6 +140,14 @@ export default async function ThreadPage({
         )}
 
         <Composer threadId={thread.id} action={postMessage} />
+
+        <ReportForm
+          targetType={thread.viewerIsTutor ? 'user' : 'tutor_profile'}
+          targetId={thread.otherId}
+          returnTo={`/messages/${thread.id}`}
+          label={thread.otherName}
+          summary={`Report ${thread.otherName}`}
+        />
       </main>
     </>
   );

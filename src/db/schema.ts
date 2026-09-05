@@ -35,7 +35,7 @@ import {
 import { BOOKING_STATUSES } from '@/lib/bookings/status';
 import { CURRICULUM_STAGES } from '@/lib/curriculum/boards';
 import { LEDGER_ACCOUNTS } from '@/lib/money/ledger';
-import { PAYOUT_STATUSES } from '@/lib/money/payouts';
+import { PAYOUT_METHOD_KINDS, PAYOUT_STATUSES } from '@/lib/money/payouts';
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -103,6 +103,8 @@ export const purchaseStatusEnum = pgEnum('purchase_status', [
 
 export const payoutStatusEnum = pgEnum('payout_status', PAYOUT_STATUSES);
 
+export const payoutMethodKindEnum = pgEnum('payout_method_kind', PAYOUT_METHOD_KINDS);
+
 export const reportTargetEnum = pgEnum('report_target', [
   'user',
   'tutor_profile',
@@ -112,6 +114,27 @@ export const reportTargetEnum = pgEnum('report_target', [
 ]);
 
 export const reportStatusEnum = pgEnum('report_status', ['open', 'reviewing', 'resolved', 'dismissed']);
+
+/**
+ * The graduated response (SPEC.md §8, §10).
+ *
+ * There is no `ban` here on purpose. Banning a tutor with regular students does
+ * not stop disintermediation — it completes it, by pushing those students to
+ * WhatsApp, which is the leak the platform exists to close. So the ladder ends
+ * at `review`: a human decides, and even that is appealable.
+ */
+export const sanctionLevelEnum = pgEnum('sanction_level', ['warning', 'restriction', 'review']);
+
+export const sanctionStatusEnum = pgEnum('sanction_status', [
+  'issued',
+  'acknowledged',
+  'appealed',
+  'lifted',
+  'upheld',
+]);
+
+/** A confidence-scored contact-info detection, waiting for a person. */
+export const contactFlagStatusEnum = pgEnum('contact_flag_status', ['pending', 'confirmed', 'dismissed']);
 
 export const rescheduleStatusEnum = pgEnum('reschedule_status', [
   'pending',
@@ -134,6 +157,8 @@ export const notificationKindEnum = pgEnum('notification_kind', [
   'new_review',
   'review_reply',
   'new_availability',
+  /** A warning, a restriction or an appeal outcome. Always links to /settings/notices. */
+  'account_notice',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -923,6 +948,22 @@ export const creditPurchases = pgTable(
   ],
 );
 
+/**
+ * Where a tutor's money goes.
+ *
+ * Two shapes, because in this market they are genuinely different things. A
+ * bank account is an IBAN or an account number with a branch code; a mobile
+ * wallet is a phone number at JazzCash or Easypaisa, and for a great many
+ * tutors here it is the only account they have. Forcing a wallet into
+ * bank-shaped columns would mean storing a phone number in `account_number`
+ * and lying about `bank_name`.
+ *
+ * **Every identifying number is encrypted by the application** — see
+ * `src/lib/crypto.ts`. Disk encryption is not enough: a read replica, a backup
+ * or a `select *` in a support tool would all show account numbers otherwise.
+ * `last4` is the only part of any of them that may be rendered, to anybody,
+ * including an admin. `pnpm prove:payout-privacy` dumps the table and checks.
+ */
 export const payoutMethods = pgTable(
   'payout_methods',
   {
@@ -930,20 +971,44 @@ export const payoutMethods = pgTable(
     tutorId: uuid()
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    kind: payoutMethodKindEnum().notNull().default('bank'),
+    /** The name on the account, as the bank or wallet has it. */
     accountTitle: varchar({ length: 200 }).notNull(),
-    bankName: varchar({ length: 200 }).notNull(),
+    /** Null for a mobile wallet, which has no bank. */
+    bankName: varchar({ length: 200 }),
+    /** `jazzcash` or `easypaisa`. Null for a bank account. */
+    walletProvider: varchar({ length: 32 }),
     country: varchar({ length: 2 }).notNull(),
-    /** AES-256-GCM ciphertext. See src/lib/crypto.ts. Never logged, never returned. */
+    /**
+     * AES-256-GCM ciphertext of the IBAN, account number or wallet mobile
+     * number. Never logged, never returned, never rendered.
+     */
     accountNumberEnc: text().notNull(),
     swiftEnc: text(),
+    /** Pakistani local accounts are addressed by branch code, not by SWIFT. */
+    branchCodeEnc: text(),
     /** Optional, Pakistan-domiciled tutors only. */
     cnicEnc: text(),
-    /** The only part of the account number the UI is allowed to show. */
+    /** The only part of any of the above the UI is allowed to show. */
     last4: varchar({ length: 4 }).notNull(),
     isDefault: boolean().notNull().default(true),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index('payout_methods_tutor_idx').on(table.tutorId)],
+  (table) => [
+    index('payout_methods_tutor_idx').on(table.tutorId),
+    /** One default per tutor: "where does the money go" has one answer. */
+    uniqueIndex('payout_methods_default_key').on(table.tutorId).where(sql`is_default`),
+    /**
+     * A bank has a name, a wallet has a provider, and neither has the other.
+     * Enforced here rather than in a form, because a half-filled payout method
+     * is a payment that fails at the bank.
+     */
+    check(
+      'payout_methods_shape',
+      sql`(kind = 'bank' and bank_name is not null and wallet_provider is null)
+          or (kind = 'mobile_wallet' and wallet_provider is not null and bank_name is null)`,
+    ),
+  ],
 );
 
 export const payouts = pgTable(
@@ -1072,8 +1137,112 @@ export const reports = pgTable(
     status: reportStatusEnum().notNull().default('open'),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     resolvedAt: timestamp({ withTimezone: true }),
+
+    /**
+     * What was done and why.
+     *
+     * `admin_audit` has this too and is the record of last resort, but the
+     * queue itself has to show the outcome: an admin picking up a report needs
+     * to see that the last one from this reporter was dismissed as vexatious
+     * without going and reading the audit log.
+     */
+    resolutionAction: varchar({ length: 40 }),
+    resolutionReason: text(),
+    resolvedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
   },
-  (table) => [index('reports_status_idx').on(table.status, table.createdAt)],
+  (table) => [
+    index('reports_status_idx').on(table.status, table.createdAt),
+    index('reports_target_idx').on(table.targetType, table.targetId),
+  ],
+);
+
+/**
+ * Messages a scorer thinks were trying to move the conversation off Tutorly.
+ *
+ * A flag is **not** an action and never becomes one on its own. It carries the
+ * score and the reasons behind it (`signals`) so the person reviewing it can
+ * see why the machine thought so and disagree cheaply. Nothing in the product
+ * reads `status = 'confirmed'` except the sanction ladder, and that only runs
+ * when an admin presses the button.
+ *
+ * There is no unique index letting one message be flagged twice, because a
+ * message is scored exactly once, on write.
+ */
+export const contactFlags = pgTable(
+  'contact_flags',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    messageId: uuid()
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    threadId: uuid()
+      .notNull()
+      .references(() => threads.id, { onDelete: 'cascade' }),
+    senderId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** 0 to 100. An ordering for the queue, not a probability. */
+    score: smallint().notNull(),
+    band: varchar({ length: 8 }).notNull(),
+    /** `[{ id, weight, note }]` — the plain-English reasons, for the reviewer. */
+    signals: jsonb().notNull().default(sql`'[]'::jsonb`),
+    status: contactFlagStatusEnum().notNull().default('pending'),
+    reviewedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+    reviewedAt: timestamp({ withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('contact_flags_message_key').on(table.messageId),
+    index('contact_flags_queue_idx').on(table.status, table.score),
+    index('contact_flags_sender_idx').on(table.senderId, table.createdAt),
+  ],
+);
+
+/**
+ * The graduated response, one row per step (SPEC.md §8).
+ *
+ * First confirmed attempt is a warning the person has to acknowledge. Second
+ * removes a privilege that costs them something without costing their existing
+ * students anything — new trial requests and ranking position, never the
+ * ability to teach the students they already have. Third goes to a human, who
+ * may suspend. Every step is appealable and every step is here.
+ *
+ * `issuedBy` is not nullable: nothing issues one of these automatically, so
+ * there is always a person to name.
+ */
+export const userSanctions = pgTable(
+  'user_sanctions',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    level: sanctionLevelEnum().notNull(),
+    /** What the person is told. They read this verbatim. */
+    reason: text().notNull(),
+    /** Where it came from: `contact_flag` or `report`, and which one. */
+    source: varchar({ length: 32 }).notNull(),
+    sourceId: uuid(),
+    issuedBy: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    issuedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    /** Null while a warning sits unread. Acknowledging is the whole point of a warning. */
+    acknowledgedAt: timestamp({ withTimezone: true }),
+    /** When a restriction stops applying. Null for a warning, which never expires. */
+    restrictedUntil: timestamp({ withTimezone: true }),
+    status: sanctionStatusEnum().notNull().default('issued'),
+    appealNote: text(),
+    appealedAt: timestamp({ withTimezone: true }),
+    appealDecidedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+    appealDecidedAt: timestamp({ withTimezone: true }),
+    appealOutcome: text(),
+  },
+  (table) => [
+    index('user_sanctions_user_idx').on(table.userId, table.issuedAt),
+    /** The lookup on every request that asks "is this person restricted?". */
+    index('user_sanctions_active_idx').on(table.userId, table.restrictedUntil),
+  ],
 );
 
 /**

@@ -21,7 +21,7 @@ import { TrialRequests } from '@/components/trials/trial-requests';
 import { JoinLink } from '@/components/sessions/join-link';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import {
   Card,
   CardContent,
@@ -40,8 +40,14 @@ import { requireRole } from '@/lib/auth/guards';
 import { wizardProgress } from '@/lib/tutors/wizard';
 import { formatCents } from '@/lib/money/cents';
 import { takeHomeFor } from '@/lib/money/commission';
-import { canRequestPayout, PAYOUT_THRESHOLD_CENTS } from '@/lib/money/payouts';
+import {
+  canRequestPayout,
+  PAYOUT_STATUS_LABELS,
+  PAYOUT_THRESHOLD_CENTS,
+  type PayoutStatus,
+} from '@/lib/money/payouts';
 import { sessionWindow } from '@/lib/sessions/window';
+import { cn } from '@/lib/utils';
 import { formatInTimeZone } from '@/lib/time';
 
 export const dynamic = 'force-dynamic';
@@ -310,16 +316,24 @@ export default async function TutorPage({
                   <li key={payout.id} className="flex items-center justify-between py-2">
                     <span>{formatInTimeZone(payout.requestedAt, user.timezone)}</span>
                     <span className="flex items-center gap-2">
-                      <Badge variant="outline">{payout.status}</Badge>
+                      <Badge variant="outline">{PAYOUT_STATUS_LABELS[payout.status as PayoutStatus]}</Badge>
                       <span className="tabular-nums">{formatCents(payout.amountCents)}</span>
                     </span>
                   </li>
                 ))}
               </ul>
             ) : null}
+            <Link
+              href="/tutor/earnings"
+              data-testid="open-earnings"
+              className={cn(buttonVariants({ variant: 'outline' }), 'self-start')}
+            >
+              Earnings and withdrawals
+            </Link>
             <p className="text-xs text-muted-foreground">
               Requesting moves the amount out of your available balance immediately so it cannot be spent
-              twice. Admin approval and the bank transfer arrive in Phase 6.
+              twice. The earnings page shows every session at the rate it was booked at, and where we
+              send the money.
             </p>
           </CardContent>
         </Card>

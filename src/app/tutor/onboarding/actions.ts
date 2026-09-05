@@ -21,12 +21,13 @@ import { redirect } from 'next/navigation';
 import { z } from 'zod';
 
 import { db } from '@/db/client';
+import { savePayoutMethod as savePayoutMethodFor } from '@/db/payouts';
+import { readPayoutMethodForm } from '@/lib/money/payout-form';
 import { notifyFollowersOfNewAvailability } from '@/db/follows';
 import {
   availabilityExceptions,
   availabilityRules,
   credentials,
-  payoutMethods,
   tutorLanguages,
   tutorProfiles,
   tutorSubjects,
@@ -34,7 +35,6 @@ import {
   videos,
 } from '@/db/schema';
 import { requireRole } from '@/lib/auth/guards';
-import { encryptSecret, last4 } from '@/lib/crypto';
 import { isProficiency, isLanguageCode } from '@/lib/tutors/languages';
 import {
   credentialChangeTriggersReview,
@@ -763,46 +763,15 @@ export async function removeAvailabilityException(formData: FormData): Promise<v
 // Step 9 — payout details (deferrable)
 // ---------------------------------------------------------------------------
 
-const payoutSchema = z.object({
-  accountTitle: z.string().trim().min(2).max(200),
-  bankName: z.string().trim().min(2).max(200),
-  country: z.string().trim().length(2),
-  accountNumber: z.string().trim().min(6).max(64),
-  swift: z.string().trim().max(32).optional(),
-  cnic: z.string().trim().max(32).optional(),
-});
-
 export async function savePayoutMethod(formData: FormData): Promise<void> {
   const { user } = await editableTutor('payout');
 
-  const parsed = payoutSchema.safeParse({
-    accountTitle: formData.get('accountTitle'),
-    bankName: formData.get('bankName'),
-    country: formData.get('country'),
-    accountNumber: formData.get('accountNumber'),
-    swift: String(formData.get('swift') ?? '').trim() || undefined,
-    cnic: String(formData.get('cnic') ?? '').trim() || undefined,
-  });
-  if (!parsed.success) backTo('payout', 'Fill in the account title, bank, country and account number.');
+  const parsed = readPayoutMethodForm(formData);
+  if (!parsed.ok) backTo('payout', parsed.reason);
 
-  const { accountNumber, swift, cnic } = parsed.data;
-
-  await db.transaction(async (tx) => {
-    // One default method per tutor for now; replacing it drops the old row.
-    await tx.delete(payoutMethods).where(eq(payoutMethods.tutorId, user.id));
-    await tx.insert(payoutMethods).values({
-      tutorId: user.id,
-      accountTitle: parsed.data.accountTitle,
-      bankName: parsed.data.bankName,
-      country: parsed.data.country.toUpperCase(),
-      // Encrypted by the application, never stored or logged in the clear.
-      accountNumberEnc: encryptSecret(accountNumber),
-      swiftEnc: swift ? encryptSecret(swift) : null,
-      cnicEnc: cnic ? encryptSecret(cnic) : null,
-      last4: last4(accountNumber),
-      isDefault: true,
-    });
-  });
+  // Encryption, the last-4 derivation and the delete-then-insert all live in
+  // `src/db/payouts.ts`, so there is one place that knows what is protected.
+  await savePayoutMethodFor(user.id, parsed.value);
 
   onwards('payout', 'review');
 }

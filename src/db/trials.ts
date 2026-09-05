@@ -22,6 +22,7 @@ import { commissionBpsFor } from '@/lib/money/commission';
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
 import { notify } from './notifications';
+import { isUserRestricted } from './reports';
 import { moveBookingStatus } from './sessions';
 import { bookings, threads, tutorProfiles, users } from './schema';
 import { getAvailability } from '@/lib/availability';
@@ -188,6 +189,9 @@ export async function requestTrial(
     {
       offersTrial: tutor.offersTrial,
       verified: tutor.status === 'verified',
+      // A restricted tutor keeps every student they have and loses only the
+      // next one. See `lib/moderation/sanctions.ts` for why it is that way round.
+      tutorRestricted: await isUserRestricted(input.tutorId, database, now),
       maxTrialsPerWeek: tutor.maxTrialsPerWeek,
       isSelf: input.studentId === input.tutorId,
       startAtUtc: input.startAtUtc,

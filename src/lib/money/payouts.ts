@@ -14,6 +14,45 @@ export const DEFAULT_PAYOUT_FEE_CENTS = 0;
 export const PAYOUT_STATUSES = ['requested', 'approved', 'processing', 'paid', 'rejected'] as const;
 export type PayoutStatus = (typeof PAYOUT_STATUSES)[number];
 
+/**
+ * How a tutor gets paid.
+ *
+ * A mobile wallet is not a lesser kind of bank account here — for a large share
+ * of Pakistani tutors it is the only account they have, and a bank-only payout
+ * form would mean they cannot be paid at all.
+ */
+export const PAYOUT_METHOD_KINDS = ['bank', 'mobile_wallet'] as const;
+export type PayoutMethodKind = (typeof PAYOUT_METHOD_KINDS)[number];
+
+/** The wallets we can pay into, mirroring `lib/payments/catalogue.ts`. */
+export const PAYOUT_WALLETS = [
+  { id: 'jazzcash', label: 'JazzCash' },
+  { id: 'easypaisa', label: 'Easypaisa' },
+] as const;
+
+export type PayoutWalletId = (typeof PAYOUT_WALLETS)[number]['id'];
+
+export function isPayoutWallet(value: string): value is PayoutWalletId {
+  return PAYOUT_WALLETS.some((wallet) => wallet.id === value);
+}
+
+export const PAYOUT_STATUS_LABELS: Record<PayoutStatus, string> = {
+  requested: 'Requested',
+  approved: 'Approved',
+  processing: 'On its way',
+  paid: 'Paid',
+  rejected: 'Rejected',
+};
+
+/** What the tutor is told is happening, in their terms rather than ours. */
+export const PAYOUT_STATUS_BLURBS: Record<PayoutStatus, string> = {
+  requested: 'Waiting for us to check it. The money is already set aside.',
+  approved: 'Checked and queued for transfer.',
+  processing: 'Sent to your bank or wallet. It can take a couple of working days.',
+  paid: 'Sent. The reference is what your bank will show.',
+  rejected: 'Not sent — the reason is below. The money went back to your available balance.',
+};
+
 const PAYOUT_TRANSITIONS: Record<PayoutStatus, readonly PayoutStatus[]> = {
   requested: ['approved', 'rejected'],
   approved: ['processing', 'rejected'],

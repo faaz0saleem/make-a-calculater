@@ -9,7 +9,7 @@
 
 import { expect, test } from '@playwright/test';
 
-import { ACCOUNTS, queryDatabase, SEED_PASSWORD, signIn, signOut } from './helpers';
+import { ACCOUNTS, grantCredits, queryDatabase, SEED_PASSWORD, signIn, signOut } from './helpers';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -136,12 +136,11 @@ test('under 18 is recorded, and the guardian is asked for at the first booking',
     ` as never,
   ).then((rows) => rows[0]!.id);
 
-  await queryDatabase(
-    (sql) => sql`
-      update student_wallets set credits_cents = 50000
-      where user_id = (select id from users where email = ${email})
-    ` as never,
-  );
+  const studentId = await queryDatabase<{ id: string }[]>(
+    (sql) => sql`select id::text as id from users where email = ${email}` as never,
+  ).then((rows) => rows[0]!.id);
+
+  await grantCredits(studentId, 50_000);
 
   await page.goto(`/tutors/${tutorId}?mode=60`);
   await page.getByTestId('calendar-slot').first().click();
@@ -224,12 +223,20 @@ test('a phone number is asked for as reminders, and is never required', async ({
   expect(row!.phone).toBe('+92 300 1112223');
 
   // And it can be taken back out again.
+  //
+  // Neither the URL nor the field proves this one landed: the URL already says
+  // `reminders=1` from the save above, and the box is empty the instant it is
+  // cleared, before anything has been submitted. So the assertion polls the
+  // only thing that actually changes — the row.
   await reminders.locator('input[name="phone"]').fill('');
   await reminders.getByRole('button').click();
-  await page.waitForURL(/reminders=1/);
 
-  const [cleared] = await queryDatabase<{ phone: string | null }[]>(
-    (sql) => sql`select phone from users where email = ${ACCOUNTS.student}` as never,
-  );
-  expect(cleared!.phone).toBeNull();
+  await expect
+    .poll(async () => {
+      const [row] = await queryDatabase<{ phone: string | null }[]>(
+        (sql) => sql`select phone from users where email = ${ACCOUNTS.student}` as never,
+      );
+      return row!.phone;
+    })
+    .toBeNull();
 });

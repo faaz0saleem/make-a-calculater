@@ -13,8 +13,172 @@ Phases follow `SPEC.md` §15.
 | 5 — trials, messaging, reviews, follows | **Done** |
 | 6A — curriculum matching | **Done** |
 | 6B — student signup + the paywall moved | **Done** |
-| 6C — payouts + admin dashboard + audit log | Not started |
+| 6C — payouts + admin dashboard + reports queue | **Done** |
 | 7 — real payment provider, notifications, SEO, analytics | Not started |
+
+---
+
+## Phase 6, part C — payouts, the dashboard, the reports queue — done
+
+Three things that only make sense together: getting money out, seeing whether
+the business works, and dealing with the people trying to take it elsewhere.
+
+### Payouts
+
+A tutor adds an account, asks for their money at $100, and an admin pays it with
+a reference they can find on their bank statement. What is worth reading:
+
+- **Two shapes of account, because in this market they are genuinely different
+  things.** A bank account is an IBAN or an account number with a branch code; a
+  mobile wallet is a phone number at JazzCash or Easypaisa, and for a great many
+  tutors here it is the only account they have. A `check` constraint enforces
+  the shape — a bank row must have a bank name and no wallet provider, and a
+  wallet row the reverse — so neither can be half-filled.
+- **Encrypted by the application, not only by the disk.** AES-256-GCM in
+  `src/lib/crypto.ts`, keyed from `PAYOUT_ENCRYPTION_KEY`. Disk encryption does
+  not help against a read replica, a backup, or `select *` in a support tool.
+  **`last4` is the only part that is ever rendered, to anybody, including an
+  admin** — the admin queue's SELECT does not list the ciphertext columns at
+  all, so the screen most likely to grow a "just show me the number" field never
+  has one to show.
+- `pnpm prove:payout-privacy` **dumps the table and checks**, inside a
+  rolled-back transaction: nothing we wrote appears in the dump, every column is
+  either on the allow-list of readable ones or is ciphertext, nothing a tutor
+  typed is account-shaped, and the key still recovers the original — so it is
+  protected rather than lost.
+- **Requesting moves the money in the same transaction.** `SELECT … FOR UPDATE`
+  on the tutor's row, then the ledger entries, then the payout row. Two tabs
+  cannot both see $100 and both request it.
+- **`requested → approved → processing → paid`**, or `rejected` with a reason
+  the tutor reads. The queue only ever offers the step that is legal next — an
+  earlier draft offered "Mark paid" on an approved row and the state machine
+  correctly refused it, which the e2e caught.
+- Every decision writes an `admin_audit` row **inside the transaction that moves
+  the money**. Rejecting returns the amount to available, because a payout that
+  did not happen is money the tutor still has.
+
+The three seeded fixtures still land exactly: `$100.00`, `$100.00`, `$99.50`.
+The middle one is paid by mobile wallet.
+
+### The earnings page
+
+Available, pending, locked, lifetime — and then every session, **read from the
+ledger rather than recomputed**. Commission has been 15%, 16%, 20% and 22%, and
+a tutor scrolling their history sees all four. A page that recalculated each row
+at today's rate would quietly rewrite what they were actually paid. Each row
+carries and prints the rate it was booked at, and a line above the table
+explains the mixture so it reads as history rather than a bug.
+
+### The admin dashboard
+
+Two numbers are load-bearing and everything else is context.
+
+**The float**, first and full width: credits sold is cash taken, credits
+outstanding is tutoring owed and not yet delivered. They are not the same money,
+and a marketplace that reads the first as revenue eventually spends the second.
+
+**Unmatched demand**: every (board, class, subject) a student has declared that
+no verified tutor teaches. It is the only thing on the page that says what to do
+next. Each row carries a **near tutors** count — people teaching that subject at
+the same stage under a different board — which turns the list into two piles: a
+row with several of them is a conversation, a row with none is a hire.
+
+Also: GMV, net revenue, effective take rate, outstanding payout liability,
+escrow, sessions settled, trial-to-paid, cancellation rate by side, no-shows,
+absorbed connection failures against the 2-per-student-per-90-days cap, top
+subjects, top curriculum positions, provider split with fees, and **margin per
+pack after provider fees and bonus credits** — costed at the blended take rate
+read from settled bookings, not the headline commission. On the seed that puts
+the $5 first-lesson pack near 6% and Standard near 13%, and the gap is almost
+entirely the fixed 50c a card costs. That is the argument for the wallets in one
+row of a table.
+
+All the SQL is in `src/db/metrics.ts`; the page arranges it and nothing else.
+
+### The reports queue
+
+Report a tutor, a student, a message or a session. An admin resolves with an
+action and a reason **the reported person reads**, and every resolution writes
+`admin_audit`. `reports` gained `resolution_action`, `resolution_reason` and
+`resolved_by`, because an admin picking up a report needs to see how the last
+one went without reading the audit log.
+
+The queue resolves the *thing* reported to the *person* a notice would land on —
+a message to its sender, a review to its author — so the admin does not have to.
+A session report has no single subject and says so, sending them to the dispute
+queue instead.
+
+### Contact info: no instant bans
+
+The obvious design — detect a phone number, ban the account — fails twice, and
+the reasoning is written out in `DECISIONS_NEEDED.md` item 28. What is built
+instead:
+
+1. **A compose-time hint.** The draft is scored as it is typed. Above 25 it says
+   what will be hidden and what is not covered off-platform. It never disables
+   the button and never edits the text. Somebody who reads it and sends anyway
+   has made a decision, which is a far more useful thing for a reviewer to see.
+2. **Confidence, not a verdict.** `scoreContactIntent` returns 0-100 plus the
+   plain-English reasons behind it. Dampening is by **adjacency**: `page 240` is
+   a page, `whatsapp me on 0300 1234567` is a number, and a message with both
+   has one of each. The floor for a phone-shaped run is nine digits, not seven,
+   because a queue full of "do 1 2 3 4 5 6 7" is a queue nobody reads. The first
+   block of `contact-intent.test.ts` is twelve pieces of ordinary teaching that
+   must score exactly zero — `question 15 on page 240` and `x = 03` among them.
+3. **75 and above writes a row and does nothing else.** The message is already
+   sent and stays sent. `recordContactFlag` is called after the insert, outside
+   anything that could undo it, and a failure to write the flag loses a
+   moderation row rather than a lesson.
+4. **A graduated, human-reviewed response.** Warning the person must
+   acknowledge → a restriction on **new** trial requests and ranking position
+   for 30 days → human review. No rung takes away an existing student, because
+   banning a tutor with fifteen regulars does not stop them teaching those
+   fifteen: it sends them to WhatsApp, completing the leak instead of closing
+   it. Every rung is issued by a named admin who has read the message, every one
+   is appealable including the warning, and all of it is logged.
+5. **A behavioural signal no single message can show.** Pairs that completed
+   three sessions and then went quiet for 45 days, where the student has not
+   booked anyone else here — reported per tutor as a ratio, because one quiet
+   pair is a student who passed their exam. Nothing acts on it.
+
+The unacknowledged notice puts a red **Notice** button in the header until it is
+read, and `/settings/notices` shows the admin's words verbatim with an appeal
+box under each one.
+
+### What the seed now carries
+
+Five contact-info flags, and they are five *different* attempts: a phone number
+and an email, a Telegram handle, an address written as "gmail dot com", a
+`wa.me` link, and — the interesting one — "it would be cheaper if we did it
+directly", which contains no contact details at all and which the masking layer
+cannot see. Beside them, deliberately, five maths messages stuffed with page and
+question numbers that produce nothing.
+
+Three open reports. **No sanctions**, because every notice in this product is
+issued by a named person who read the thing, and seeding one would be seeding a
+decision nobody made.
+
+Eight established pairs, five of which went quiet — enough for the ratio to mean
+something on two different tutors (80% and 33%). They needed seeding rather than
+emerging, and that is itself informative: with a shared pool of students, a pair
+almost never satisfies "three sessions, then silence, and nobody else here"
+by accident, which is the clause doing its job.
+
+Two smaller corrections fell out of building the dashboard:
+
+- **Purchases now go through the rail a student would actually use.** Every
+  seeded purchase used to be `mock`, which made the provider split and the
+  margin-per-pack fees a constant — and the fee is the whole argument for the
+  wallets.
+- **The $5 pack is now genuinely a first purchase.** The database enforces
+  "once ever"; "first" is stricter and only the seed can honour it. It was being
+  sold as a top-up, which put a third of all purchases on the cheapest pack.
+
+And one that was a real hole: `pnpm reconcile` reported drift after every e2e
+run, because two test helpers wrote `student_wallets.credits_cents` directly.
+Credits now arrive in the tests the only way they are ever allowed to — a paid
+purchase and a ledger entry — so the reconciliation job is clean after the suite
+rather than expected to be wrong.
 
 ---
 
@@ -958,18 +1122,26 @@ says the videos were skipped.
 
 ```
 pnpm typecheck   clean
-pnpm test        41 files, 592 tests passed
-pnpm build       compiled, 36 routes
-pnpm seed        58 users · 40 verified · 5 pending · 1 draft · 1 rejected
-                 10 boards · 221 tutor curriculum positions · 12 student ones
-                 bookings spanning the repricing: 20/15 and 22/16 both present
+pnpm test        43 files, 633 tests passed
+pnpm build       compiled, 41 routes
+pnpm seed        66 users · 40 verified · 5 pending · 1 draft · 1 rejected
+                 10 boards · 214 tutor curriculum positions · 15 student ones
+                 205 bookings spanning the repricing: 15/16/20/22 all present
+                 5 contact flags · 3 open reports · no sanctions
+                 5 established pairs gone quiet, 3 still booking
                  zero ledger drift
-pnpm e2e         87 passed
-pnpm reconcile   Ledger reconciled: zero drift.
-pnpm prove:curriculum   the database refuses all three
-pnpm prove:rates        the rate change reached no booking that already existed
+pnpm e2e         97 passed
+pnpm reconcile   zero drift — including straight after the e2e run
+pnpm prove:curriculum      the database refuses all three
+pnpm prove:rates           the rate change reached no booking that already existed
+pnpm prove:payout-privacy  a dump of payout_methods yields nothing usable
 ```
 
 Lighthouse on the built app, desktop preset: feed **99 performance / 100
 accessibility**, tutor profile **100 / 100**, curriculum-filtered feed
-**100 / 100**. Mobile emulation on the feed: **99 / 100**.
+**100 / 100**, tutor earnings **100 / 100**, admin dashboard **100 / 100**,
+payout queue **100 / 100**, moderation queue **100 / 100**. Mobile emulation:
+feed **99 / 100**, admin dashboard **99 / 100**, earnings **100 / 100**.
+
+The dashboard's accessibility started at 92 — a `dl` whose groups carried the
+value outside the `dt`/`dd` pair. Fixed rather than noted.

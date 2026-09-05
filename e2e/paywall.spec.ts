@@ -29,13 +29,35 @@ function newEmail(prefix: string): string {
  * failure rather than a useful one. So ask the page, which is the same thing a
  * student would do.
  */
-async function tutorWithAFreeSlot(page: Page): Promise<string> {
+/**
+ * A verified tutor with a bookable hour.
+ *
+ * `maxHourlyCents` matters for the top-up test: the seed contains tutors at
+ * $200 an hour, and no single credit pack covers one of those. A test that
+ * picked one and then asserted the shortfall had gone would be asserting
+ * something untrue about the product rather than finding a bug in it.
+ */
+/**
+ * What the Pro pack is worth in credits, bonus included.
+ *
+ * Read from the database rather than hard-coded, so an admin editing the pack
+ * moves the test with it instead of quietly breaking it.
+ */
+async function proPackCreditsCents(): Promise<number> {
+  const [pack] = await queryDatabase<{ credits: number }[]>(
+    (sql) => sql`select credits_cents::int as credits from credit_packs where id = 'pro'` as never,
+  );
+  return pack!.credits;
+}
+
+async function tutorWithAFreeSlot(page: Page, maxHourlyCents = 2_147_483_647): Promise<string> {
   const candidates = await queryDatabase<{ id: string }[]>(
     (sql) => sql`
       select tp.user_id::text as id
       from tutor_profiles tp
       join availability_rules r on r.tutor_id = tp.user_id and r.active
       where tp.status = 'verified'
+        and tp.hourly_cents <= ${maxHourlyCents}
       group by tp.user_id
       limit 12
     ` as never,
@@ -124,7 +146,8 @@ test('the top-up is inline, and the hold survives the round trip through it', as
   const email = newEmail('topup');
 
   await signOut(page);
-  const tutorId = await tutorWithAFreeSlot(page);
+  // Within one Pro pack, so buying once genuinely clears the shortfall.
+  const tutorId = await tutorWithAFreeSlot(page, await proPackCreditsCents());
   const slot = page.getByTestId('calendar-slot').first();
   const startUtc = (await slot.getAttribute('data-start'))!;
   await slot.click();

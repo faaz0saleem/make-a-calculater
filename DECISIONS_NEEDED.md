@@ -418,6 +418,13 @@ leakage turns out to matter more than that, the next step is a classifier on the
 raw text rather than more regexes — but that is a real cost, and worth deciding
 with numbers rather than in advance.
 
+**Since Phase 6C** there is a second layer next to this one:
+`scoreContactIntent` estimates whether somebody *meant* to pass contact details,
+which is a different question from whether a pattern matched. It still cannot
+read "oh three double oh" — see item 28 on why that is accepted rather than
+fought — but "cheaper if we do it directly" now reaches a human without any
+number being typed at all.
+
 
 ## 25. Commission is retention-based now, and the negotiated rate is a floor
 
@@ -517,3 +524,113 @@ Both numbers are in `src/lib/ranking/overlap.ts` and both are one-line changes.
 A tutor who has published no hours at all scores the midpoint rather than zero,
 because an empty calendar is missing information and not a bad tutor. That one I
 would not change.
+
+
+## 28. There is no ban on the ladder, and that is on purpose
+
+**Settled.** Warning, then a restriction on *new* students, then human review.
+Nothing automatic at any rung, and no rung that takes an existing student away.
+
+The obvious design is: detect a phone number, ban the account. It fails twice.
+
+It fails on **precision**. "Question 15 on page 240" and "x = 03" are, to a
+pattern, a run of digits — and being wrong once, mid-lesson, costs a lesson and
+a tutor who stops trusting the product. That is why
+`src/lib/messaging/contact-intent.ts` scores rather than decides, and why the
+first block of its test file is a list of ordinary teaching that must come out
+at zero.
+
+It fails on **strategy**. A tutor with fifteen regular students who gets banned
+does not stop teaching those fifteen. They move to WhatsApp, which is the exact
+leak the platform exists to close: the ban completes the disintermediation
+instead of preventing it.
+
+So a restriction removes `new_trial_requests` and the ranking boost, and takes
+15% off the ranking score (`RESTRICTION_PENALTY_BPS`) — a demotion, not a
+delisting. Existing students, bookings, threads and money are untouched, and
+`/settings/notices` says so in those words. Every notice is appealable,
+including a warning, because a process with no way back only ever gets more
+severe.
+
+**Where the judgement is:** `RESTRICTION_DAYS = 30` and
+`RESTRICTION_PENALTY_BPS = 1500`, both in one place each. If leakage turns out
+to be worse than this handles, the honest next move is a shorter ladder, not a
+harsher bottom rung.
+
+**And the part worth saying out loud:** determined evasion wins. "My name on
+Instagram is my first name and my birth year" defeats all of this and always
+will. The ladder is for the ordinary case — somebody who has not thought about
+it — and the durable fix is the platform being worth staying on.
+
+
+## 29. Where the confidence thresholds sit
+
+**Settled, and the numbers are arguable.** 25 / 50 / 75 out of 100, with a
+nine-digit floor before a run of numbers counts as phone-shaped at all.
+
+- Below 25 the composer says nothing. Silence is the correct response to a
+  message that is not about contact details.
+- 25 to 74 shows a hint before sending and goes no further. Somebody who reads
+  it and sends anyway has made a decision, which is a better thing for a
+  reviewer to be looking at than a blocked message.
+- 75 and above writes a row in `contact_flags`. That is the *entire* automatic
+  response: the message is already sent, and stays sent.
+
+Two calls inside the scorer matter more than the thresholds:
+
+**Nine digits, not seven.** The masking layer uses seven and errs towards
+hiding — right, because the cost of over-hiding is one awkward message. This
+layer decides whether to spend a person's attention, and a queue full of
+"do 1 2 3 4 5 6 7" is a queue nobody reads.
+
+**Dampening is by adjacency, not by message.** The word that says what a number
+means is the one next to it. `page 240` is a page; `whatsapp me on 0300 1234567`
+is a phone number; a message with both has one of each. An earlier version
+looked at a thirty-character window and let a "question 15" three clauses away
+excuse a real number.
+
+`payment_evasion` — "cheaper if we do it directly", "no commission" — is alone
+worth the whole threshold, because nobody types it by accident while teaching.
+
+
+## 30. What a credit pack is actually worth
+
+**Settled.** Cash in, minus the payment provider's cut, minus what the credits
+will cost in tutor pay at the **blended** take rate.
+
+Reporting a pack's margin as its price is how a marketplace convinces itself a
+bonus tier is free. A pack is a promise of tutoring, and the tutoring costs
+whatever the tutor keeps — bonus credits included, which is exactly what makes
+a generous tier expensive.
+
+The tutor's share is read from settled bookings (revenue ÷ GMV) rather than
+from the headline 22/16, because the headline would flatter every row while
+old 15% and 20% sessions are still settling.
+
+On the current seed this puts the $5 first-lesson pack around **6%** and the $25
+Standard around **13%**. The gap is almost entirely the fixed 50c a card costs,
+which a $5 purchase cannot absorb and a $25 one barely notices. That is the
+argument for the local wallets, in one row of a table.
+
+Provider fees are summed per purchase, not per dollar: a fixed 50c across
+twenty $5 packs is $10, not 50c.
+
+
+## 31. When a quiet pair means something
+
+**Settled, and it is a signal rather than a finding.** Three settled sessions,
+then forty-five days of silence, and the student has not booked anyone else
+here in the meantime.
+
+One quiet pair is a student who passed their exam. The number that means
+something is the **ratio per tutor**: eleven quiet against two still active is a
+pattern, and a tutor with a hundred students will always have more quiet pairs
+than one with five.
+
+The "and not booking anyone else" clause is what separates disintermediation
+from ordinary churn — a student who moved to a different tutor here has not
+left, and counting them would make every popular tutor look guilty.
+
+`QUIET_AFTER_SESSIONS` and `QUIET_DAYS` are in `src/db/reports.ts`. Nothing
+acts on the output: it is a table on the moderation page, to be read beside the
+tutor's messages and reviews by somebody who then decides.

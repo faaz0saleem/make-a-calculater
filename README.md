@@ -112,6 +112,7 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm prove:commission` | What commission a booking between two people would carry right now |
 | `pnpm prove:curriculum` | Show the database refusing a class from the wrong board, and a second primary position |
 | `pnpm prove:rates` | Show that a commission change reached no booking that already existed |
+| `pnpm prove:payout-privacy` | Dump `payout_methods` and check nothing usable comes out |
 | `pnpm measure:regions` | Median latency to each candidate media region. **Run it from the market** |
 
 ---
@@ -334,7 +335,7 @@ the engine for 60 minutes rather than being a rule of its own.
 
 ### Commission is retention-based
 
-A tutor pays **20%** the first time a student books them and **15%** every time
+A tutor pays **22%** the first time a student books them and **16%** every time
 after — keeping a student is worth more to us than acquiring one, and the
 pricing says so. The rate turns on one fact: a paid session between those two
 that actually happened (`bookings.completed_at is not null`). A free trial does
@@ -343,8 +344,15 @@ not count, and neither does a session that is booked but has not happened yet.
 `tutor_profiles.commission_bps` is still read, as a **floor**: the effective
 rate is the lower of the tutor's negotiated rate and the retention rate. A rate
 agreed during recruitment is a promise — "you will never pay more than this" —
-and the retention discount stacks on top of it. At the column's default of 2000
-the floor never binds, so it costs nothing for tutors who negotiated nothing.
+and the retention discount stacks on top of it. The column is **nullable**, and
+null means "nothing negotiated": it used to default to 2000, which after the
+rise to 22% would silently have capped every tutor at a rate we no longer
+charge.
+
+The rates have moved twice, so a tutor's history contains 15%, 16%, 20% and 22%
+sessions side by side. `/tutor/earnings` reads each row from the ledger and
+prints the rate it was booked at, because recalculating at today's rate would
+quietly rewrite what somebody was actually paid.
 
 Both numbers are snapshotted onto the booking at creation. A rate change
 tomorrow cannot reach a booking made today, and `e2e/booking.spec.ts` proves it
@@ -512,8 +520,97 @@ Every row of that table has a test in `src/lib/money/outcomes.test.ts`.
 **Prices are snapshotted.** `bookings.price_cents` and `bookings.commission_bps`
 are copied at creation time, so a tutor raising their rate cannot reprice a
 booking that already exists — and neither can a change to the commission rules.
-The commission is retention-based (20% first, 15% after), floored by any rate
+The commission is retention-based (22% first, 16% after), floored by any rate
 negotiated with that tutor; see *Credits and booking* above.
+
+---
+
+
+## Getting paid, and getting caught
+
+### Payouts
+
+A tutor adds an account — a **bank account** (IBAN or account number, with a
+branch code where the local rails want one) or a **mobile wallet** (JazzCash or
+Easypaisa). The second is not a lesser option: for a large share of tutors here
+it is the only account they have, and a bank-only form would mean they cannot be
+paid at all. A `check` constraint enforces which columns belong to which shape.
+
+Every identifying number is **encrypted by the application** — AES-256-GCM,
+keyed from `PAYOUT_ENCRYPTION_KEY`. Disk encryption does not protect against a
+read replica, a backup, or `select *` in a support tool.
+
+> `last4` is the only part of any of it that is ever rendered, to anybody,
+> **including an admin.** Approving a transfer does not require reading the
+> account it goes to, and a screen that can read it is a screen that can leak
+> it. `src/db/payouts.ts` decrypts in exactly one function, `decryptForTransfer`,
+> which nothing renders and nothing returns over HTTP.
+
+`pnpm prove:payout-privacy` dumps the table inside a rolled-back transaction and
+checks four things: nothing we wrote appears in the dump, every column is either
+on the allow-list of readable ones or is ciphertext, nothing a tutor typed is
+account-shaped, and the key still recovers the original.
+
+The threshold is **$100**. Requesting moves the money out of `tutor_available`
+and into `payout_locked` in the same transaction that writes the payout row, so
+two tabs cannot both see $100 and both request it. Then
+`requested → approved → processing → paid` — or `rejected`, with a reason the
+tutor reads and the money back in their available balance. Marking paid takes a
+**bank reference**, which appears in the tutor's own withdrawal history so they
+can match it against their statement. Every decision writes an `admin_audit` row
+inside the transaction that moves the money.
+
+### The admin dashboard
+
+`/admin` leads with the number that is easiest to fool yourself about: **credits
+sold against credits consumed**. Cash taken is not revenue while the tutoring it
+promises has not happened, and the gap is a liability.
+
+Second is **unmatched demand** — every (board, class, subject) a student has
+declared that no verified tutor teaches. It is the recruiting list, and each row
+carries a *near tutors* count: people who teach that subject at the same stage
+under a different board, and may already be able to teach it.
+
+Also on the page: GMV, net revenue, effective take rate, payout liability,
+escrow, trial-to-paid, cancellation rate by side, absorbed connection failures
+against the cap, top subjects and curriculum positions, the card-against-wallet
+split with fees, and **margin per pack** after provider fees and bonus credits —
+costed at the blended take rate read from settled bookings rather than the
+headline rate, which would flatter every row. On the seed that is about 6% for
+the $5 pack against about 13% for the $25 one, and the difference is almost
+entirely the fixed 50c a card costs. All the SQL lives in `src/db/metrics.ts`.
+
+### Contact info: hints and humans, never an instant ban
+
+Messages are masked on write (`src/lib/messaging/masking.ts`). On top of that,
+`scoreContactIntent` estimates whether somebody *meant* to hand over contact
+details — a different question — and returns 0-100 with the reasons behind it.
+
+**It never blocks anything.** A maths tutor typing `question 15 on page 240` or
+`x = 03` mid-lesson must not hit a wall, so the scorer dampens numbers by the
+word next to them, sets the phone-shaped floor at nine digits rather than seven,
+and has a test file whose first block is twelve pieces of ordinary teaching that
+must score exactly zero.
+
+- Above **25**, the composer says what will be hidden, before sending.
+- Above **75**, a row lands in `contact_flags` for a person to read. That is the
+  whole automatic response — the message is already sent and stays sent.
+
+What follows is decided by a person: a **warning** they must acknowledge, then a
+**restriction** on new trial requests and ranking position for 30 days, then
+**human review**. No rung takes away an existing student, because banning a
+tutor with fifteen regulars does not stop them teaching those fifteen — it sends
+them to WhatsApp, which is the leak this is meant to close. Everything is
+appealable, including the warning, and everything is logged.
+
+Alongside it, a signal no single message can give: **pairs that went quiet** —
+three settled sessions, then 45 days of silence with the student booking nobody
+else. Reported per tutor as a ratio, because one quiet pair is a student who
+passed their exam.
+
+Determined evasion still wins. "My name on Instagram is my first name and my
+birth year" defeats all of this and always will; the durable fix is the platform
+being worth staying on.
 
 ---
 
@@ -531,7 +628,9 @@ These come from `SPEC.md` §13 and are not negotiable:
    out of a request body.
 6. One state machine owns `bookings.status`. No scattered status writes.
 7. Credential documents live in a private bucket; payout bank details are
-   encrypted by the application with AES-256-GCM, not just by the disk.
+   encrypted by the application with AES-256-GCM, not just by the disk, and only
+   the last four digits are ever rendered — to anybody, admins included.
+   `pnpm prove:payout-privacy`.
 8. Double-booking is impossible at the database level — a partial unique index
    on `(tutor_id, start_at_utc)` over live statuses, plus a transaction wrapping
    the slot check, the debit and the insert.

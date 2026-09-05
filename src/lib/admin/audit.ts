@@ -35,7 +35,15 @@ export type AuditAction =
   | 'curriculum.board.update'
   | 'curriculum.level.create'
   | 'curriculum.level.retire'
-  | 'curriculum.level.restore';
+  | 'curriculum.level.restore'
+  | 'report.resolve'
+  | 'contact_flag.confirm'
+  | 'contact_flag.dismiss'
+  | 'sanction.warn'
+  | 'sanction.restrict'
+  | 'sanction.review'
+  | 'sanction.appeal.uphold'
+  | 'sanction.appeal.lift';
 
 export type AuditEntry = {
   actorId: string;

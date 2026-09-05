@@ -10,12 +10,21 @@
  * The notice under the box is not decoration. People try to swap numbers here,
  * and being told beforehand that it will be hidden is fairer than watching it
  * vanish after sending.
+ *
+ * The hint above the Send button goes further: it reads the draft as it is
+ * typed and, when it looks like contact details are on their way out, says so
+ * *before* anything is sent. It never disables the button and never changes the
+ * text. Somebody who reads it and sends anyway has made a decision, and that is
+ * a far better thing for a human reviewer to be looking at than a blocked
+ * message and a tutor who cannot finish a sentence. The same scorer runs again
+ * on the server — this copy is a courtesy, not a control.
  */
 
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import { attachmentUrlFor, requestAttachmentUpload } from '@/app/messages/actions';
 import { Button } from '@/components/ui/button';
+import { scoreContactIntent } from '@/lib/messaging/contact-intent';
 import {
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
@@ -46,7 +55,13 @@ export function Composer({
   const [attachments, setAttachments] = useState<Pending[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // Cheap enough to run on every keystroke — it is a handful of regexes over at
+  // most 4000 characters, and debouncing it would only make the hint arrive
+  // after the thing it is about.
+  const hint = useMemo(() => scoreContactIntent(draft).hint, [draft]);
 
   async function onFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -105,8 +120,20 @@ export function Composer({
         rows={3}
         maxLength={MAX_MESSAGE_CHARS}
         placeholder="Write a message…"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
         className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
+
+      {hint ? (
+        <p
+          role="status"
+          data-testid="contact-hint"
+          className="rounded-md bg-secondary px-3 py-2 text-xs"
+        >
+          {hint}
+        </p>
+      ) : null}
 
       {attachments.length > 0 ? (
         <ul className="flex flex-wrap gap-2 text-xs">

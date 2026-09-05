@@ -78,13 +78,23 @@ export type TrialRequestProblem =
   | 'too_many_this_week'
   | 'tutor_full_this_week'
   | 'too_late'
-  | 'not_verified';
+  | 'not_verified'
+  | 'tutor_restricted';
 
 export type TrialRequestFacts = {
   /** The tutor's own settings. */
   offersTrial: boolean;
   verified: boolean;
   maxTrialsPerWeek: number;
+  /**
+   * The tutor is under a live restriction (see `lib/moderation/sanctions.ts`).
+   *
+   * This is the *only* thing a restriction stops. Their existing students book,
+   * message and attend exactly as before — taking those away would push the
+   * relationship off the platform, which is the behaviour the restriction is a
+   * response to in the first place.
+   */
+  tutorRestricted: boolean;
   /** Who is asking. */
   isSelf: boolean;
   /** This pair has had a trial before, ever. */
@@ -108,6 +118,7 @@ const MESSAGES: Record<TrialRequestProblem, string> = {
   tutor_full_this_week: 'This tutor has given out all of their free trials for this week.',
   too_late: `A trial has to be requested more than ${TRIAL_CUTOFF_MINUTES_BEFORE_START / 60} hours before it starts, so the tutor has time to answer.`,
   not_verified: 'This tutor has not completed verification yet.',
+  tutor_restricted: 'This tutor is not taking new trial requests at the moment. You can still book a paid session with them.',
 };
 
 export function trialProblemMessage(problem: TrialRequestProblem): string {
@@ -125,6 +136,7 @@ export function trialRequestProblem(facts: TrialRequestFacts, now: Date): TrialR
   if (facts.isSelf) return 'own_profile';
   if (!facts.verified) return 'not_verified';
   if (!facts.offersTrial) return 'not_offered';
+  if (facts.tutorRestricted) return 'tutor_restricted';
   if (facts.pairHasTrial) return 'already_used';
 
   // A request that would already be expired the moment it was made.

@@ -29,6 +29,7 @@
     "prove:commission": "tsx src/scripts/prove-commission.ts",
     "prove:curriculum": "tsx src/scripts/prove-curriculum.ts",
     "prove:rates": "tsx src/scripts/prove-rates-frozen.ts",
+    "prove:payout-privacy": "tsx src/scripts/prove-payout-privacy.ts",
     "measure:regions": "tsx src/scripts/measure-regions.ts"
   },
   "dependencies": {

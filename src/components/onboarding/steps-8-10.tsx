@@ -12,6 +12,7 @@ import {
   submitProfile,
 } from '@/app/tutor/onboarding/actions';
 import { Badge } from '@/components/ui/badge';
+import { PayoutMethodForm, type SavedMethod } from '@/components/payouts/method-form';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Field, Select } from '@/components/ui/select';
@@ -182,71 +183,23 @@ export function PayoutStep({
   method,
   country,
 }: {
-  method: { accountTitle: string; bankName: string; country: string; last4: string } | null;
+  method: SavedMethod | null;
   country: string | null;
 }) {
   return (
-    <form action={savePayoutMethod} className="flex flex-col gap-5">
-      <p className="text-sm text-muted-foreground">
-        Optional for now — you can add this later, and you will need it before your first payout at{' '}
-        {formatCents(PAYOUT_THRESHOLD_CENTS)}. Your account number is encrypted before it is stored; only the
-        last four digits are ever shown back to you.
-      </p>
-
-      {method ? (
-        <div className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
-          <div>
-            <p className="font-medium">{method.accountTitle}</p>
-            <p className="text-muted-foreground">
-              {method.bankName} · {method.country} · ····{method.last4}
-            </p>
-          </div>
-          <Badge variant="secondary">On file</Badge>
-        </div>
-      ) : null}
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Account title" htmlFor="accountTitle" hint="Exactly as your bank has it.">
-          <Input id="accountTitle" name="accountTitle" defaultValue={method?.accountTitle ?? ''} required />
-        </Field>
-        <Field label="Bank name" htmlFor="bankName">
-          <Input id="bankName" name="bankName" defaultValue={method?.bankName ?? ''} required />
-        </Field>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Bank country" htmlFor="country" hint="Two-letter code.">
-          <Input
-            id="country"
-            name="country"
-            defaultValue={method?.country ?? country ?? ''}
-            required
-            minLength={2}
-            maxLength={2}
-            className="uppercase"
-          />
-        </Field>
-        <Field label="IBAN or account number" htmlFor="accountNumber">
-          <Input id="accountNumber" name="accountNumber" required minLength={6} maxLength={64} />
-        </Field>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="SWIFT / BIC" htmlFor="swift" hint="Needed for international transfers.">
-          <Input id="swift" name="swift" maxLength={32} />
-        </Field>
-        <Field label="CNIC" htmlFor="cnic" hint="Optional, Pakistan-domiciled tutors only.">
-          <Input id="cnic" name="cnic" maxLength={32} />
-        </Field>
-      </div>
-
-      <div className="flex items-center gap-3">
-        <Button type="submit">Save and continue</Button>
-        <Link href="/tutor/onboarding/review" className="text-sm text-muted-foreground underline underline-offset-4">
-          Skip for now
-        </Link>
-      </div>
-    </form>
+    <PayoutMethodForm
+      action={savePayoutMethod}
+      method={method}
+      country={country}
+      submitLabel="Save and continue"
+    >
+      <Link
+        href="/tutor/onboarding/review"
+        className="text-sm text-muted-foreground underline underline-offset-4"
+      >
+        Skip for now
+      </Link>
+    </PayoutMethodForm>
   );
 }
 
