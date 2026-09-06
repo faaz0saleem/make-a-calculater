@@ -17,6 +17,8 @@
  * between one nightly run and the next.
  */
 
+import { reliabilityPenalty } from '@/lib/tutors/reliability';
+
 /** Weights, in basis points, summing to 10000. */
 export const WEIGHTS = {
   bayesianRating: 3_000,
@@ -87,6 +89,14 @@ export type RankingInputs = {
   /** From the availability port; unknown until Phase 3. */
   availabilityDensityBps: number | null;
   /**
+   * Sessions this tutor did not attend (SPEC.md §2, §7).
+   *
+   * Costs more than any other single term here, deliberately: turning up is
+   * the service, and a feed that ranked an absent tutor as if nothing had
+   * happened would be selling something it cannot deliver.
+   */
+  strikes?: number;
+  /**
    * Under a live restriction (`lib/moderation/sanctions.ts`).
    *
    * They stay in the feed, stay searchable, and stay bookable — a restriction
@@ -108,6 +118,7 @@ export type RankingBreakdown = {
   responseSpeedBps: number;
   recencyBps: number;
   explorationBoost: number;
+  reliabilityPenalty: number;
   restricted: boolean;
 };
 
@@ -218,7 +229,7 @@ export function computeRanking(inputs: RankingInputs, now: Date): RankingBreakdo
     response * WEIGHTS.responseSpeed +
     recency * WEIGHTS.recency;
 
-  const base = Math.round(weighted / 10_000) + boost;
+  const base = Math.round(weighted / 10_000) + boost - reliabilityPenalty(inputs.strikes ?? 0);
 
   return {
     tutorId: inputs.tutorId,
@@ -235,6 +246,7 @@ export function computeRanking(inputs: RankingInputs, now: Date): RankingBreakdo
     responseSpeedBps: response,
     recencyBps: recency,
     explorationBoost: boost,
+    reliabilityPenalty: reliabilityPenalty(inputs.strikes ?? 0),
     restricted: inputs.restricted === true,
   };
 }

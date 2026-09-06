@@ -18,6 +18,8 @@ import {
 import { BookingActions, RescheduleInbox } from '@/components/bookings/booking-actions';
 import { ReviewPrompt } from '@/components/reviews/review-prompt';
 import { StandingSlots } from '@/components/series/standing-slots';
+import { AddToCalendar } from '@/components/sessions/add-to-calendar';
+import { TimezoneDrift } from '@/components/sessions/timezone-drift';
 import { JoinLink } from '@/components/sessions/join-link';
 import { OutgoingTrials } from '@/components/trials/outgoing-trials';
 import { TrialConversion, type ConversionSlot } from '@/components/trials/trial-conversion';
@@ -33,6 +35,7 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { db } from '@/db/client';
+import { getEnv } from '@/lib/env';
 import { seriesFor } from '@/db/series';
 import { stopSeries } from '@/app/tutors/[tutorId]/series/actions';
 import { bookings, studentWallets, users } from '@/db/schema';
@@ -88,6 +91,7 @@ export default async function DashboardPage({
   const tutorName = { name: users.name };
 
   const standing = await seriesFor(user.id, 'student', db, now);
+  const baseUrl = getEnv().AUTH_URL ?? '';
 
   /**
    * The moment to offer a weekly slot (SPEC.md §5).
@@ -376,6 +380,11 @@ export default async function DashboardPage({
           </Card>
         ) : null}
 
+        <TimezoneDrift
+          profileTimezone={user.timezone}
+          nextSessionIso={upcoming[0]?.startAtUtc.toISOString() ?? null}
+        />
+
         <StandingSlots
           series={standing}
           viewer="student"
@@ -435,6 +444,14 @@ export default async function DashboardPage({
                         <p className="text-muted-foreground">
                           {formatInTimeZone(booking.startAtUtc, user.timezone)} · {booking.durationMinutes} min
                         </p>
+                        <AddToCalendar
+                          bookingId={booking.id}
+                          title={`${booking.isTrial ? 'Trial lesson' : 'Lesson'} with ${booking.name}`}
+                          description="Join from the session page a few minutes before it starts."
+                          startUtc={booking.startAtUtc}
+                          endUtc={new Date(booking.startAtUtc.getTime() + booking.durationMinutes * 60_000)}
+                          baseUrl={baseUrl}
+                        />
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
                         {booking.isTrial ? <Badge variant="success">Free trial</Badge> : null}

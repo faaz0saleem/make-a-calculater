@@ -303,6 +303,15 @@ describe('computeRanking', () => {
     expect(computeRanking(inputs({ ...fresh, restricted: true }), NOW).explorationBoost).toBe(0);
   });
 
+  it('drops a tutor who does not turn up below one who does', () => {
+    const reliable = computeRanking(inputs({ ratingSum: 22, reviewCount: 5 }), NOW);
+    const absent = computeRanking(inputs({ ratingSum: 24, reviewCount: 5, strikes: 2 }), NOW);
+
+    // Better rated, and still below — turning up is the service.
+    expect(absent.score).toBeLessThan(reliable.score);
+    expect(absent.reliabilityPenalty).toBeGreaterThan(0);
+  });
+
   it('returns every term, so admin can see why a tutor ranks where they do', () => {
     const breakdown = computeRanking(inputs({ ratingSum: 20, reviewCount: 5 }), NOW);
     expect(Object.keys(breakdown).sort()).toEqual(
@@ -313,6 +322,7 @@ describe('computeRanking', () => {
         'completionRateBps',
         'explorationBoost',
         'recencyBps',
+        'reliabilityPenalty',
         'responseSpeedBps',
         'restricted',
         'score',

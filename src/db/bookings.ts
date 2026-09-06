@@ -27,6 +27,7 @@ import { moveBookingStatus } from './sessions';
 import { bookings, rescheduleRequests, slotHolds, studentWallets, tutorProfiles, users } from './schema';
 import { DatabaseAvailability } from '@/lib/availability/database';
 import { commissionBpsFor } from '@/lib/money/commission';
+import { hasInstantBooking } from '@/lib/tutors/reliability';
 import { bookingEscrowEntries } from '@/lib/money/ledger';
 import { priceForBooking, type BookableDuration } from '@/lib/money/pricing';
 import { holdExpiresAt } from '@/lib/bookings/holds';
@@ -47,7 +48,14 @@ export type BookingFailure =
   | 'bad_duration';
 
 export type CreateBookingResult =
-  | { ok: true; bookingId: string; priceCents: number; commissionBps: number }
+  | {
+      ok: true;
+      bookingId: string;
+      priceCents: number;
+      commissionBps: number;
+      /** True when the tutor has lost instant booking and must accept first. */
+      needsAcceptance: boolean;
+    }
   | { ok: false; problem: BookingFailure; shortfallCents?: number };
 
 /**
@@ -138,6 +146,7 @@ export async function createBooking(
             promoStartsAt: tutorProfiles.promoStartsAt,
             promoEndsAt: tutorProfiles.promoEndsAt,
             negotiatedCommissionBps: tutorProfiles.commissionBps,
+            strikes: tutorProfiles.strikes,
             timezone: users.timezone,
             suspendedAt: users.suspendedAt,
           })
@@ -226,6 +235,17 @@ export async function createBooking(
           tutor.negotiatedCommissionBps,
         );
 
+        /**
+         * A tutor who has missed sessions stops confirming automatically
+         * (SPEC.md §2, §7).
+         *
+         * The credits still move into escrow — the slot is genuinely taken and
+         * the student has genuinely committed — but the hour is not promised
+         * until the tutor says so. If they never do, `expireUnacceptedBookings`
+         * gives the money back in full.
+         */
+        const instant = hasInstantBooking(tutor.strikes ?? 0);
+
         const [created] = await tx
           .insert(bookings)
           .values({
@@ -235,7 +255,7 @@ export async function createBooking(
             isTrial: false,
             startAtUtc: input.startAtUtc,
             durationMinutes: input.durationMinutes,
-            status: 'confirmed',
+            status: instant ? 'confirmed' : 'pending_tutor',
             priceCents,
             commissionBps,
             studentTz: student.timezone,
@@ -266,7 +286,7 @@ export async function createBooking(
             ),
           );
 
-        return { ok: true as const, bookingId, priceCents, commissionBps };
+        return { ok: true as const, bookingId, priceCents, commissionBps, needsAcceptance: !instant };
       },
       { isolationLevel: 'serializable' },
     );
@@ -293,6 +313,80 @@ export async function setBookingNote(
     .update(bookings)
     .set({ topicNote: note.slice(0, 2_000) || null, updatedAt: new Date() })
     .where(and(eq(bookings.id, bookingId), eq(bookings.studentId, studentId)));
+}
+
+/**
+ * Say yes to a booking that is waiting on you.
+ *
+ * Scoped to the tutor on the row inside the update, and routed through the
+ * state machine, so `pending_tutor -> confirmed` is the only move it can make.
+ * No money changes: the credits went into escrow when the student committed.
+ */
+export async function acceptPendingBooking(
+  bookingId: string,
+  tutorId: string,
+  database: Database = defaultDb,
+): Promise<{ ok: boolean; reason?: string }> {
+  const [booking] = await database
+    .select({ id: bookings.id, status: bookings.status })
+    .from(bookings)
+    .where(and(eq(bookings.id, bookingId), eq(bookings.tutorId, tutorId)))
+    .limit(1);
+
+  if (!booking) return { ok: false, reason: 'That booking could not be found.' };
+  if (booking.status !== 'pending_tutor') {
+    return { ok: false, reason: 'That booking is no longer waiting for an answer.' };
+  }
+
+  await moveBookingStatus(bookingId, 'confirmed', {}, database);
+  return { ok: true };
+}
+
+/**
+ * Paid bookings nobody accepted (SPEC.md §2, §7).
+ *
+ * Only reachable for a tutor who has lost instant booking. Their credits went
+ * into escrow when the student committed, so leaving one of these to rot would
+ * hold somebody's money against an hour that is never going to happen.
+ *
+ * Refunded through the ordinary cancellation path, at the tutor's door: this is
+ * the tutor failing to answer, so the student pays no cancellation cost.
+ * Idempotent — a booking already out of `pending_tutor` is skipped.
+ */
+export async function expireUnacceptedBookings(
+  now = new Date(),
+  database: Database = defaultDb,
+): Promise<{ expired: number; refundedCents: number }> {
+  const stale = await database
+    .select({ id: bookings.id, tutorId: bookings.tutorId })
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.status, 'pending_tutor'),
+        eq(bookings.isTrial, false),
+        // The deadline is the session itself: an unanswered booking stops being
+        // answerable the moment the hour arrives.
+        sql`${bookings.startAtUtc} <= ${now.toISOString()}::timestamptz`,
+      ),
+    );
+
+  let expired = 0;
+  let refundedCents = 0;
+
+  for (const booking of stale) {
+    const result = await cancelBooking(
+      { bookingId: booking.id, cancelledById: booking.tutorId },
+      now,
+      database,
+    );
+
+    if (result.ok) {
+      expired += 1;
+      refundedCents += result.refundCents;
+    }
+  }
+
+  return { expired, refundedCents };
 }
 
 // ---------------------------------------------------------------------------

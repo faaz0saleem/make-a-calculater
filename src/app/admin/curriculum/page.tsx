@@ -12,7 +12,14 @@
 
 import { asc, sql } from 'drizzle-orm';
 
-import { addBoard, addLevel, saveBoard, toggleLevel } from '@/app/admin/curriculum/actions';
+import {
+  addBoard,
+  addLevel,
+  addTopic,
+  saveBoard,
+  toggleLevel,
+  toggleTopic,
+} from '@/app/admin/curriculum/actions';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,7 +27,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Field, Select } from '@/components/ui/select';
 import { db } from '@/db/client';
-import { boardCountries, boards, curriculumLevels } from '@/db/schema';
+import { boardCountries, boards, curriculumLevels, subjects } from '@/db/schema';
 import { requireRole } from '@/lib/auth/guards';
 import { CURRICULUM_STAGES, STAGE_LABELS } from '@/lib/curriculum/boards';
 
@@ -35,7 +42,7 @@ export default async function AdminCurriculumPage({
   await requireRole('admin');
   const query = await searchParams;
 
-  const [boardRows, levelRows, countryRows, usage] = await Promise.all([
+  const [boardRows, levelRows, countryRows, usage, subjectRows, topicRows] = await Promise.all([
     db.select().from(boards).orderBy(asc(boards.sortOrder), asc(boards.name)),
     db
       .select()
@@ -51,7 +58,27 @@ export default async function AdminCurriculumPage({
       ) declarations
       group by board_id
     `) as unknown as Promise<{ board_id: string; tutors: number }[]>,
+    db.select({ id: subjects.id, name: subjects.name }).from(subjects).orderBy(asc(subjects.name)),
+    db.execute(sql`
+      select t.id::text, t.board_id, t.level_id, t.subject_id::text, t.name, t.reference,
+             t.sort_order, t.is_active, s.name as subject_name,
+             (select count(*) from booking_topics bt where bt.topic_id = t.id)::int as used
+      from topics t join subjects s on s.id = t.subject_id
+      order by t.board_id, t.level_id, s.name, t.sort_order
+    `),
   ]);
+
+  const topics = (topicRows as unknown as Record<string, unknown>[]).map((row) => ({
+    id: String(row.id),
+    boardId: String(row.board_id),
+    levelId: String(row.level_id),
+    subjectId: String(row.subject_id),
+    subjectName: String(row.subject_name),
+    name: String(row.name),
+    reference: (row.reference as string | null) ?? null,
+    isActive: row.is_active === true,
+    used: Number(row.used ?? 0),
+  }));
 
   const levelsByBoard = new Map<string, typeof levelRows>();
   for (const level of levelRows) {
@@ -114,6 +141,7 @@ export default async function AdminCurriculumPage({
 
         {boardRows.map((board) => {
           const levels = levelsByBoard.get(board.id) ?? [];
+          const levelNames = new Map(levels.map((level) => [level.id, level.name]));
           const countries = countriesByBoard.get(board.id) ?? [];
           const declaredCount = declared.get(board.id) ?? 0;
 
@@ -266,6 +294,90 @@ export default async function AdminCurriculumPage({
 
                     <Button type="submit" size="sm" className="min-h-11">
                       Add class
+                    </Button>
+                  </form>
+                </div>
+
+                {/* ------------------------------------------------------- */}
+                {/* Chapters                                                 */}
+                {/* ------------------------------------------------------- */}
+                <div className="mt-6 border-t border-border pt-4">
+                  <h3 className="text-sm font-semibold">Chapters</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    What a session can be booked for. Retiring one takes it out of every picker and
+                    leaves the sessions that already covered it alone.
+                  </p>
+
+                  {topics.filter((topic) => topic.boardId === board.id).length === 0 ? (
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      None yet for this board.
+                    </p>
+                  ) : (
+                    <ul className="mt-2 flex flex-col divide-y divide-border text-sm">
+                      {topics
+                        .filter((topic) => topic.boardId === board.id)
+                        .map((topic) => (
+                          <li
+                            key={topic.id}
+                            className="flex flex-wrap items-center justify-between gap-2 py-2"
+                            data-testid="admin-topic"
+                          >
+                            <span className={topic.isActive ? '' : 'text-muted-foreground line-through'}>
+                              {topic.reference ? (
+                                <span className="text-muted-foreground">{topic.reference} </span>
+                              ) : null}
+                              {topic.name}
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                {levelNames.get(topic.levelId) ?? topic.levelId} · {topic.subjectName}
+                                {topic.used > 0 ? ` · ${topic.used} sessions` : ''}
+                              </span>
+                            </span>
+
+                            <form action={toggleTopic}>
+                              <input type="hidden" name="topicId" value={topic.id} />
+                              {topic.isActive ? null : <input type="hidden" name="active" value="on" />}
+                              <Button type="submit" size="sm" variant="outline">
+                                {topic.isActive ? 'Retire' : 'Restore'}
+                              </Button>
+                            </form>
+                          </li>
+                        ))}
+                    </ul>
+                  )}
+
+                  <form action={addTopic} className="mt-3 flex flex-wrap items-end gap-3">
+                    <input type="hidden" name="boardId" value={board.id} />
+
+                    <Field label="Class" htmlFor={`${board.id}-topic-level`}>
+                      <Select id={`${board.id}-topic-level`} name="levelId" required>
+                        {levels.map((level) => (
+                          <option key={level.id} value={level.id}>
+                            {level.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+
+                    <Field label="Subject" htmlFor={`${board.id}-topic-subject`}>
+                      <Select id={`${board.id}-topic-subject`} name="subjectId" required>
+                        {subjectRows.map((subject) => (
+                          <option key={subject.id} value={subject.id}>
+                            {subject.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+
+                    <Field label="Chapter" htmlFor={`${board.id}-topic-name`}>
+                      <Input id={`${board.id}-topic-name`} name="name" required maxLength={160} />
+                    </Field>
+
+                    <Field label="Number" htmlFor={`${board.id}-topic-ref`} hint="Optional.">
+                      <Input id={`${board.id}-topic-ref`} name="reference" maxLength={32} />
+                    </Field>
+
+                    <Button type="submit" size="sm" className="min-h-11" data-testid="add-topic">
+                      Add chapter
                     </Button>
                   </form>
                 </div>

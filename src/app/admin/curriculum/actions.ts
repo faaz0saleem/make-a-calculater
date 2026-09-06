@@ -20,7 +20,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 
 import { db } from '@/db/client';
-import { boardCountries, boards, curriculumLevels } from '@/db/schema';
+import { boardCountries, boards, curriculumLevels, topics } from '@/db/schema';
 import { requestIp, writeAudit } from '@/lib/admin/audit';
 import { requireRole } from '@/lib/auth/guards';
 import { CURRICULUM_STAGES, type CurriculumStage } from '@/lib/curriculum/boards';
@@ -215,6 +215,103 @@ export async function toggleLevel(formData: FormData): Promise<void> {
       before,
       after: { id, isActive: !before.isActive },
       reason: 'curriculum edit',
+      ip: await requestIp(),
+    });
+  });
+
+  done();
+}
+
+
+// ---------------------------------------------------------------------------
+// Chapters
+// ---------------------------------------------------------------------------
+
+/**
+ * Add a chapter to one (board, class, subject).
+ *
+ * The composite foreign key means the database refuses a chapter under a class
+ * that does not belong to the board, whatever this function believes — so the
+ * check here is about telling somebody why, not about safety.
+ */
+export async function addTopic(formData: FormData): Promise<void> {
+  const admin = await requireRole('admin');
+
+  const boardId = String(formData.get('boardId') ?? '').trim();
+  const levelId = String(formData.get('levelId') ?? '').trim();
+  const subjectId = String(formData.get('subjectId') ?? '').trim();
+  const name = String(formData.get('name') ?? '').trim();
+  const reference = String(formData.get('reference') ?? '').trim() || null;
+
+  if (!boardId || !levelId || !subjectId) fail('Pick a board, a class and a subject.');
+  if (!name) fail('Give the chapter a name.');
+
+  await db.transaction(async (tx) => {
+    const [{ next }] = (await tx.execute(sql`
+      select coalesce(max(sort_order), -1) + 1 as next from topics
+      where board_id = ${boardId} and level_id = ${levelId} and subject_id = ${subjectId}::uuid
+    `)) as unknown as [{ next: number }];
+
+    const rows = await tx
+      .insert(topics)
+      .values({
+        boardId,
+        levelId,
+        subjectId,
+        name: name.slice(0, 160),
+        reference: reference?.slice(0, 32) ?? null,
+        sortOrder: next,
+      })
+      .onConflictDoNothing()
+      .returning({ id: topics.id });
+
+    if (!rows[0]) return;
+
+    await writeAudit(tx, {
+      actorId: admin.id,
+      action: 'curriculum.topic.create',
+      targetType: 'topic',
+      targetId: rows[0].id,
+      after: { boardId, levelId, subjectId, name, reference },
+      ip: await requestIp(),
+    });
+  });
+
+  done();
+}
+
+/**
+ * Retire or restore a chapter.
+ *
+ * Never a delete: a chapter a tutor has taught and a student has covered is a
+ * row in somebody's progress, and removing it would rewrite what happened.
+ * `is_active` takes it out of every picker and leaves the history alone.
+ */
+export async function toggleTopic(formData: FormData): Promise<void> {
+  const admin = await requireRole('admin');
+
+  const topicId = String(formData.get('topicId') ?? '').trim();
+  const active = String(formData.get('active') ?? '') === 'on';
+  if (!topicId) fail('That chapter could not be found.');
+
+  await db.transaction(async (tx) => {
+    const [before] = await tx
+      .select({ id: topics.id, name: topics.name, isActive: topics.isActive })
+      .from(topics)
+      .where(eq(topics.id, topicId))
+      .limit(1);
+
+    if (!before) return;
+
+    await tx.update(topics).set({ isActive: active }).where(eq(topics.id, topicId));
+
+    await writeAudit(tx, {
+      actorId: admin.id,
+      action: active ? 'curriculum.topic.restore' : 'curriculum.topic.retire',
+      targetType: 'topic',
+      targetId: topicId,
+      before: { isActive: before.isActive },
+      after: { isActive: active, name: before.name },
       ip: await requestIp(),
     });
   });

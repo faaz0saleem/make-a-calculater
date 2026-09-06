@@ -26,6 +26,7 @@
     "rank": "tsx src/scripts/rank-tutors.ts",
     "settle": "tsx src/scripts/settle.ts",
     "series": "tsx src/scripts/series.ts",
+    "reminders": "tsx src/scripts/reminders.ts",
     "prove:booking": "tsx src/scripts/prove-no-double-booking.ts",
     "prove:commission": "tsx src/scripts/prove-commission.ts",
     "prove:curriculum": "tsx src/scripts/prove-curriculum.ts",
