@@ -21,6 +21,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 
 import { appendLedger } from './ledger';
 import { db as defaultDb } from './client';
+import { emailPayoutStatus } from './email-events';
 import type { DbLike } from './ledger';
 import { payoutMethods, payouts, tutorProfiles, users } from './schema';
 import { writeAudit, type AuditAction } from '@/lib/admin/audit';
@@ -230,7 +231,16 @@ export async function requestPayout(
     return { ok: true, payoutId, amountCents };
   };
 
-  return 'transaction' in database ? database.transaction((tx) => run(tx as DbLike)) : run(database);
+  const result = await ('transaction' in database
+    ? database.transaction((tx) => run(tx as DbLike))
+    : run(database));
+
+  // The request itself is worth an email: it locks money, and a tutor who does
+  // not remember requesting it should find out now rather than when the balance
+  // looks wrong.
+  if (result.ok) await emailPayoutStatus({ payoutId: result.payoutId, status: 'requested' }, database);
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +367,18 @@ export async function decidePayout(
     return { ok: true, status: decision.to };
   };
 
-  return 'transaction' in database ? database.transaction((tx) => run(tx as DbLike)) : run(database);
+  const result = await ('transaction' in database
+    ? database.transaction((tx) => run(tx as DbLike))
+    : run(database));
+
+  // Outside the transaction, and only for the states a tutor is waiting to hear
+  // about. `processing` is an internal step, and telling somebody their money is
+  // "processing" is how they learn to ignore the messages that matter.
+  if (result.ok && (decision.to === 'approved' || decision.to === 'paid')) {
+    await emailPayoutStatus({ payoutId, status: decision.to }, database);
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import { and, count, desc, eq, gt, ne, sql } from 'drizzle-orm';
 import { appendLedger } from './ledger';
 import { db as defaultDb, type Database } from './client';
 import type { DbLike } from './ledger';
+import { emailBookingCancelled, emailBookingConfirmed } from './email-events';
 import { moveBookingStatus } from './sessions';
 import { bookings, rescheduleRequests, slotHolds, studentWallets, tutorProfiles, users } from './schema';
 import { DatabaseAvailability } from '@/lib/availability/database';
@@ -134,7 +135,7 @@ export async function createBooking(
   }
 
   try {
-    return await database.transaction(
+    const result: CreateBookingResult = await database.transaction(
       async (tx) => {
         const [tutor] = await tx
           .select({
@@ -290,6 +291,14 @@ export async function createBooking(
       },
       { isolationLevel: 'serializable' },
     );
+
+    // Outside the transaction on purpose. The booking is the thing that had to
+    // be atomic; queueing a receipt inside a serializable transaction would add
+    // one more chance to lose the race and roll back a lesson over an email.
+    // A booking waiting for the tutor gets its receipt when they accept.
+    if (result.ok && !result.needsAcceptance) await emailBookingConfirmed(result.bookingId, database);
+
+    return result;
   } catch (error) {
     if (isRaceLoss(error)) return { ok: false, problem: 'slot_taken' };
     throw error;
@@ -339,6 +348,11 @@ export async function acceptPendingBooking(
   }
 
   await moveBookingStatus(bookingId, 'confirmed', {}, database);
+
+  // Now it is real. The student has been holding a paid booking nobody had
+  // agreed to, so this is the message they have been waiting for.
+  await emailBookingConfirmed(bookingId, database);
+
   return { ok: true };
 }
 
@@ -955,6 +969,18 @@ export async function cancelBooking(
         .where(eq(tutorProfiles.userId, booking.tutorId));
     }
   });
+
+  await emailBookingCancelled(
+    {
+      bookingId: booking.id,
+      cancelledBy: by,
+      refundCents: outcome.refundCents,
+      // What the other side kept. The template never recomputes a tier — it is
+      // handed the numbers the ledger actually moved.
+      retainedCents: booking.priceCents - outcome.refundCents,
+    },
+    database,
+  );
 
   return { ok: true, refundCents: outcome.refundCents };
 }

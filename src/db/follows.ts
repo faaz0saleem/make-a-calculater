@@ -13,6 +13,7 @@ import { and, count, desc, eq } from 'drizzle-orm';
 
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
+import { emailFollowedTutorSlots } from './email-events';
 import { notifyMany } from './notifications';
 import { follows, tutorProfiles, users } from './schema';
 
@@ -121,7 +122,7 @@ export async function notifyFollowersOfNewAvailability(
 
   const dayKey = now.toISOString().slice(0, 10);
 
-  return notifyMany(
+  const told = await notifyMany(
     followers.map((follower) => ({
       userId: follower.studentId,
       kind: 'new_availability' as const,
@@ -132,4 +133,18 @@ export async function notifyFollowersOfNewAvailability(
     })),
     database,
   );
+
+  // Keyed by the same day as the bell, so a tutor saving their calendar four
+  // times before breakfast is one email as well as one notification.
+  await emailFollowedTutorSlots(
+    {
+      followerIds: followers.map((follower) => follower.studentId),
+      tutorId,
+      tutorName: tutor.name ?? 'A tutor you follow',
+      day: dayKey,
+    },
+    database,
+  );
+
+  return told;
 }

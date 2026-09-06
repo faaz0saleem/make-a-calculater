@@ -1,0 +1,12 @@
+{
+  // Scripts and cron jobs run through tsx (esbuild), which — unlike the Next
+  // compiler — needs to be told how to transform JSX. The app keeps
+  // `"jsx": "preserve"` because Next does that itself; without this override a
+  // script that renders an email template fails at runtime with
+  // "React is not defined", which is the sort of thing that is only discovered
+  // by the job that was supposed to send the reminder.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}

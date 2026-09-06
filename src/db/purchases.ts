@@ -20,6 +20,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { appendLedger } from './ledger';
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
+import { emailCreditsPurchased } from './email-events';
 import { creditPacks, creditPurchases, studentWallets, users } from './schema';
 import { creditPurchaseEntries } from '@/lib/money/ledger';
 import { CREDIT_PACKS, type CreditPack } from '@/lib/money/packs';
@@ -258,7 +259,7 @@ export async function applyPaymentEvent(
     return { applied: false, reason: 'amount_mismatch' };
   }
 
-  return database.transaction(async (tx) => {
+  const outcome = await database.transaction(async (tx) => {
     const result = await appendLedger(
       tx,
       creditPurchaseEntries({
@@ -285,6 +286,30 @@ export async function applyPaymentEvent(
 
     return { applied: true, reason: 'credited' as const, creditsCents: purchase.creditsCents };
   });
+
+  // The receipt goes out only on the delivery that actually credited. A webhook
+  // arriving three times must not send three receipts, and the replay branch
+  // above is what tells the difference.
+  if (outcome.applied && outcome.reason === 'credited') {
+    const [wallet] = await database
+      .select({ creditsCents: studentWallets.creditsCents })
+      .from(studentWallets)
+      .where(eq(studentWallets.userId, purchase.userId))
+      .limit(1);
+
+    await emailCreditsPurchased(
+      {
+        userId: purchase.userId,
+        purchaseId: purchase.id,
+        paidCents: purchase.paidCents,
+        addedCents: purchase.creditsCents,
+        balanceCents: wallet?.creditsCents ?? purchase.creditsCents,
+      },
+      database,
+    );
+  }
+
+  return outcome;
 }
 
 export type PurchaseRow = {

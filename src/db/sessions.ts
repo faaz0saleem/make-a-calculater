@@ -8,6 +8,7 @@
 import { and, asc, eq, inArray, lte, sql } from 'drizzle-orm';
 
 import { db as defaultDb } from './client';
+import { emailSessionCompleted } from './email-events';
 import type { DbLike } from './ledger';
 import { bookings, sessionEvents } from './schema';
 import { transitionBooking, type BookingStatus } from '@/lib/bookings/status';
@@ -184,6 +185,18 @@ export async function completeIfAttended(
   if (resolution !== 'completed') return false;
 
   await moveBookingStatus(booking.id, 'completed', { completedAt: now }, database);
+
+  // The review ask and the deadline for saying it went wrong, in one message.
+  // It expires with the dispute window: past that, the email's own call to
+  // action no longer works and sending it would be an invitation to a dead end.
+  await emailSessionCompleted(
+    {
+      bookingId: booking.id,
+      disputeDeadline: new Date(now.getTime() + DISPUTE_WINDOW_HOURS * 3_600_000),
+    },
+    database,
+  );
+
   return true;
 }
 

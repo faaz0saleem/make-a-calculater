@@ -84,11 +84,18 @@ import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
 import { scoreContactIntent, shouldQueueForReview } from '@/lib/messaging/contact-intent';
 import { maskContactInfo } from '@/lib/messaging/masking';
 import { methodsForCountry } from '@/lib/payments/catalogue';
+import { drainEmailQueue } from './email-queue';
+import {
+  emailBookingConfirmed,
+  emailCreditsPurchased,
+  emailReminder,
+} from './email-events';
 import { assignHomework, markHomework, submitHomework } from './homework';
 import { createSeries, endSeries, runSeriesJobs } from './series';
 import { dateInZone } from '@/lib/series/occurrences';
 import { DatabaseAvailability } from '@/lib/availability/database';
 import { TOPIC_SEEDS } from '@/lib/curriculum/topics';
+import { MockEmailProvider, setEmailProvider } from '@/lib/email';
 import { fileReport, recordContactFlag } from './reports';
 import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
 import {
@@ -2310,6 +2317,113 @@ async function seedBookingTopics(now: Date): Promise<{ attached: number; covered
 }
 
 /**
+ * Email history, including the failures.
+ *
+ * The queue is drained with the mock transport, so nothing leaves the machine.
+ * Two rows are then made to fail permanently, because the admin alerts view and
+ * the dead-letter list are exactly the screens that look fine when they are
+ * empty and are useless the first time they are not — and the first time they
+ * are not should not be in production.
+ */
+async function seedEmail(now: Date): Promise<{ queued: number; sent: number; dead: number }> {
+  const upcoming = (await db.execute(sql`
+    select id::text, student_id::text, tutor_id::text
+    from bookings
+    where status = 'confirmed' and start_at_utc > ${now.toISOString()}::timestamptz
+    order by start_at_utc
+    limit 8
+  `)) as unknown as { id: string; student_id: string; tutor_id: string }[];
+
+  let queued = 0;
+
+  for (const [index, booking] of upcoming.entries()) {
+    await emailBookingConfirmed(booking.id);
+    queued += 2;
+
+    // A day-before reminder for half of them, so the outbox shows both the
+    // transactional and the optional half of the taxonomy.
+    if (index % 2 === 0) {
+      await emailReminder(
+        { bookingId: booking.id, audience: 'student', slot: 'day', key: `seed:${booking.id}:day` },
+        db,
+      );
+      queued += 1;
+    }
+  }
+
+  const purchases = (await db.execute(sql`
+    select p.id::text, p.user_id::text, p.paid_cents, p.credits_cents, w.credits_cents as balance
+    from credit_purchases p
+    join student_wallets w on w.user_id = p.user_id
+    where p.status = 'paid'
+    order by p.created_at desc
+    limit 4
+  `)) as unknown as {
+    id: string;
+    user_id: string;
+    paid_cents: number;
+    credits_cents: number;
+    balance: number;
+  }[];
+
+  for (const purchase of purchases) {
+    await emailCreditsPurchased({
+      userId: purchase.user_id,
+      purchaseId: purchase.id,
+      paidCents: Number(purchase.paid_cents),
+      addedCents: Number(purchase.credits_cents),
+      balanceCents: Number(purchase.balance),
+    });
+    queued += 1;
+  }
+
+  // The wall clock, not the seed's frozen `now`: rows are queued with the
+  // database's `now()`, which is a few minutes after the seed started, and a
+  // drain in the past finds nothing due.
+  const drained = await drainEmailQueue(new Date(), 200, db);
+
+  // Two that will never send, with the shape a real bounce has.
+  const provider = new MockEmailProvider();
+  provider.failWith = { retryable: false, error: 'resend 422: recipient address rejected' };
+  setEmailProvider(provider);
+
+  const doomed = (await db.execute(sql`
+    select id::text from email_deliveries where status = 'sent' order by created_at limit 2
+  `)) as unknown as { id: string }[];
+
+  if (doomed.length === 0) {
+    setEmailProvider(null);
+    return { queued, sent: drained.sent, dead: 0 };
+  }
+
+  await db.execute(sql`
+    update email_deliveries
+    -- A minute in the past rather than exactly now(): the drain compares
+    -- against a JavaScript clock, and one of the two rows lost that race by
+    -- microseconds the first time this was written.
+    set status = 'queued', attempts = 4, next_attempt_at = now() - interval '1 minute', sent_at = null
+    where id in (${sql.join(
+      doomed.map((row) => sql`${row.id}::uuid`),
+      sql`, `,
+    )})
+  `);
+
+  await drainEmailQueue(new Date(), 10, db);
+  setEmailProvider(null);
+
+  // Counted from the table rather than from the reports, so the summary cannot
+  // claim a send the database does not have.
+  const [totals] = (await db.execute(sql`
+    select
+      count(*) filter (where status = 'sent')::int as sent,
+      count(*) filter (where status = 'dead')::int as dead
+    from email_deliveries
+  `)) as unknown as { sent: number; dead: number }[];
+
+  return { queued, sent: Number(totals?.sent ?? 0), dead: Number(totals?.dead ?? 0) };
+}
+
+/**
  * Work set between sessions.
  *
  * Goes through `assignHomework`, `submitHomework` and `markHomework` rather
@@ -3121,6 +3235,7 @@ async function main() {
   const covered = await seedBookingTopics(NOW);
   const strengths = await seedTutorTopics();
   const work = await seedHomework(NOW);
+  const mail = await seedEmail(NOW);
 
   const conversations = await seedConversations(NOW);
   const reportCount = await seedReports(students, verified);
@@ -3183,6 +3298,9 @@ async function main() {
   );
   console.log(
     `  homework                 ${work.set} set · ${work.handedIn} handed in · ${work.marked} marked`,
+  );
+  console.log(
+    `  email                    ${mail.sent} sent · ${mail.dead} in dead letters (mock transport, nothing left this machine)`,
   );
   console.log(`  awaiting settlement      ${counts.awaitingSettlement}`);
   console.log(`  reviews                  ${totals.reviews}`);

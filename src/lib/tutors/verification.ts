@@ -10,6 +10,7 @@
 import { and, eq } from 'drizzle-orm';
 
 import { db } from '@/db/client';
+import { emailVerificationDecision } from '@/db/email-events';
 import { credentials, tutorProfiles } from '@/db/schema';
 import { loadWizardSnapshot } from '@/db/tutors';
 import { writeAudit } from '@/lib/admin/audit';
@@ -146,6 +147,10 @@ export async function approveTutor(params: {
   // Score them now, so a newly verified tutor is discoverable straight away
   // instead of waiting for the nightly job.
   await recomputeTutorRankingFor(params.tutorId);
+
+  // A tutor who submitted documents days ago is not sitting on the site waiting
+  // for a bell to light up. This is the message that brings them back.
+  await emailVerificationDecision({ tutorId: params.tutorId, decision: 'approved' });
 }
 
 /**
@@ -191,4 +196,8 @@ export async function rejectTutor(params: {
       ip: params.ip ?? null,
     });
   });
+
+  // The reason travels with it. A rejection somebody cannot act on is a
+  // rejection they will resubmit unchanged.
+  await emailVerificationDecision({ tutorId: params.tutorId, decision: 'rejected', reason });
 }

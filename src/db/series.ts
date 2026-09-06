@@ -33,6 +33,7 @@ import { db as defaultDb, type Database } from './client';
 import type { DbLike } from './ledger';
 import { hasCompletedPaidSession } from './bookings';
 import { notify } from './notifications';
+import { emailBookingConfirmed, emailCreditsLow } from './email-events';
 import { setBookingTopics, seriesTopicIds, setSeriesTopics } from './topics';
 import { moveBookingStatus } from './sessions';
 import {
@@ -615,6 +616,19 @@ export async function chargeDueOccurrences(
           },
           database,
         );
+
+        // The warning is the one message in the series flow that has to reach
+        // somebody who is not on the site: at T-48h they still have time to top
+        // up, and at T-48h+1s they do not.
+        await emailCreditsLow(
+          {
+            userId: booking.studentId,
+            balanceCents: wallet?.creditsCents ?? 0,
+            occurrenceId: booking.id,
+          },
+          database,
+        );
+
         warned += 1;
       }
       continue;
@@ -632,6 +646,7 @@ export async function chargeDueOccurrences(
           }),
         );
       });
+      await emailBookingConfirmed(booking.id, database);
       charged += 1;
       continue;
     }

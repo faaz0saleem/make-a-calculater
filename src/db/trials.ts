@@ -21,6 +21,7 @@ import { and, asc, count, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import { commissionBpsFor } from '@/lib/money/commission';
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
+import { emailTrialDecision, emailTrialRequested } from './email-events';
 import { notify } from './notifications';
 import { isUserRestricted } from './reports';
 import { moveBookingStatus } from './sessions';
@@ -257,6 +258,14 @@ export async function requestTrial(
       database,
     );
 
+    // The bell is only useful to somebody already on the site. A trial request
+    // a tutor does not answer inside twelve hours expires, so the message that
+    // reaches them where they are is the one that decides whether it happens.
+    await emailTrialRequested(
+      { bookingId: created.id, expiresAt: trialExpiresAt(now, input.startAtUtc) },
+      database,
+    );
+
     return {
       ok: true,
       bookingId: created.id,
@@ -368,6 +377,17 @@ export async function decideTrial(
           : 'Nothing was charged, and your free trial with this tutor is still available.',
       href: decision === 'accept' ? `/sessions/${booking.id}` : '/dashboard',
       dedupeKey: `trial:${booking.id}:${decision}`,
+    },
+    database,
+  );
+
+  await emailTrialDecision(
+    {
+      bookingId: booking.id,
+      decision: decision === 'accept' ? 'accepted' : 'declined',
+      // The tutor declines with one tap and no box to type in, so there is
+      // no reason to pass on. The template says so rather than inventing one.
+      reason: null,
     },
     database,
   );

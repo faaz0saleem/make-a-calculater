@@ -6,24 +6,13 @@
  */
 
 import { formatRankingRun, runNightlyRanking } from '@/db/ranking';
-import { safeEqual } from '@/lib/crypto';
+import { cronAuthorised, cronDenied } from '@/lib/cron/auth';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-function authorised(request: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  // Without a configured secret the endpoint stays shut rather than open.
-  if (!secret) return false;
-
-  const header = request.headers.get('authorization') ?? '';
-  return safeEqual(header, `Bearer ${secret}`);
-}
-
 export async function GET(request: Request) {
-  if (!authorised(request)) {
-    return new Response('Not found', { status: 404 });
-  }
+  if (!cronAuthorised(request)) return cronDenied();
 
   try {
     const run = await runNightlyRanking();

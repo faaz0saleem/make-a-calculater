@@ -27,6 +27,7 @@ const PUBLIC_PREFIXES = [
   // authorization; a session is not required and asking for one would make
   // the link useless (SPEC.md §11).
   '/unsubscribe',
+  '/api/unsubscribe',
 ] as const;
 
 /** These exact paths, and nothing beneath them. */

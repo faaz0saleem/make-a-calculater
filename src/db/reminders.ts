@@ -19,6 +19,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { db as defaultDb, type Database } from './client';
 import { expireUnacceptedBookings } from './bookings';
+import { emailReminder } from './email-events';
 import { notify } from './notifications';
 import { bookings, users } from './schema';
 import { getOutboundProvider, isReachableNumber } from '@/lib/messaging/out';
@@ -136,6 +137,15 @@ export async function sendDueReminders(
         database,
       );
       report.inApp += 1;
+
+      // And the inbox. This is the channel that reaches somebody who is not
+      // looking at the site, which is every one of them until the moment the
+      // lesson starts. Queued rather than sent: the drain owns delivery, and
+      // it drops a reminder whose session has already begun.
+      await emailReminder(
+        { bookingId: booking.id, audience: slot.audience, slot: slot.kind, key },
+        database,
+      );
 
       // The phone only for the two that are worth interrupting somebody for,
       // and only where a number exists. A day-out reminder does not earn a

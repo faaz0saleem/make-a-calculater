@@ -127,6 +127,20 @@
       "when": 1788679619000,
       "tag": "0017_series_topics",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1788722727040,
+      "tag": "0018_email_delivery",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1788724171916,
+      "tag": "0019_email_payload",
+      "breakpoints": true
     }
   ]
 }

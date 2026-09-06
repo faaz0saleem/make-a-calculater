@@ -6,19 +6,13 @@
  */
 
 import { formatSettlementRun, runSettlement } from '@/db/settlement';
-import { safeEqual } from '@/lib/crypto';
+import { cronAuthorised, cronDenied } from '@/lib/cron/auth';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-function authorised(request: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-  return safeEqual(request.headers.get('authorization') ?? '', `Bearer ${secret}`);
-}
-
 export async function GET(request: Request) {
-  if (!authorised(request)) return new Response('Not found', { status: 404 });
+  if (!cronAuthorised(request)) return cronDenied();
 
   const run = await runSettlement();
   const summary = formatSettlementRun(run);

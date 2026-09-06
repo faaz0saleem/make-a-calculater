@@ -42,6 +42,10 @@ export type AuditAction =
   | 'report.resolve'
   | 'contact_flag.confirm'
   | 'contact_flag.dismiss'
+  /** An admin put a dead email back in the queue. */
+  | 'email.retry'
+  /** An admin invited a tutor directly, pre-verified. */
+  | 'tutor.invite'
   | 'sanction.warn'
   | 'sanction.restrict'
   | 'sanction.review'

@@ -14,6 +14,7 @@ import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
+import { emailNewReview } from './email-events';
 import { notify } from './notifications';
 import { bookings, reviews, users } from './schema';
 import { writeAudit } from '@/lib/admin/audit';
@@ -121,6 +122,8 @@ export async function upsertReview(
     },
     database,
   );
+
+  await emailNewReview({ reviewId: created!.id }, database);
 
   return { ok: true, reviewId: created!.id };
 }

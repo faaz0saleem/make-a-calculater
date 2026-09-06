@@ -167,6 +167,45 @@ export const rescheduleStatusEnum = pgEnum('reschedule_status', [
  * The in-app bell (SPEC.md §11). Email templates arrive in Phase 7; these are
  * the events Phase 5 actually produces.
  */
+/**
+ * The fourteen things we send email about (SPEC.md §11).
+ *
+ * Kept as its own enum rather than reusing `notification_kind`: the bell and
+ * the inbox answer different questions, and a new message is worth a bell and
+ * never worth an email. `src/lib/email/kinds.ts` holds the same list with the
+ * labels and the optional/operational split.
+ */
+export const emailKindEnum = pgEnum('email_kind', [
+  'booking_confirmed',
+  'booking_cancelled',
+  'reminder_24h',
+  'reminder_1h',
+  'session_starting',
+  'session_completed',
+  'trial_requested',
+  'trial_decision',
+  'credits_purchased',
+  'credits_low',
+  'verification_decision',
+  'payout_status',
+  'new_review',
+  'followed_tutor_slots',
+]);
+
+/**
+ * Where a queued email got to.
+ *
+ * `skipped` is a real outcome and not a failure: a person who turned this kind
+ * off, or has no address on file, produces a row saying so. Deleting the
+ * intention would make "why did I not get that?" unanswerable.
+ */
+export const emailStatusEnum = pgEnum('email_status', [
+  'queued',
+  'sent',
+  'skipped',
+  'dead',
+]);
+
 export const notificationKindEnum = pgEnum('notification_kind', [
   'trial_requested',
   'trial_accepted',
@@ -256,6 +295,13 @@ export const users = pgTable(
     /** Auth.js calls this `emailVerified`; the column is `email_verified_at`. */
     emailVerified: timestamp('email_verified_at', { withTimezone: true }),
     suspendedAt: timestamp({ withTimezone: true }),
+    /**
+     * Set by the one-tap unsubscribe link, and it means *every* optional
+     * message. Operational email — a payout, a cancellation, a verification
+     * decision — still goes out, because those are records of something that
+     * happened to their money or their account.
+     */
+    emailUnsubscribedAt: timestamp({ withTimezone: true }),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
@@ -1629,6 +1675,98 @@ export const notifications = pgTable(
     index('notifications_user_idx').on(table.userId, table.createdAt),
     uniqueIndex('notifications_dedupe_key').on(table.dedupeKey),
   ],
+);
+
+/**
+ * The outbox (SPEC.md §11).
+ *
+ * Email is written here first and sent by a job, rather than sent inline from
+ * whatever was happening at the time. Three reasons, in order of how much they
+ * cost when ignored:
+ *
+ * 1. A send that fails inside a booking transaction either rolls back a booking
+ *    over an email, or is swallowed. Both are wrong.
+ * 2. A reminder that silently failed is a no-show. A row with `attempts = 5`
+ *    and a last error is a thing an admin can see; a caught exception is not.
+ * 3. Retrying needs somewhere to remember that it is retrying.
+ *
+ * The rendered HTML and text are stored because they are evidence: when a tutor
+ * says they were never told their payout was sent, the answer is this row.
+ */
+export const emailDeliveries = pgTable(
+  'email_deliveries',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: emailKindEnum().notNull(),
+    toEmail: varchar({ length: 320 }).notNull(),
+    /**
+     * What the message is about, as data.
+     *
+     * The row stores the *intent* and the sender renders it, rather than the
+     * other way round. Two reasons, and the second one is architectural:
+     * a fix to a template reaches mail that is already queued, and — the one
+     * that forced it — rendering pulls in `react-dom/server`, which Next
+     * refuses to have anywhere in a page's module graph. Enqueueing happens in
+     * pages and server actions; rendering happens in the job.
+     */
+    payload: jsonb().notNull().default({}),
+    /** Filled in when it is rendered, which is when it is sent. */
+    subject: varchar({ length: 300 }),
+    html: text(),
+    text: text(),
+    /** One event, one email, however many times the job runs. */
+    idempotencyKey: varchar({ length: 200 }).notNull(),
+    status: emailStatusEnum().notNull().default('queued'),
+    /** Why nothing was sent, for a `skipped` row. */
+    skipReason: varchar({ length: 80 }),
+    attempts: smallint().notNull().default(0),
+    nextAttemptAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    /**
+     * After this, the message is not worth sending: an hour-before reminder
+     * delivered six hours late is worse than none, because it says a session is
+     * about to start that already ended.
+     */
+    expiresAt: timestamp({ withTimezone: true }),
+    lastError: text(),
+    provider: varchar({ length: 32 }),
+    providerMessageId: varchar({ length: 200 }),
+    /** Ties the send back to the booking or payout it is about. */
+    correlationId: varchar({ length: 100 }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp({ withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex('email_deliveries_idempotency_key').on(table.idempotencyKey),
+    index('email_deliveries_due_idx').on(table.status, table.nextAttemptAt),
+    index('email_deliveries_user_idx').on(table.userId, table.createdAt),
+    check('email_deliveries_attempts', sql`attempts >= 0 and attempts <= 20`),
+  ],
+);
+
+/**
+ * Which optional messages somebody wants.
+ *
+ * A missing row means the default, which is on — a preference table that
+ * doubles as the source of the default would need a row written for every user
+ * at signup, and the one that never got written would silence somebody
+ * permanently. Operational kinds are not represented here at all: they are not
+ * a preference, and offering the switch would be a promise we would then have
+ * to break.
+ */
+export const emailPreferences = pgTable(
+  'email_preferences',
+  {
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: emailKindEnum().notNull(),
+    enabled: boolean().notNull(),
+    updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.kind] })],
 );
 
 /** SPEC.md §10: every money-moving admin action writes a row here. No exceptions. */
