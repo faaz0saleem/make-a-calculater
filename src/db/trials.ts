@@ -385,6 +385,9 @@ export type PendingTrial = {
   durationMinutes: number;
   createdAt: Date;
   expiresAt: Date;
+  /** Present on the tutor's side, where it changes whether they accept. */
+  topicNote?: string | null;
+  topics?: string | null;
 };
 
 /** A tutor's unanswered requests, dead ones already cleared. */
@@ -404,6 +407,15 @@ export async function pendingTrialsForTutor(
       startAtUtc: bookings.startAtUtc,
       durationMinutes: bookings.durationMinutes,
       createdAt: bookings.createdAt,
+      // What the student wants out of it. A tutor deciding whether to accept a
+      // free trial is deciding whether they can help with *this*, and the
+      // answer changes the decision — so it is on the request, not behind it.
+      topicNote: bookings.topicNote,
+      topics: sql<string | null>`(
+        select string_agg(t.name, ', ' order by t.sort_order)
+        from booking_topics bt join topics t on t.id = bt.topic_id
+        where bt.booking_id = ${bookings.id}
+      )`,
     })
     .from(bookings)
     .innerJoin(users, eq(users.id, bookings.studentId))

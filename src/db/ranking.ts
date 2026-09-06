@@ -30,6 +30,7 @@ type InputRow = {
   response_median_seconds: number | null;
   last_active_at: string | Date | null;
   verified_at: string | Date | null;
+  strikes: number | null;
 };
 
 export type RankingRun = {
@@ -68,7 +69,8 @@ export async function recomputeTutorRanking(
       coalesce(cv.trial_converted_count, 0) as trial_converted_count,
       t.response_median_seconds,
       greatest(t.updated_at, b.last_session_at) as last_active_at,
-      t.verified_at
+      t.verified_at,
+      t.strikes
     from tutor_profiles t
     left join (
       select tutor_id, sum(rating) as rating_sum, count(*) as review_count
@@ -145,6 +147,7 @@ export async function recomputeTutorRanking(
       availabilityDensityBps: signals.known
         ? (signals.value.get(row.tutor_id)?.densityBps ?? null)
         : null,
+      strikes: Number(row.strikes ?? 0),
       restricted: restricted.has(row.tutor_id),
     };
     return {

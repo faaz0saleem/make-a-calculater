@@ -8,7 +8,8 @@
  *     tampered with or older than 60 seconds is a 403. This is what stops a
  *     leaked or guessed path from being useful.
  *  2. The viewer is entitled to *that* object: an admin or the owning tutor for
- *     a credential, one of the two people in the thread for an attachment.
+ *     a credential, one of the two people in the thread for an attachment,
+ *     one of the two people on the assignment for a homework submission.
  *     Failing this is a 404, not a 403, so nobody can use the endpoint to
  *     discover that a document exists (SPEC.md §16, last line).
  *
@@ -20,7 +21,7 @@ import { eq } from 'drizzle-orm';
 
 import { currentUser } from '@/lib/auth/guards';
 import { db } from '@/db/client';
-import { credentials, threads } from '@/db/schema';
+import { credentials, homework, threads } from '@/db/schema';
 import { isAdmin } from '@/lib/auth/roles';
 import { bucketForKey, getObjectStore, verifyObjectSignature } from '@/lib/storage';
 
@@ -64,6 +65,22 @@ export async function GET(request: Request, context: { params: Promise<{ key: st
 
     if (!thread) return missing();
     if (!isAdmin(viewer.roles) && thread.studentId !== viewer.id && thread.tutorId !== viewer.id) {
+      return missing();
+    }
+  } else if (key.startsWith('homework/')) {
+    // `homework/{homeworkId}/{id}.{ext}` — the two people on the assignment,
+    // and nobody else. Somebody's marked work is not a public URL.
+    const homeworkId = key.split('/')[1] ?? '';
+    if (!UUID.test(homeworkId)) return missing();
+
+    const [item] = await db
+      .select({ studentId: homework.studentId, tutorId: homework.tutorId })
+      .from(homework)
+      .where(eq(homework.id, homeworkId))
+      .limit(1);
+
+    if (!item) return missing();
+    if (!isAdmin(viewer.roles) && item.studentId !== viewer.id && item.tutorId !== viewer.id) {
       return missing();
     }
   } else {

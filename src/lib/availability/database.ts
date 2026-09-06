@@ -8,15 +8,30 @@
  * Answers stay three-valued. `unknown` now means "this tutor has published no
  * hours at all", which is different from "their week is full": the first
  * deserves silence on a card, the second deserves an honest "nothing free".
+ *
+ * Two things make a slot busy, not one. Live bookings do, obviously. So do
+ * **active recurring series**, projected forward from their weekday and time —
+ * because only four weeks of a series exist as real rows, and a one-off
+ * booking six weeks out would otherwise walk straight into somebody's standing
+ * Tuesday. The projection is belt and braces inside those four weeks, where
+ * the real bookings already block the slot, and it is the only protection
+ * beyond them.
  */
 
 import { and, eq, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 
 import { db as defaultDb } from '@/db/client';
 import type { DbLike } from '@/db/ledger';
-import { availabilityExceptions, availabilityRules, bookings, tutorProfiles } from '@/db/schema';
+import {
+  availabilityExceptions,
+  availabilityRules,
+  bookings,
+  recurringSeries,
+  tutorProfiles,
+} from '@/db/schema';
 import { ACTIVE_BOOKING_STATUSES } from '@/lib/bookings/status';
 import { maskFromUtcHours } from '@/lib/ranking/overlap';
+import { dateInZone, occurrencesBetween } from '@/lib/series/occurrences';
 import { getLocalParts, zonedTimeToUtc } from '@/lib/time';
 import {
   bookableRange,
@@ -51,6 +66,48 @@ type TutorCalendar = {
   constraints: SlotConstraints;
 };
 
+type SeriesRow = {
+  weekdays: number[];
+  startTimeLocal: string;
+  timezone: string;
+  durationMinutes: number;
+  startsOn: string;
+  endsOn: string | null;
+};
+
+/**
+ * A standing arrangement, as busy time.
+ *
+ * The window is widened by a day on each side and converted to local dates in
+ * the series' own timezone, because "the 15th" in Karachi and "the 15th" in
+ * UTC are not the same day and an occurrence on the boundary must not be lost.
+ */
+function seriesBusy(rows: SeriesRow[], window: Interval): BusyInterval[] {
+  const out: BusyInterval[] = [];
+
+  for (const row of rows) {
+    const from = dateInZone(new Date(window.startUtc.getTime() - 86_400_000), row.timezone);
+    const to = dateInZone(new Date(window.endUtc.getTime() + 86_400_000), row.timezone);
+
+    for (const occurrence of occurrencesBetween(
+      {
+        weekdays: row.weekdays,
+        startTimeLocal: row.startTimeLocal,
+        timezone: row.timezone,
+        durationMinutes: row.durationMinutes,
+        startsOn: row.startsOn,
+        endsOn: row.endsOn,
+      },
+      from,
+      to,
+    )) {
+      out.push({ startUtc: occurrence.startUtc, endUtc: occurrence.endUtc });
+    }
+  }
+
+  return out;
+}
+
 /** How far ahead the cheap questions look before giving up. */
 const LOOKAHEAD_DAYS = 14;
 
@@ -75,7 +132,7 @@ export class DatabaseAvailability implements AvailabilityPort {
   private async loadCalendars(tutorIds: string[], window: Interval): Promise<Map<string, TutorCalendar>> {
     if (tutorIds.length === 0) return new Map();
 
-    const [profiles, ruleRows, exceptionRows, bookingRows] = await Promise.all([
+    const [profiles, ruleRows, exceptionRows, bookingRows, seriesRows] = await Promise.all([
       this.database
         .select({
           tutorId: tutorProfiles.userId,
@@ -133,6 +190,26 @@ export class DatabaseAvailability implements AvailabilityPort {
             gte(bookings.startAtUtc, new Date(window.startUtc.getTime() - 86_400_000)),
           ),
         ),
+
+      // Standing arrangements, which hold their hour whether or not a row for
+      // that particular week exists yet.
+      this.database
+        .select({
+          tutorId: recurringSeries.tutorId,
+          weekdays: recurringSeries.weekdays,
+          startTimeLocal: recurringSeries.startTimeLocal,
+          timezone: recurringSeries.timezone,
+          durationMinutes: recurringSeries.durationMinutes,
+          startsOn: recurringSeries.startsOn,
+          endsOn: recurringSeries.endsOn,
+        })
+        .from(recurringSeries)
+        .where(
+          and(
+            inArray(recurringSeries.tutorId, tutorIds),
+            inArray(recurringSeries.status, ['active', 'ending']),
+          ),
+        ),
     ]);
 
     const calendars = new Map<string, TutorCalendar>();
@@ -157,12 +234,18 @@ export class DatabaseAvailability implements AvailabilityPort {
         exceptions: exceptionRows
           .filter((row) => row.tutorId === profile.tutorId)
           .map((row) => ({ kind: row.kind, startUtc: row.startUtc, endUtc: row.endUtc })),
-        busy: bookingRows
-          .filter((row) => row.tutorId === profile.tutorId)
-          .map((row) => ({
-            startUtc: row.startAtUtc,
-            endUtc: new Date(row.startAtUtc.getTime() + row.durationMinutes * 60_000),
-          })),
+        busy: [
+          ...bookingRows
+            .filter((row) => row.tutorId === profile.tutorId)
+            .map((row) => ({
+              startUtc: row.startAtUtc,
+              endUtc: new Date(row.startAtUtc.getTime() + row.durationMinutes * 60_000),
+            })),
+          ...seriesBusy(
+            seriesRows.filter((row) => row.tutorId === profile.tutorId),
+            window,
+          ),
+        ],
         bookedStarts: bookingRows
           .filter((row) => row.tutorId === profile.tutorId)
           .map((row) => row.startAtUtc),

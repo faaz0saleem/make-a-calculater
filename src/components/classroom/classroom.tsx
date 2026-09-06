@@ -28,6 +28,8 @@ import {
 } from 'livekit-client';
 
 import { requestSessionToken } from '@/app/sessions/[bookingId]/actions';
+import { callTheAbsent } from '@/app/sessions/actions';
+import { waitingConsequence, waitingState } from '@/lib/sessions/reminders';
 import { PreCallCheck } from '@/components/classroom/pre-call-check';
 import { TrialConversion, type TrialConversionProps } from '@/components/trials/trial-conversion';
 import { formatDuration, useTick } from '@/components/classroom/session-clock';
@@ -60,6 +62,12 @@ export type ClassroomProps = {
   conversion: TrialConversionProps | null;
 };
 
+/** `137` -> `2:17`. A countdown somebody is watching should read like a clock. */
+function formatCountdown(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, '0')} left`;
+}
+
 export function Classroom(props: ClassroomProps) {
   const window_ = sessionWindow(new Date(props.startUtcIso), Math.round(
     (new Date(props.endUtcIso).getTime() - new Date(props.startUtcIso).getTime()) / 60_000,
@@ -76,6 +84,17 @@ export function Classroom(props: ClassroomProps) {
   const [remoteJoined, setRemoteJoined] = useState(false);
   const [warning, setWarning] = useState<number | null>(null);
 
+  /**
+   * When this viewer started sitting in the room on their own.
+   *
+   * Cleared the moment the other side appears, so somebody who joins, drops and
+   * rejoins does not carry a stale clock. The countdown below runs from here
+   * rather than from the session's start time, because that is what settlement
+   * measures: `NO_SHOW_WAIT_SECONDS` of *waiting alone*.
+   */
+  const aloneSinceRef = useRef<Date | null>(null);
+  const calledRef = useRef(false);
+
   const roomRef = useRef<Room | null>(null);
   // Set when someone presses leave, so an involuntary drop can be told apart
   // from a deliberate exit — they need very different screens.
@@ -87,6 +106,33 @@ export function Classroom(props: ClassroomProps) {
   const now = useTick(serverNowIso);
   const remaining = remainingSeconds(window_, now);
   const state = joinState(window_, now);
+
+  /**
+   * One person in the room, past the point where that is worth saying.
+   *
+   * Only while actually connected: "waiting for them" on a page nobody has
+   * joined from would be nonsense, and the countdown is about a room with
+   * somebody in it.
+   */
+  const absentSide: 'student' | 'tutor' = props.role === 'tutor' ? 'student' : 'tutor';
+  const alone =
+    stage === 'live' && !remoteJoined && aloneSinceRef.current
+      ? waitingState(aloneSinceRef.current, new Date(props.startUtcIso), now, absentSide)
+      : null;
+
+  const waiting = alone?.kind === 'waiting' || alone?.kind === 'settled';
+
+  /**
+   * Reach for their phone, once.
+   *
+   * The bell is not enough for somebody who is not looking at the tab — which
+   * is, by definition, everybody this is about.
+   */
+  useEffect(() => {
+    if (!waiting || calledRef.current) return;
+    calledRef.current = true;
+    void callTheAbsent(props.bookingId);
+  }, [waiting, props.bookingId]);
 
   // Warnings at five minutes and one (SPEC.md §7).
   useEffect(() => {
@@ -147,8 +193,14 @@ export function Classroom(props: ClassroomProps) {
             );
             setStage('error');
           })
-          .on(RoomEvent.ParticipantConnected, () => setRemoteJoined(true))
-          .on(RoomEvent.ParticipantDisconnected, () => setRemoteJoined(false))
+                    .on(RoomEvent.ParticipantConnected, () => {
+            setRemoteJoined(true);
+            aloneSinceRef.current = null;
+          })
+          .on(RoomEvent.ParticipantDisconnected, () => {
+            setRemoteJoined(false);
+            aloneSinceRef.current = new Date();
+          })
           .on(RoomEvent.ConnectionQualityChanged, (value: ConnectionQuality, participant?: Participant) => {
             if (participant && participant !== room.localParticipant) return;
             setQuality(linkQuality(value));
@@ -176,7 +228,9 @@ export function Classroom(props: ClassroomProps) {
           setCameraOn(true);
         }
 
-        setRemoteJoined(room.remoteParticipants.size > 0);
+        const together = room.remoteParticipants.size > 0;
+        setRemoteJoined(together);
+        aloneSinceRef.current = together ? null : new Date();
         setStage('live');
       } catch (caught) {
         console.error('could not join the session', caught);
@@ -326,6 +380,24 @@ export function Classroom(props: ClassroomProps) {
             </Badge>
           </div>
         </div>
+
+        {alone && alone.kind !== 'too_early' ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm"
+            data-testid="waiting-countdown"
+          >
+            <p className="font-medium">
+              {alone.kind === 'settled'
+                ? `${props.otherName} did not join.`
+                : `Waiting for ${props.otherName} — ${formatCountdown(alone.secondsLeft)}`}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {waitingConsequence(absentSide, props.role === 'tutor')}
+            </p>
+          </div>
+        ) : null}
 
         {warning !== null && remaining > 0 ? (
           <p role="status" aria-live="polite" className="rounded-md bg-secondary px-3 py-2 text-sm">

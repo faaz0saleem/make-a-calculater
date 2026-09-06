@@ -8,6 +8,12 @@ Every lesson happens on-platform over video or voice. Tutors can offer a short
 free trial they approve by hand, and cash out by bank transfer once their
 balance reaches $100.
 
+Once two people want to keep going, they set up a **weekly series** rather than
+rebooking one hour at a time — the way tuition is actually sold — and credits are
+still debited one session at a time, 48 hours ahead. Sessions are attached to
+**syllabus chapters**, so what was covered and what is left is a thing the
+product knows, and a tutor can set and mark **homework** against them.
+
 Browsing is meant to feel like YouTube — an infinite grid of tutor cards with
 autoplaying intro videos, category rails and a "continue with your tutors" row —
 not like a directory table.
@@ -84,6 +90,11 @@ work with straight away: **one running right now**, so the classroom opens
 without waiting for a booking to come round, and **one that finished 26 hours
 ago and has not settled**, so `pnpm settle` has something to do.
 
+It also plants three standing arrangements — one a week old with a session
+already paid for, one running twice a week, and one inside its seven days'
+notice — each with the chapters it is for and the sentence the student wrote,
+plus homework in all three of its states: set, handed in, and marked.
+
 The seed also plants the payout boundary cases from `SPEC.md` §16:
 `payout.pending@tutorly.test` has a $100.00 request waiting for an admin,
 `payout.ready@tutorly.test` sits at exactly $100.00 and may request, and
@@ -108,6 +119,8 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm reconcile` | The nightly ledger check — exits non-zero on drift |
 | `pnpm rank` | The nightly ranking job — recomputes `tutor_ranking` |
 | `pnpm settle` | Release escrow on sessions past their dispute window. `--at <iso>` runs it as if it were then; `--dry-run` lists what it would touch |
+| `pnpm series` | Roll recurring series forward: materialise the next four weeks, warn at T-72h, debit at T-48h, lapse what went unpaid |
+| `pnpm reminders` | Send what is due — T-24h and T-1h to both sides, T-10min to the tutor — and expire trial requests nobody accepted |
 | `pnpm prove:booking` | Fire N parallel bookings at one slot and print the result. `--clients 4` |
 | `pnpm prove:commission` | What commission a booking between two people would carry right now |
 | `pnpm prove:curriculum` | Show the database refusing a class from the wrong board, and a second primary position |
@@ -461,6 +474,173 @@ a wider weekly schedule, or a one-off extra window — their followers get an
 in-app notification, deduplicated to one per tutor per day so a tutor saving
 their calendar four times before breakfast is still one piece of news.
 
+## The month, not the hour
+
+A tutor in Lahore quotes **50,000 PKR a month for three sessions a week across
+two subjects** — about $13.70 an hour, but nobody in that conversation says
+"hour". What is being sold is a standing commitment: the same two evenings,
+every week, until exams. Single bookings are how this codebase started and they
+are still how a stranger tries somebody out. They are not how the relationship
+that follows is bought.
+
+### A series is the commitment; the ledger is still per session
+
+`recurring_series` holds one row per standing arrangement: a tutor, a subject at
+a curriculum position, one or more weekdays, a local start time, a duration, and
+either an end date or an open-ended run. The price is snapshotted at creation
+the way a booking's is, so a tutor raising their rate does not reprice a series
+somebody is already halfway through.
+
+The chapters come with it. A standing arrangement holds its own topic list and
+its own note (`series_topics`, `recurring_series.topic_note`), and each
+occurrence is stamped with both as it is created — so a tutor opening next
+Tuesday reads what these Tuesdays are for without going to look for the series.
+
+What the series does **not** do is take a month's money. A cron (`pnpm series`)
+materialises **four weeks ahead**, rolling forward weekly — never an infinite
+future of rows, and never a horizon so short that a student cannot see their own
+month. Each occurrence is an ordinary `bookings` row in a new `scheduled` status:
+it holds the slot, it appears on both calendars, and it has not been paid for.
+
+Then each occurrence pays for itself on its own clock:
+
+| When | What happens |
+| --- | --- |
+| T-72h | A warning, in-app and on the dashboard: this is what is about to be debited |
+| T-48h | Credits are debited and the booking becomes `confirmed` |
+| T-48h, empty wallet | The occurrence **lapses** and the slot is released |
+
+`lapsed` is a terminal status of its own, deliberately not folded into
+`cancelled_by_student`. Nobody cancelled it. It is the visible consequence of an
+empty wallet, and a tutor looking at a gap in their week is entitled to know
+which of those two things happened. The job also sweeps `scheduled` occurrences
+that are already in the past — if the cron stops for a day, those rows lapse on
+the next run rather than sitting there pretending to be a lesson.
+
+One thing the four-week check deliberately forgives: an occurrence inside the
+**tutor's own notice period**. Somebody setting up a Tuesday slot on a Tuesday
+afternoon is agreeing to every Tuesday from here, and that this evening is too
+short notice for this particular tutor is not a reason to refuse the
+arrangement — that occurrence is skipped and the series starts next week. A
+week that clashes with somebody else's booking is a different thing, and is
+refused by name.
+
+### One occurrence is not the series
+
+Cancelling next Tuesday cancels next Tuesday. The series keeps its slot, keeps
+materialising, and picks up the following Tuesday as if nothing happened —
+`bookings.series_id` and a `one_booking_per_occurrence` unique index on
+`(series_id, occurrence_date)` mean an occurrence can be removed, or replaced by
+a rescheduled one, without touching the parent. Ending the arrangement itself is
+a separate act, available to **either** side with **seven days' notice**, which
+moves the series to `ending`: already-paid occurrences inside the notice window
+still happen, and nothing new is materialised past it.
+
+### The slot is reserved beyond the horizon
+
+A four-week materialisation horizon would otherwise mean a stranger could book
+your standing Tuesday in week six. `seriesBusy()` projects every active series
+forward from its own recurrence rule when availability is computed, so the slot
+is unavailable to one-off bookings for as long as the series runs — whether or
+not a row exists yet. Occurrence maths walks **local dates** rather than adding
+24 hours, anchored to the tutor's timezone, so a series survives a DST change in
+either direction without drifting an hour.
+
+### Commission counts occurrences, not questions
+
+Commission is retention-based: 22% the first time two people transact, 16% every
+time after. Asking the database "has this student paid this tutor before?" at
+materialisation time answers *no* for all four occurrences created in the same
+batch, which would charge the opening rate four times for what is plainly one
+relationship. `commissionForOccurrence(index, hasPaidThisTutorBefore, negotiated)`
+takes the index instead: **every session after the first in a series is a
+rebooking**, regardless of when the rows were written. The negotiated floor still
+applies — the effective rate is the lower of the two.
+
+The offer to make it standing appears after a student's **second completed
+session** with the same tutor, on the dashboard and on the tutor's page. Not the
+first: one good lesson is not yet a decision.
+
+## Chapters, and what actually gets taught
+
+A subject is too coarse to match on and far too coarse to remember. `topics` is a
+taxonomy per `(board, class, subject)` — 105 real Cambridge chapters across
+maths, physics, chemistry and biology at IGCSE, O Level, AS and A2 — seeded for
+the launch board and editable by an admin at `/admin/curriculum`.
+
+Topics show up four times, and the fourth is the point:
+
+1. **At booking**, the student picks chapters and can add free text. A tutor
+   accepting a trial sees it *before* they accept.
+2. **Before the session**, on the tutor's own session page, so preparation is
+   possible.
+3. **Afterwards**, the tutor marks which topics were actually covered and,
+   optionally, how well the student grasped each one.
+4. **In `/progress/[tutorId]`**, per student–tutor pair: what has been covered,
+   what was shaky, what is left. This is the retention engine. A student who can
+   see nine chapters behind them and four ahead is looking at a reason to stay.
+
+Topic strength is also a **tiebreak within the exact-match tier** of search
+ranking, never a tier of its own, and capped at `TOPIC_MAX_BPS = 200` — set
+deliberately below the ~225 points that separate a 4.6-rated tutor from a
+4.9-rated one. Chapter overlap should break a tie between comparable tutors. It
+should not outrank being better.
+
+## Turning up
+
+The failure mode of online tutoring is not bad teaching. It is an empty room.
+
+**A calendar invite at booking does more than any reminder we could send.**
+`/api/bookings/[bookingId]/calendar` serves a real `.ics` with a stable
+`UID:booking-<id>@tutorly` and a `SEQUENCE` driven by `reschedule_count`, so a
+moved session updates the event already in somebody's calendar instead of
+creating a second one. A Google Calendar link sits next to it for people who
+live in a browser.
+
+Then reminders, from `pnpm reminders`:
+
+- **T-24h**, both sides.
+- **T-1h**, both sides — in-app, and by WhatsApp where a number exists.
+- **T-10min**, the tutor only, and worded more firmly. The professional should
+  be there first.
+
+**When one person is in the room and the other is not**, at T+2min the absent
+one gets an urgent push that names who is waiting, and the person who did turn
+up gets a live countdown that states exactly what happens when it reaches zero
+and who gets paid. That countdown derives its deadline from
+`NO_SHOW_WAIT_SECONDS` — the same constant settlement uses — and counts from
+when waiting actually began, so the screen cannot tell you a different story
+from the ledger.
+
+**Timezone drift** is shown, not assumed: when the two sides are in different
+zones, both are rendered, because a tutor in Karachi and a student in London
+disagree about what "7pm" means twice a year.
+
+A tutor who does not turn up is handled in rungs: the student is refunded, the
+tutor's ranking takes a penalty (`RELIABILITY_MAX_PENALTY = 1500`, larger than
+any subject-overlap bonus can offset), and after **two** no-shows they lose
+instant booking and their requests go back to manual acceptance. There is no
+removal rung here. That is a human decision.
+
+WhatsApp goes through the same shape as payments: an `OutboundProvider`
+interface with a mock implementation that deduplicates on an idempotency key.
+The provider is not real yet. The routing, the dedupe and the audience rules
+are.
+
+## Homework
+
+A tutor assigns work against a topic; the student submits a file or a block of
+text; the tutor marks it with feedback (required) and a mark (optional). A
+resubmission clears the previous mark, because marking work that has since been
+replaced is worse than not marking it. Attachments go through the same
+presigned-upload and `/api/files` proxy path as everything else.
+
+This is the strongest anti-disintermediation feature in the product, and not
+because it is locked down — it is not. It is because it is **value that only
+exists here**. Two people who take the relationship to WhatsApp keep the
+lessons and lose the record of what was taught, what was set, and what came
+back marked.
+
 ## How files work
 
 Two buckets. `private` holds credential documents; `public` holds avatars and
@@ -657,10 +837,13 @@ src/
     api/uploads/        signed direct uploads (development stand-in for R2)
     api/cron/           ranking, reconciliation and settlement, on a schedule
     api/livekit/        the webhook attendance is measured from
+    api/bookings/       the .ics a session is added to a calendar with
     credits/            buying credits, and the mock provider's checkout
     messages/           conversations, masked on write
     notifications/      the in-app bell
     sessions/           the classroom
+    progress/           what a student and one tutor have covered
+    homework/           set, submitted, marked — both sides have a view
   auth.ts               Auth.js: credentials + Google, Node runtime
   auth.config.ts        the edge-safe half, used by middleware
   components/           UI primitives and the wizard's step forms
@@ -671,6 +854,10 @@ src/
     discovery.ts        the feed, search, filters and the rails
     ranking.ts          the nightly ranking job
     bookings.ts         creating, moving and cancelling, in one transaction
+    series.ts           recurring series: create, materialise, charge, end
+    topics.ts           what was asked for, what was covered, and progress
+    homework.ts         assign, submit, mark
+    reminders.ts        what is due to be sent, and the absent-party nudge
     disputes.ts         reporting a problem, and the settlement freeze
     moderation.ts       the only reader of raw message bodies
     purchases.ts        credit packs, checkout, and the idempotent webhook
@@ -684,11 +871,14 @@ src/
     admin/audit.ts      the admin_audit writer
     auth/               password policy, roles, server-side guards
     bookings/           the state machine, slot holds, reschedule rules
+    series/             DST-safe occurrence maths, and the series rules
+    calendar/           .ics generation and the Google Calendar link
     availability/       the scheduling engine, and the port discovery reads
     curriculum/         boards, match tiers, and the credential-relevance flag
     geo/                a timezone-to-country guess, used only to order a list
     livekit/            room names and access tokens
     messaging/          contact-info masking, response-time medians
+    messaging/out/      the OutboundProvider interface (WhatsApp) and its mock
     reviews/            who may review, and what the stars add up to
     sessions/           the session window, attendance, connection grading
     trials/             the free-trial rules and their abuse guards

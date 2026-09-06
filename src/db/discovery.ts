@@ -24,6 +24,7 @@ import { and, asc, desc, eq, gte, isNull, sql, type SQL } from 'drizzle-orm';
 
 import { getAvailability } from '@/lib/availability';
 import { MATCH_TIERS, type CurriculumPosition, type MatchTier } from '@/lib/curriculum/match';
+import { TOPIC_MAX_BPS } from '@/lib/curriculum/ordering';
 import {
   OVERLAP_MAX_BPS,
   OVERLAP_TARGET_HOURS,
@@ -104,6 +105,15 @@ export type DiscoveryFilters = {
   availableFromUtc?: Date;
   availableToUtc?: Date;
   availableDurationMinutes?: number;
+  /**
+   * Chapters the student is asking about (SPEC.md §4).
+   *
+   * A tiebreak inside the exact-match tier and nothing else — a tutor who has
+   * declared these chapters edges out one who has not, and no number of ticked
+   * boxes lifts anybody out of a lower tier. See `lib/curriculum/ordering.ts`
+   * for why the ceiling is deliberately below a three-tenths-of-a-star gap.
+   */
+  topicIds?: readonly string[];
   sort?: SortOption;
   limit?: number;
   offset?: number;
@@ -406,6 +416,13 @@ function byAdjustedScore(viewerMask: number | null): SQL {
   return sql`(${tutorRanking.score} + ${overlapBonusSql(viewerMask)}) desc nulls last`;
 }
 
+/** The same expression without the `desc`, so a bonus can be added to it. */
+function byAdjustedScoreExpression(viewerMask: number | null): SQL {
+  return viewerMask === null
+    ? sql`coalesce(${tutorRanking.score}, -1)`
+    : sql`coalesce(${tutorRanking.score} + ${overlapBonusSql(viewerMask)}, -1)`;
+}
+
 /**
  * The match tier leads every sort, not only relevance.
  *
@@ -418,8 +435,40 @@ function byAdjustedScore(viewerMask: number | null): SQL {
  */
 const byMatchTier = sql`${sql.identifier(MATCH_TIER_ALIAS)} desc`;
 
-function orderFor(sort: SortOption, options: { viewerMask: number | null; matched: boolean }) {
-  const adjusted = byAdjustedScore(options.viewerMask);
+/**
+ * The chapter tiebreak, as SQL.
+ *
+ * Applied only where the match tier is already `exact`, so it can order tutors
+ * who all teach the student's syllabus and can never promote one who does not.
+ * The ceiling matches `TOPIC_MAX_BPS` in `lib/curriculum/ordering.ts`, which is
+ * the readable statement of this same rule.
+ */
+function topicBonusSql(topicIds: readonly string[]): SQL {
+  const ids = sql.join(
+    topicIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+
+  return sql`(case when ${sql.identifier(MATCH_TIER_ALIAS)} = ${MATCH_TIERS.exact} then
+    (select round((count(*)::numeric * ${TOPIC_MAX_BPS}) / ${topicIds.length})
+     from tutor_topics tt
+     where tt.tutor_id = ${users.id} and tt.topic_id in (${ids}))
+    else 0 end)`;
+}
+
+function orderFor(
+  sort: SortOption,
+  options: { viewerMask: number | null; matched: boolean; topicIds?: readonly string[] },
+) {
+  const bonus =
+    options.matched && options.topicIds && options.topicIds.length > 0
+      ? topicBonusSql(options.topicIds)
+      : null;
+
+  const adjusted = bonus
+    ? sql`(${byAdjustedScoreExpression(options.viewerMask)} + coalesce(${bonus}, 0)) desc nulls last`
+    : byAdjustedScore(options.viewerMask);
+
   const lead: SQL[] = options.matched ? [byMatchTier] : [];
 
   switch (sort) {
@@ -462,7 +511,13 @@ export async function searchTutors(
   // the survivors. The bound is what stops this becoming a table scan.
   const rows = await baseQuery(database, positions)
     .where(where)
-    .orderBy(...orderFor(filters.sort ?? 'relevance', { viewerMask, matched: positions.length > 0 }))
+    .orderBy(
+      ...orderFor(filters.sort ?? 'relevance', {
+        viewerMask,
+        matched: positions.length > 0,
+        topicIds: filters.topicIds,
+      }),
+    )
     .limit(wantsTimeWindow ? TIME_FILTER_CANDIDATE_LIMIT : limit + 1)
     .offset(wantsTimeWindow ? 0 : offset);
 

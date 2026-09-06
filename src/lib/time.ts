@@ -171,10 +171,35 @@ export function formatClock(instant: Date, timeZone: string): string {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-/** `"09:30:00"` -> `{ hour: 9, minute: 30 }`. Postgres `time` columns come back like this. */
+/**
+ * `"09:30:00"` -> `{ hour: 9, minute: 30 }`. Postgres `time` columns come back
+ * like this.
+ *
+ * Throws on anything that is not a real wall clock. It used to coerce, which
+ * meant a malformed value from a form travelled as `NaN` all the way into
+ * `Intl.DateTimeFormat` and surfaced as `RangeError: Invalid time value` from
+ * three frames deep in the timezone code, with nothing naming the field.
+ */
 export function parseClock(value: string): { hour: number; minute: number } {
-  const [hourText = '0', minuteText = '0'] = value.split(':');
-  return { hour: Number(hourText), minute: Number(minuteText) };
+  const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(value?.trim() ?? '');
+  if (!match) throw new RangeError(`not a time of day: ${JSON.stringify(value)}`);
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+
+  if (hour > 23 || minute > 59) throw new RangeError(`not a time of day: ${value}`);
+  return { hour, minute };
+}
+
+/** Whether `parseClock` would accept this. For validating a form field. */
+export function isClock(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    parseClock(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function clockToString(hour: number, minute: number): string {
