@@ -18,7 +18,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
-import { bookingTopics, bookings, topics, tutorTopics } from './schema';
+import { bookingTopics, bookings, seriesTopics, topics, tutorTopics } from './schema';
 import { MAX_TOPICS_PER_BOOKING } from './schema';
 
 export { MAX_TOPICS_PER_BOOKING };
@@ -124,6 +124,41 @@ export async function setBookingTopics(
     .insert(bookingTopics)
     .values(wanted.map((topicId) => ({ bookingId, topicId })))
     .onConflictDoNothing();
+}
+
+/**
+ * The chapters a standing arrangement is for.
+ *
+ * The same cap as a booking, for the same reason: a series that claims to
+ * cover twelve chapters every Tuesday is a wish, not a plan.
+ */
+export async function setSeriesTopics(
+  seriesId: string,
+  topicIds: readonly string[],
+  database: DbLike = defaultDb,
+): Promise<void> {
+  const wanted = [...new Set(topicIds)].slice(0, MAX_TOPICS_PER_BOOKING);
+
+  await database.delete(seriesTopics).where(eq(seriesTopics.seriesId, seriesId));
+  if (wanted.length === 0) return;
+
+  await database
+    .insert(seriesTopics)
+    .values(wanted.map((topicId) => ({ seriesId, topicId })))
+    .onConflictDoNothing();
+}
+
+/** What a series is for, as ids — the shape `setBookingTopics` wants. */
+export async function seriesTopicIds(
+  seriesId: string,
+  database: DbLike = defaultDb,
+): Promise<string[]> {
+  const rows = await database
+    .select({ topicId: seriesTopics.topicId })
+    .from(seriesTopics)
+    .where(eq(seriesTopics.seriesId, seriesId));
+
+  return rows.map((row) => row.topicId);
 }
 
 export type BookingTopic = {

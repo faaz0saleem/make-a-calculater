@@ -14,7 +14,153 @@ Phases follow `SPEC.md` §15.
 | 6A — curriculum matching | **Done** |
 | 6B — student signup + the paywall moved | **Done** |
 | 6C — payouts + admin dashboard + reports queue | **Done** |
-| 7 — real payment provider, notifications, SEO, analytics | Not started |
+| 7 — recurring bookings, topics, attendance, homework | **Done** |
+| 8 — real payment provider, SEO, analytics | Not started |
+
+---
+
+## Phase 7 — the month, the syllabus, and the hour itself — done
+
+Four things that only make sense next to each other. The market data behind all
+of them is one quote: **a Lahore tutor, 50,000 PKR a month for three sessions a
+week across two subjects — about $13.70 an hour.** The rate is the least
+interesting part. The *structure* is the point, and it is written up as
+`DECISIONS_NEEDED.md` item 32.
+
+### Recurring bookings
+
+"Same time every Tuesday and Thursday" is one decision, made once, because that
+is the shape the market already has. A student who has decided that should not
+have to decide it again every week.
+
+The one place this deliberately does **not** copy the market is the money.
+Taking 50,000 PKR up front would mean holding a month of somebody's money
+against tutoring that has not happened, on a platform they have used twice. So:
+
+- **The series is the commitment; the ledger is per session.** Each occurrence
+  is charged at its own T-48h, with a warning at T-72h if the wallet will not
+  cover it. Agreeing to eight sessions costs nothing today.
+- **An occurrence nobody can pay for lapses, visibly.** A new terminal status,
+  `lapsed`, distinct from a cancellation because nobody chose it and from
+  `expired` because the tutor needs to know *why* their Tuesday disappeared. No
+  money ever moved, so there is nothing to refund.
+- **A `scheduled` booking holds its hour from the moment it exists.**
+  `scheduled` joins `ACTIVE_BOOKING_STATUSES` and the `booking_no_overlap`
+  index, so a one-off cannot walk into a standing slot.
+- **And beyond the four materialised weeks, the availability engine projects the
+  series forward.** Only four weeks exist as rows — rows stretching to the heat
+  death of the universe are not a schedule — so without that projection a
+  one-off six weeks out would take somebody's standing Tuesday.
+- **Commission is decided by occurrence index, not by a database question.**
+  "Every session after the first is a rebooking" cannot be implemented by asking
+  "has a session completed yet?" at materialisation: four weeks are created at
+  once, before any of them has happened, so asking would answer *no* eight times
+  and price a month of committed work at the 22% acquisition rate. Occurrence
+  one is 22%, the rest are 16%, and a negotiated floor still wins.
+- **The price is snapshotted on the series**, not re-read per occurrence. A
+  standing arrangement at an agreed rate is what both sides think they agreed.
+- **Seven days' notice, either side.** Occurrences inside the notice period
+  stand; everything after is cancelled, and since none of it was charged there
+  is nothing to refund.
+- **A series carries its chapters**, in `series_topics` and a note on the row,
+  and each occurrence is stamped with both as it is materialised. A standing
+  slot is agreed *for* something; making the tutor go and find the series to
+  remember what would be the same mistake as not asking at all.
+- **An occurrence inside the tutor's own notice period is skipped, not a
+  clash.** Setting up a Tuesday slot on a Tuesday afternoon means every Tuesday
+  from here — that this evening is too short notice for this tutor is not a
+  reason to refuse the arrangement. A week taken by somebody else's booking
+  still is, and the error names the dates.
+- The offer appears **after a student's second completed session with a tutor** —
+  the moment they are weighing it up anyway.
+
+The occurrence maths is anchored to the **tutor's** timezone, because their
+published hours are; `occurrences.test.ts` walks a series across a DST boundary
+in both directions to prove the wall clock stays put.
+
+### Topics and chapters
+
+A booking now says what it is for. 105 real Cambridge chapters across maths,
+physics, chemistry and biology at IGCSE, O Level, AS and A2 — admin-editable at
+`/admin/curriculum`, retired rather than deleted so a chapter somebody has
+already covered never rewrites their history.
+
+- The student picks up to five, plus **free text** — "I don't understand
+  titration calculations" — which is the more useful half and the one no
+  taxonomy contains. The same picker sits on the standing-slot form, where it
+  answers a longer question: what are these Tuesdays *for*.
+- The tutor sees it before the session, and **before accepting a trial**, which
+  is when the answer actually changes their decision.
+- Afterwards the tutor marks what was **actually** covered. Nothing is
+  pre-ticked: a session booked for three chapters that got through one is the
+  normal case, and a form that collected a lie in one click would make the
+  progress view worthless.
+- `/progress/[tutorId]` shows covered against remaining, and **lists what is
+  left** rather than hiding it behind a total. "Eight to go" is a statistic;
+  "Electrolysis, Chemical energetics, Organic chemistry" is a reason to book
+  Tuesday.
+- Tutor topic strengths are a tiebreak **inside** the exact-match tier, capped
+  at 200 points — deliberately below the ~225 between a 4.6 and a 4.9, so a
+  chapter match cannot out-argue three tenths of a star, and never a new tier.
+
+### Attendance
+
+- **`.ics` and a Google Calendar link at booking.** Worth more than every
+  reminder here put together: a reminder competes with every other notification
+  on a phone, a calendar entry is in the thing they check to find out what their
+  day is. Stable `UID` per booking and a `SEQUENCE` that rises on reschedule, so
+  a moved session *replaces* the entry rather than sitting beside it — the
+  failure that makes people stop adding them.
+- **Reminders at T-24h and T-1h to both, T-10min to the tutor alone**, worded
+  more strongly, because the tutor is being paid and the professional should be
+  in the room first. It is the only reminder that names a consequence, because
+  it is the only one where there is one.
+- **The empty room.** Two minutes in with one person present, the absent one
+  gets a push naming who is waiting, and the person present sees a live
+  countdown. The countdown runs on `NO_SHOW_WAIT_SECONDS` — the same clock that
+  settles the money — counted from when the waiting actually started, not from
+  the hour. A screen that said fifteen while settlement used ten would be
+  lying to somebody about their own money.
+- **WhatsApp behind a provider interface**, the same shape as payments: a mock
+  transport, but real routing, real dedupe on a client reference, and a real
+  failure branch. Everything except the last HTTP call already runs.
+- **Timezone drift** names both times for the next session rather than saying
+  "your timezone may be wrong", and changes nothing on its own — guessing
+  somebody has moved because they opened the app in an airport would be worse
+  than the problem.
+- **No-show escalation**: refund, then a ranking penalty from the first strike
+  (1500 points at three — larger than the timezone-overlap term, because
+  turning up *is* the service), then **loss of instant booking** at two. Their
+  sessions stop confirming themselves; the credits still go into escrow, and an
+  unanswered booking is refunded in full at the tutor's door. There is no
+  removal rung: that is an admin decision about a whole record.
+
+### Homework
+
+Set against a chapter, off the back of a session, submitted as text or a file
+through the existing presigned path, and marked. The mark is optional; the
+feedback is not, because a number with nothing beside it teaches nobody
+anything. Files are private and re-checked at `/api/files` against the two
+people on the assignment.
+
+This is the strongest anti-disintermediation feature in the product and it is
+not a restriction — it is value that only exists here. A tutor and a student who
+move to WhatsApp keep the video call and lose this.
+
+### Two things fixed on the way
+
+**The migrator now commits one file at a time.** Postgres refuses to *use* an
+enum value in the transaction that added it, and drizzle's own `migrate()` wraps
+every pending file in one transaction — so `ALTER TYPE ... ADD VALUE 'scheduled'`
+followed anywhere later by an index predicate mentioning `'scheduled'` failed
+with 55P04. Splitting across two files did not help while both shared a
+transaction. `src/db/migrate.ts` now runs each file in its own, using drizzle's
+own bookkeeping table and hash format so nothing here is a private format.
+
+**`parseClock` rejects nonsense instead of coercing it.** A malformed time from
+a form used to travel as `NaN` into `Intl.DateTimeFormat` and surface as
+`RangeError: Invalid time value` three frames deep in the timezone code, with
+nothing naming the field.
 
 ---
 
@@ -1122,15 +1268,18 @@ says the videos were skipped.
 
 ```
 pnpm typecheck   clean
-pnpm test        43 files, 633 tests passed
-pnpm build       compiled, 41 routes
+pnpm test        48 files, 692 tests passed
+pnpm build       compiled, 48 routes
 pnpm seed        66 users · 40 verified · 5 pending · 1 draft · 1 rejected
-                 10 boards · 214 tutor curriculum positions · 15 student ones
-                 205 bookings spanning the repricing: 15/16/20/22 all present
-                 5 contact flags · 3 open reports · no sanctions
+                 10 boards · 214 tutor curriculum positions · 16 student ones
+                 222 bookings spanning the repricing: 15/16/20/22 all present
+                 3 standing arrangements, one already through a T-48h charge
+                 152 chapters · 151 attached to sessions · 77 marked covered
+                 27 pieces of homework: 27 set, 17 handed in, 12 marked
+                 2 contact flags · 3 open reports · no sanctions
                  5 established pairs gone quiet, 3 still booking
                  zero ledger drift
-pnpm e2e         97 passed
+pnpm e2e         105 passed
 pnpm reconcile   zero drift — including straight after the e2e run
 pnpm prove:curriculum      the database refuses all three
 pnpm prove:rates           the rate change reached no booking that already existed
@@ -1145,3 +1294,9 @@ feed **99 / 100**, admin dashboard **99 / 100**, earnings **100 / 100**.
 
 The dashboard's accessibility started at 92 — a `dl` whose groups carried the
 value outside the `dt`/`dd` pair. Fixed rather than noted.
+
+Phase 7's screens, same preset: standing-slot form **100 / 100**, progress
+**100 / 100**, the student's homework **100 / 100**, the tutor's session page
+**100 / 100**, the tutor's homework **100 / 100**, student dashboard
+**100 / 100**. Mobile emulation at 360px: standing-slot form **100 / 100**,
+progress **100 / 100**.

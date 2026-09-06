@@ -84,6 +84,7 @@ import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
 import { scoreContactIntent, shouldQueueForReview } from '@/lib/messaging/contact-intent';
 import { maskContactInfo } from '@/lib/messaging/masking';
 import { methodsForCountry } from '@/lib/payments/catalogue';
+import { assignHomework, markHomework, submitHomework } from './homework';
 import { createSeries, endSeries, runSeriesJobs } from './series';
 import { dateInZone } from '@/lib/series/occurrences';
 import { DatabaseAvailability } from '@/lib/availability/database';
@@ -424,7 +425,7 @@ async function reset(): Promise<void> {
   await db.execute(sql`
     truncate table
       ledger_entries, session_events, reviews, homework,
-      booking_topics, bookings, recurring_series,
+      booking_topics, bookings, series_topics, recurring_series,
       payouts, payout_methods, credit_purchases, credit_packs,
       follows, messages, threads, notifications, reports, admin_audit,
       contact_flags, user_sanctions,
@@ -2309,6 +2310,127 @@ async function seedBookingTopics(now: Date): Promise<{ attached: number; covered
 }
 
 /**
+ * Work set between sessions.
+ *
+ * Goes through `assignHomework`, `submitHomework` and `markHomework` rather
+ * than writing rows, so the seeded world is one the real code could have
+ * produced — including the rule that marking requires feedback.
+ *
+ * The distribution is the honest one: most work comes back, some of it does
+ * not, and a tutor is usually a session behind on marking. A seed where every
+ * piece is set, handed in and marked would hide the three states the pages
+ * actually have to render.
+ */
+async function seedHomework(now: Date): Promise<{ set: number; handedIn: number; marked: number }> {
+  const rows = (await db.execute(sql`
+    select b.id::text as booking_id, b.tutor_id::text, b.student_id::text, b.start_at_utc,
+           -- A chapter that was covered if there is one, otherwise one that was
+           -- asked for: work is set against what the session was about either way.
+           (select bt.topic_id::text from booking_topics bt
+             where bt.booking_id = b.id order by bt.covered desc nulls last, bt.topic_id limit 1) as topic_id,
+           (select t.name from booking_topics bt join topics t on t.id = bt.topic_id
+             where bt.booking_id = b.id order by bt.covered desc nulls last, bt.topic_id limit 1) as topic_name
+    from bookings b
+    where b.status = 'settled' and b.completed_at is not null and not b.is_trial
+    order by b.start_at_utc desc
+    limit 60
+  `)) as unknown as {
+    booking_id: string;
+    tutor_id: string;
+    student_id: string;
+    start_at_utc: string;
+    topic_id: string | null;
+    topic_name: string | null;
+  }[];
+
+  let set = 0;
+  let handedIn = 0;
+  let marked = 0;
+
+  for (const row of rows) {
+    if (!chance(0.45)) continue;
+
+    const chapter = row.topic_name;
+    const assigned = await assignHomework(
+      {
+        bookingId: row.booking_id,
+        tutorId: row.tutor_id,
+        title: chapter
+          ? pick([
+              `Past paper questions on ${chapter}`,
+              `${chapter}: the worked examples we did not get to`,
+              `Ten questions on ${chapter}, no calculator`,
+              `Write up ${chapter} in your own words, one side`,
+            ])
+          : pick([
+              'Past paper questions from last session',
+              'The worked examples we did not get to',
+              'Ten questions, no calculator',
+              'Write up last session in your own words, one side',
+            ]),
+        body: pick([
+          'Send me a photo of your working, not just the answers. The working is the part I can help with.',
+          null,
+          'If you get stuck for more than ten minutes on one, stop and note where. We will start there.',
+        ]),
+        topicId: row.topic_id,
+        dueAt: new Date(new Date(row.start_at_utc).getTime() + 5 * 86_400_000),
+      },
+      db,
+    );
+
+    if (!assigned.ok) continue;
+    set += 1;
+
+    // Handed in, most of the time, a day or two later.
+    if (!chance(0.65)) continue;
+
+    const submittedAt = new Date(new Date(row.start_at_utc).getTime() + 2 * 86_400_000);
+    const handed = await submitHomework(
+      {
+        homeworkId: assigned.homeworkId,
+        studentId: row.student_id,
+        body: pick([
+          'Done. I got stuck on the last two — I think I am setting them up wrong.',
+          'All finished, working attached.',
+          'I did the first eight. The rest I could not start.',
+        ]),
+      },
+      db,
+      submittedAt > now ? now : submittedAt,
+    );
+
+    if (!handed.ok) continue;
+    handedIn += 1;
+
+    // And marked, usually — a tutor being one piece behind is realistic.
+    if (!chance(0.7)) continue;
+
+    const outOf = pick([10, 20, 25]);
+    const scored = chance(0.75);
+    const result = await markHomework(
+      {
+        homeworkId: assigned.homeworkId,
+        tutorId: row.tutor_id,
+        mark: scored ? Math.max(1, Math.round(outOf * (0.55 + Math.random() * 0.4))) : null,
+        markOutOf: scored ? outOf : null,
+        feedback: pick([
+          'Good working. Where you lost marks was setting up rather than arithmetic — we will do three of those next time.',
+          'This is much better than last week. Keep writing the units down as you go.',
+          'You have the method. Slow down on the substitution step, that is where both errors came from.',
+        ]),
+      },
+      db,
+      submittedAt > now ? now : new Date(submittedAt.getTime() + 86_400_000),
+    );
+
+    if (result.ok) marked += 1;
+  }
+
+  return { set, handedIn, marked };
+}
+
+/**
  * Chapters a tutor says they are strong on.
  *
  * Half of each tutor's chapters, so the tiebreak has something to break and
@@ -2338,6 +2460,13 @@ async function seedTutorTopics(): Promise<number> {
   return written.length;
 }
 
+/** Why somebody books the same hour every week. Written the way people write. */
+const SERIES_NOTES = [
+  'Mocks are in January and I lose marks on the long questions. I want to go through past papers every week rather than book when I panic.',
+  'I am fine in class but I fall behind the week we get something new. A standing slot means I never start a chapter on my own.',
+  'My daughter needs the same time every week or it does not happen. Please keep to the chapters we agreed and tell me if she has not done the work.',
+] as const;
+
 async function seedRecurringSeries(
   students: SeededStudent[],
   tutors: SeededTutor[],
@@ -2349,6 +2478,24 @@ async function seedRecurringSeries(
     (tutor) => !(PAYOUT_FIXTURE_EMAILS as readonly string[]).includes(tutor.email),
   );
 
+  // Students whose syllabus we actually have chapters for come first, so the
+  // seeded world shows a standing slot with its chapters attached. The rest
+  // still get one, which is how the empty picker gets exercised too.
+  const withChapters = new Set(
+    (
+      (await db.execute(sql`
+        select distinct sc.student_id::text as id
+        from student_curriculum sc
+        join topics t
+          on t.board_id = sc.board_id and t.level_id = sc.level_id and t.subject_id = sc.subject_id
+      `)) as unknown as { id: string }[]
+    ).map((row) => row.id),
+  );
+
+  const ordered = [...students].sort(
+    (a, b) => Number(withChapters.has(b.id)) - Number(withChapters.has(a.id)),
+  );
+
   let created = 0;
   let charged = 0;
   let studentIndex = 0;
@@ -2356,7 +2503,7 @@ async function seedRecurringSeries(
   for (const [index, tutor] of candidates.entries()) {
     if (created >= 3) break;
 
-    const student = students[studentIndex % students.length]!;
+    const student = ordered[studentIndex % ordered.length]!;
 
     // A slot the engine really offers, so the series sits on published hours.
     const free = await availability.freeSlotsFor(
@@ -2387,6 +2534,19 @@ async function seedRecurringSeries(
     // The first one started a week ago, so it has history. The rest start now.
     const startedAt = created === 0 ? daysFromNow(-8, 9) : now;
 
+    // What the arrangement is for, from the student's own syllabus. A standing
+    // slot is agreed for a reason, and the reason is the thing the tutor reads
+    // before every one of these sessions.
+    const chapters = (await db.execute(sql`
+      select t.id::text as id
+      from student_curriculum sc
+      join topics t
+        on t.board_id = sc.board_id and t.level_id = sc.level_id and t.subject_id = sc.subject_id
+      where sc.student_id = ${student.id}::uuid and t.is_active
+      order by sc.is_primary desc, t.sort_order
+      limit 2
+    `)) as unknown as { id: string }[];
+
     const result = await createSeries(
       {
         studentId: student.id,
@@ -2395,6 +2555,8 @@ async function seedRecurringSeries(
         startTimeLocal: `${part('hour')}:${part('minute')}:00`,
         durationMinutes: 60,
         startsOn: dateInZone(startedAt, tutor.timezone),
+        topicIds: chapters.map((chapter) => chapter.id),
+        topicNote: SERIES_NOTES[created % SERIES_NOTES.length]!,
       },
       startedAt,
       db,
@@ -2930,7 +3092,6 @@ async function main() {
     passwordHash,
   );
   const topicCount = await seedTopics(subjectIds);
-  const series = await seedRecurringSeries(students, verified, wallets, NOW);
   const payoutFixtures = await seedPayoutFixtures(
     verified,
     students,
@@ -2953,10 +3114,13 @@ async function main() {
 
   const curriculum = await seedCurriculumDeclarations([...verified, ...pending], students, subjectIds);
 
-  // After the declarations, because both of these join through them: a chapter
-  // is only offered to somebody whose declared position it belongs to.
+  // After the declarations, because all three of these join through them: a
+  // chapter is only offered to somebody whose declared position it belongs to,
+  // and a standing arrangement is agreed for chapters like anything else.
+  const series = await seedRecurringSeries(students, verified, wallets, NOW);
   const covered = await seedBookingTopics(NOW);
   const strengths = await seedTutorTopics();
+  const work = await seedHomework(NOW);
 
   const conversations = await seedConversations(NOW);
   const reportCount = await seedReports(students, verified);
@@ -3016,6 +3180,9 @@ async function main() {
   );
   console.log(
     `  chapters                 ${topicCount} seeded · ${covered.attached} attached to sessions · ${covered.covered} marked covered · ${strengths} tutor strengths`,
+  );
+  console.log(
+    `  homework                 ${work.set} set · ${work.handedIn} handed in · ${work.marked} marked`,
   );
   console.log(`  awaiting settlement      ${counts.awaitingSettlement}`);
   console.log(`  reviews                  ${totals.reviews}`);

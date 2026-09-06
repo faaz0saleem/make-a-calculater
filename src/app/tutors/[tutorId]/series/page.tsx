@@ -18,12 +18,14 @@ import { notFound } from 'next/navigation';
 
 import { startSeries } from '@/app/tutors/[tutorId]/series/actions';
 import { SiteHeader } from '@/components/site-header';
+import { TopicPicker } from '@/components/topics/topic-picker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Field } from '@/components/ui/select';
 import { db } from '@/db/client';
 import { seriesFor } from '@/db/series';
 import { subjects } from '@/db/schema';
+import { topicsForStudent } from '@/db/topics';
 import { loadTutorDossier } from '@/db/tutors';
 import { requireUser } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
@@ -50,6 +52,10 @@ export default async function SeriesPage({
   if (bookabilityProblem(tutor)) notFound();
 
   const existing = (await seriesFor(user.id, 'student')).find((row) => row.tutorId === tutorId);
+
+  // Every chapter on the student's own syllabus, not narrowed by subject: the
+  // subject is picked in this same form, so there is nothing to narrow by yet.
+  const topicOptions = await topicsForStudent(user.id, null);
 
   const subjectRows =
     tutor.subjects.length > 0
@@ -187,6 +193,11 @@ export default async function SeriesPage({
                     </select>
                   </Field>
                 ) : null}
+
+                <TopicPicker
+                  topics={topicOptions}
+                  label="What is the standing slot for?"
+                />
 
                 <div className="rounded-md bg-secondary px-4 py-3 text-sm">
                   <p className="font-medium">

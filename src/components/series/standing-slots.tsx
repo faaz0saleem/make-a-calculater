@@ -74,6 +74,27 @@ export function StandingSlots({
                 )}
               </div>
 
+              {row.topics.length > 0 || row.topicNote ? (
+                <div className="rounded-md bg-secondary px-3 py-2 text-xs" data-testid="series-topics">
+                  {row.topics.length > 0 ? (
+                    <p>
+                      <span className="font-medium">Working through:</span>{' '}
+                      {row.topics
+                        .map((topic) =>
+                          topic.reference ? `${topic.reference} ${topic.name}` : topic.name,
+                        )
+                        .join(' · ')}
+                    </p>
+                  ) : null}
+                  {row.topicNote ? (
+                    <p className={row.topics.length > 0 ? 'mt-1 text-muted-foreground' : ''}>
+                      {viewer === 'tutor' ? `${other} said: ` : 'You said: '}
+                      {row.topicNote}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+
               {row.endReason ? (
                 <p className="text-xs text-muted-foreground">
                   {row.endedBy === viewer ? 'You said' : `${other} said`}: {row.endReason}

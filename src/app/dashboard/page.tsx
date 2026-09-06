@@ -91,6 +91,7 @@ export default async function DashboardPage({
   const tutorName = { name: users.name };
 
   const standing = await seriesFor(user.id, 'student', db, now);
+  const standingCount = standing.reduce((total, row) => total + row.upcoming.length, 0);
   const baseUrl = getEnv().AUTH_URL ?? '';
 
   /**
@@ -424,11 +425,23 @@ export default async function DashboardPage({
         <Card>
           <CardHeader>
             <CardTitle>Upcoming sessions</CardTitle>
-            <CardDescription>{upcoming.length} scheduled</CardDescription>
+            <CardDescription>
+              {/* Standing slots have their own card above. Saying "0 scheduled"
+                  to somebody with six booked Wednesdays would be a lie about
+                  their own calendar. */}
+              {upcoming.length} booked one at a time
+              {standingCount > 0
+                ? `, plus ${standingCount} standing ${standingCount === 1 ? 'session' : 'sessions'} above`
+                : ''}
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {upcoming.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Nothing booked yet.</p>
+              <p className="text-sm text-muted-foreground">
+                {standingCount > 0
+                  ? 'Nothing booked outside your standing slots.'
+                  : 'Nothing booked yet.'}
+              </p>
             ) : (
               <ul className="flex flex-col divide-y divide-border">
                 {upcoming.map((booking) => (

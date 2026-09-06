@@ -22,6 +22,8 @@ export async function startSeries(tutorId: string, formData: FormData): Promise<
   const startTimeLocal = String(formData.get('startTimeLocal') ?? '');
   const durationMinutes = Number(formData.get('durationMinutes') ?? 60);
   const subjectId = String(formData.get('subjectId') ?? '') || null;
+  const topicIds = formData.getAll('topicIds').map(String).filter(Boolean);
+  const topicNote = String(formData.get('topicNote') ?? '');
 
   const result = await createSeries({
     studentId: user.id,
@@ -30,6 +32,8 @@ export async function startSeries(tutorId: string, formData: FormData): Promise<
     startTimeLocal,
     durationMinutes,
     subjectId,
+    topicIds,
+    topicNote,
   });
 
   revalidatePath(`/tutors/${tutorId}`);

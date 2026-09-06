@@ -33,8 +33,17 @@ import { db as defaultDb, type Database } from './client';
 import type { DbLike } from './ledger';
 import { hasCompletedPaidSession } from './bookings';
 import { notify } from './notifications';
+import { setBookingTopics, seriesTopicIds, setSeriesTopics } from './topics';
 import { moveBookingStatus } from './sessions';
-import { bookings, recurringSeries, studentWallets, tutorProfiles, users } from './schema';
+import {
+  bookings,
+  recurringSeries,
+  seriesTopics,
+  studentWallets,
+  topics,
+  tutorProfiles,
+  users,
+} from './schema';
 import { DatabaseAvailability } from '@/lib/availability/database';
 import { formatCents } from '@/lib/money/cents';
 import { bookingEscrowEntries } from '@/lib/money/ledger';
@@ -107,6 +116,7 @@ export type SeriesRow = {
   status: string;
   endedBy: string | null;
   endReason: string | null;
+  topicNote: string | null;
   createdAt: Date;
 };
 
@@ -125,6 +135,7 @@ const SERIES_VIEW = {
   status: recurringSeries.status,
   endedBy: recurringSeries.endedBy,
   endReason: recurringSeries.endReason,
+  topicNote: recurringSeries.topicNote,
   createdAt: recurringSeries.createdAt,
 } as const;
 
@@ -152,6 +163,10 @@ export async function createSeries(
     startTimeLocal: string;
     durationMinutes: number;
     subjectId?: string | null;
+    /** Chapters the arrangement is for. Copied onto every occurrence. */
+    topicIds?: readonly string[];
+    /** The sentence a taxonomy cannot hold. Copied onto every occurrence too. */
+    topicNote?: string | null;
     /** Local date in the tutor's timezone. Defaults to today. */
     startsOn?: string;
   },
@@ -177,6 +192,7 @@ export async function createSeries(
         promoStartsAt: tutorProfiles.promoStartsAt,
         promoEndsAt: tutorProfiles.promoEndsAt,
         negotiatedCommissionBps: tutorProfiles.commissionBps,
+        minLeadMinutes: tutorProfiles.minLeadMinutes,
         timezone: users.timezone,
         suspendedAt: users.suspendedAt,
       })
@@ -235,8 +251,14 @@ export async function createSeries(
     const horizon = toDateString(
       getLocalParts(new Date(now.getTime() + MATERIALISE_DAYS * 86_400_000), timezone),
     );
+    // Past the tutor's own notice period rather than merely in the future.
+    // Somebody setting up a Tuesday slot on a Tuesday afternoon is agreeing to
+    // every Tuesday from here; that this evening is too short notice for this
+    // tutor is not a clash, and refusing the whole arrangement over it would
+    // be the wrong answer to the right rule.
+    const earliest = new Date(now.getTime() + tutor.minLeadMinutes * 60_000);
     const wanted = occurrencesBetween(definition, startsOn, horizon).filter(
-      (occurrence) => occurrence.startUtc > now,
+      (occurrence) => occurrence.startUtc > earliest,
     );
 
     if (wanted.length === 0) return { ok: false, problem: 'not_available' as const };
@@ -279,10 +301,15 @@ export async function createSeries(
         durationMinutes,
         priceCents,
         startsOn,
+        topicNote: (input.topicNote ?? '').trim() || null,
       })
       .returning({ id: recurringSeries.id });
 
     const seriesId = created!.id;
+
+    // Before materialising, so the first four weeks carry the chapters too.
+    await setSeriesTopics(seriesId, input.topicIds ?? [], tx);
+
     const count = await materialise(seriesId, now, tx);
 
     await notify(
@@ -334,6 +361,7 @@ export async function materialise(
     .select({
       timezone: users.timezone,
       negotiatedCommissionBps: tutorProfiles.commissionBps,
+      minLeadMinutes: tutorProfiles.minLeadMinutes,
     })
     .from(users)
     .innerJoin(tutorProfiles, eq(tutorProfiles.userId, users.id))
@@ -357,7 +385,12 @@ export async function materialise(
     },
     dateInZone(now, series.timezone),
     horizon,
-  ).filter((occurrence) => occurrence.startUtc > now);
+    // The same notice period `createSeries` validated against, so the job
+    // cannot write the one occurrence the check deliberately left out.
+  ).filter(
+    (occurrence) =>
+      occurrence.startUtc.getTime() > now.getTime() + tutor.minLeadMinutes * 60_000,
+  );
 
   // How many occurrences this pair already has, so the first-session rate is
   // charged once across the life of the series rather than once per week.
@@ -367,12 +400,15 @@ export async function materialise(
     .where(eq(bookings.seriesId, seriesId));
 
   const returning = await hasCompletedPaidSession(series.studentId, series.tutorId, tx);
+  // Read once, written onto each occurrence: what the arrangement is for is a
+  // property of the arrangement, and the tutor reads it on the session page.
+  const topicIds = await seriesTopicIds(seriesId, tx);
   let index = Number(already?.total ?? 0);
   let created = 0;
 
   for (const occurrence of wanted) {
     const inserted = await insertOccurrence(
-      { series, occurrence, index, returning, tutor, student },
+      { series, occurrence, index, returning, tutor, student, topicIds },
       tx,
     );
 
@@ -396,12 +432,13 @@ async function insertOccurrence(
     occurrence: Occurrence;
     index: number;
     returning: boolean;
-    tutor: { timezone: string; negotiatedCommissionBps: number | null };
+    tutor: { timezone: string; negotiatedCommissionBps: number | null; minLeadMinutes: number };
     student: { timezone: string };
+    topicIds: readonly string[];
   },
   tx: DbLike,
 ): Promise<boolean> {
-  const { series, occurrence, index, returning, tutor, student } = params;
+  const { series, occurrence, index, returning, tutor, student, topicIds } = params;
 
   const rows = await tx
     .insert(bookings)
@@ -420,6 +457,7 @@ async function insertOccurrence(
       commissionBps: commissionForOccurrence(index, returning, tutor.negotiatedCommissionBps),
       studentTz: student.timezone,
       tutorTz: tutor.timezone,
+      topicNote: series.topicNote,
     })
     // Two things can refuse this: the occurrence already exists, or the slot is
     // taken by a one-off. Neither is an error worth stopping the month for.
@@ -433,6 +471,8 @@ async function insertOccurrence(
     .update(bookings)
     .set({ livekitRoom: `booking_${created.id}` })
     .where(eq(bookings.id, created.id));
+
+  if (topicIds.length > 0) await setBookingTopics(created.id, topicIds, tx);
 
   return true;
 }
@@ -732,6 +772,8 @@ export type SeriesView = SeriesRow & {
   /** Upcoming occurrences that still exist as rows. */
   upcoming: { bookingId: string; startAtUtc: Date; status: string; priceCents: number }[];
   sessionsPerWeek: number;
+  /** The chapters it is for, as they read on the syllabus. */
+  topics: { id: string; name: string; reference: string | null }[];
 };
 
 export async function seriesFor(
@@ -780,9 +822,30 @@ export async function seriesFor(
     )
     .orderBy(asc(bookings.startAtUtc));
 
+  const chapters = await database
+    .select({
+      seriesId: seriesTopics.seriesId,
+      id: topics.id,
+      name: topics.name,
+      reference: topics.reference,
+      sortOrder: topics.sortOrder,
+    })
+    .from(seriesTopics)
+    .innerJoin(topics, eq(topics.id, seriesTopics.topicId))
+    .where(
+      inArray(
+        seriesTopics.seriesId,
+        rows.map((row) => row.id),
+      ),
+    )
+    .orderBy(asc(topics.sortOrder), asc(topics.name));
+
   return rows.map((row) => ({
     ...(row as unknown as SeriesRow & { studentName: string | null; tutorName: string | null }),
     sessionsPerWeek: row.weekdays.length,
+    topics: chapters
+      .filter((chapter) => chapter.seriesId === row.id)
+      .map((chapter) => ({ id: chapter.id, name: chapter.name, reference: chapter.reference })),
     upcoming: occurrences
       .filter((occurrence) => occurrence.seriesId === row.id)
       .map((occurrence) => ({

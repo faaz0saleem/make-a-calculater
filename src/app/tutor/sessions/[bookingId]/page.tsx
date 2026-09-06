@@ -120,15 +120,39 @@ export default async function AfterSessionPage({
           </p>
         ) : null}
 
-        {booking.topicNote ? (
+        {booking.topicNote || topics.length > 0 ? (
           <Card>
             <CardHeader>
               <CardTitle as="h2">What they asked for</CardTitle>
+              {topics.length > 0 ? (
+                <CardDescription>
+                  What the booking is for. What it got through is the next card, and the two are
+                  allowed to differ.
+                </CardDescription>
+              ) : null}
             </CardHeader>
-            <CardContent>
-              <blockquote className="rounded-md bg-secondary px-3 py-2 text-sm" data-testid="student-note">
-                {booking.topicNote}
-              </blockquote>
+            <CardContent className="flex flex-col gap-3">
+              {/* The chapters belong here as well as in the marking form: this
+                  is the card a tutor reads before the session, and a chapter
+                  list they cannot see until afterwards prepares nobody. */}
+              {topics.length > 0 ? (
+                <ul className="flex flex-col gap-1 text-sm" data-testid="asked-topics">
+                  {topics.map((topic) => (
+                    <li key={topic.topicId}>
+                      {topic.reference ? (
+                        <span className="text-muted-foreground">{topic.reference} </span>
+                      ) : null}
+                      {topic.name}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {booking.topicNote ? (
+                <blockquote className="rounded-md bg-secondary px-3 py-2 text-sm" data-testid="student-note">
+                  {booking.topicNote}
+                </blockquote>
+              ) : null}
             </CardContent>
           </Card>
         ) : null}

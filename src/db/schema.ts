@@ -986,6 +986,15 @@ export const recurringSeries = pgTable(
     /** How far ahead occurrences have been created, so the job is idempotent. */
     materialisedThrough: date(),
 
+    /**
+     * What the arrangement is for, in the student's own words.
+     *
+     * Copied onto every occurrence, because the tutor reads it on the session
+     * page and should not have to go and find the series to know why they are
+     * meeting every Tuesday.
+     */
+    topicNote: text(),
+
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
@@ -999,6 +1008,32 @@ export const recurringSeries = pgTable(
     ),
     check('recurring_series_duration', sql`duration_minutes in (30, 60)`),
     check('recurring_series_price', sql`price_cents > 0`),
+  ],
+);
+
+/**
+ * The chapters a standing arrangement is for.
+ *
+ * Separate from `booking_topics` rather than derived from it: this is the
+ * syllabus the series was agreed on, and it is copied onto each occurrence as
+ * that occurrence is materialised. Editing it changes what future sessions are
+ * booked for and leaves the ones already marked alone — a tutor's record of
+ * what was covered in March is not a thing an April edit may rewrite.
+ */
+export const seriesTopics = pgTable(
+  'series_topics',
+  {
+    seriesId: uuid()
+      .notNull()
+      .references(() => recurringSeries.id, { onDelete: 'cascade' }),
+    topicId: uuid()
+      .notNull()
+      .references(() => topics.id, { onDelete: 'cascade' }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.seriesId, table.topicId] }),
+    index('series_topics_topic_idx').on(table.topicId),
   ],
 );
 
