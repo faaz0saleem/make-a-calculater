@@ -18,6 +18,7 @@
 import Link from 'next/link';
 import { cookies } from 'next/headers';
 
+import { SignedOutIntro } from '@/app/(marketing)/_components/signed-out-intro';
 import { CategoryChips } from '@/components/feed/category-chips';
 import { CurriculumBanner } from '@/components/feed/curriculum-banner';
 import { CurriculumPrompt } from '@/components/feed/curriculum-prompt';
@@ -54,9 +55,33 @@ import { currentUser } from '@/lib/auth/guards';
 import { countryFromTimeZone } from '@/lib/geo/timezone-country';
 import { isValidTimeZone, zonedTimeToUtc } from '@/lib/time';
 import { toCardData } from '@/lib/tutors/card';
+import { hasQueryParameters, pageMetadata } from '@/lib/seo/site';
 import { LAST_SUBJECT_COOKIE } from '@/middleware';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * One canonical for the feed, and no index on any filtered variant.
+ *
+ * `/?board=caie&level=a-level` is the same page as `/` with a question asked of
+ * it. Letting each combination be indexed separately is how a marketplace ends
+ * up competing with itself for its own name — and the editorial pages in
+ * `(seo)` are the ones written to rank for those queries anyway
+ * (CODEX_NOTES.md, boundary stop 3).
+ */
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const params = await searchParams;
+  return pageMetadata(
+    'Find a tutor worth your hour',
+    'Watch a minute of someone teaching before you book them. Every lesson is live, one to one, on video or voice.',
+    '/',
+    !hasQueryParameters(params),
+  );
+}
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -337,6 +362,11 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           </p>
         </section>
 
+        {/* Somebody who has never been here needs to be told what this is before
+            being shown a grid of strangers. Somebody who has filtered has already
+            asked a question, and the answer should not be below an introduction. */}
+        {!viewer && browsing ? <SignedOutIntro /> : null}
+
         <CategoryChips subjects={subjects} active={filters.subject} buildHref={buildHref} />
 
         {viewer && declared.length === 0 && !promptDismissed ? (
@@ -399,11 +429,6 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
             <Rail
               title="Available in the next hour"
-              pending={
-                availableRow === null
-                  ? 'This rail needs the booking calendar, which arrives in Phase 3. Rather than guess who is free, it stays empty.'
-                  : undefined
-              }
               tutors={availableRow ? await toCardData(availableRow, timezone) : undefined}
             />
 
@@ -421,7 +446,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           </>
         ) : null}
 
-        <section className="flex flex-col gap-4">
+        <section id="tutor-feed" className="flex flex-col gap-4 scroll-mt-6">
           <h2 className="text-lg font-semibold tracking-tight">
             {browsing ? 'All tutors' : `${results.total} result${results.total === 1 ? '' : 's'}`}
           </h2>
@@ -496,11 +521,29 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
       </main>
 
       <footer className="border-t border-border">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-6 text-sm text-muted-foreground">
-          Credits never expire and are non-refundable to cash — refunds are returned as credits.{' '}
-          <Link href="/signup" className="underline underline-offset-4">
-            Create an account
-          </Link>
+        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 text-sm text-muted-foreground sm:px-6">
+          <p>
+            Credits never expire and are non-refundable to cash — refunds are returned as credits.{' '}
+            <Link href="/signup" className="underline underline-offset-4">
+              Create an account
+            </Link>
+          </p>
+          {/* The policies have to be reachable from inside the product, not only
+              from the marketing pages somebody may never see. */}
+          <nav aria-label="Policies" className="flex flex-wrap gap-x-5 gap-y-2">
+            {[
+              ['How pricing works', '/pricing'],
+              ['Become a tutor', '/teach'],
+              ['Terms', '/terms'],
+              ['Privacy', '/privacy'],
+              ['Refunds', '/refund-policy'],
+              ['Child safety', '/child-safety'],
+            ].map(([label, href]) => (
+              <Link key={href} href={href!} className="underline underline-offset-4">
+                {label}
+              </Link>
+            ))}
+          </nav>
         </div>
       </footer>
     </>

@@ -7,6 +7,7 @@
 
 import type { NextAuthConfig } from 'next-auth';
 
+import { isPublicPath } from '@/lib/auth/public-paths';
 import { isUserRole, type UserRole } from '@/lib/auth/roles';
 
 /**
@@ -15,14 +16,6 @@ import { isUserRole, type UserRole } from '@/lib/auth/roles';
  */
 function rolesFromToken(value: unknown): UserRole[] {
   return Array.isArray(value) ? value.filter(isUserRole) : [];
-}
-
-/** Paths a signed-out visitor may reach. Everything else needs a session. */
-const PUBLIC_PREFIXES = ['/', '/signin', '/signup', '/tutors', '/api/auth', '/api/health'];
-
-function isPublicPath(pathname: string): boolean {
-  if (pathname === '/') return true;
-  return PUBLIC_PREFIXES.some((prefix) => prefix !== '/' && pathname.startsWith(prefix));
 }
 
 export const authConfig = {
