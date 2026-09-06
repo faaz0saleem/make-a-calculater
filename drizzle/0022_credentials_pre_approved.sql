@@ -1,0 +1,1 @@
+ALTER TABLE "tutor_profiles" ADD COLUMN "credentials_pre_approved" boolean DEFAULT false NOT NULL;

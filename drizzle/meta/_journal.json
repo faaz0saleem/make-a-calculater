@@ -141,6 +141,27 @@
       "when": 1788724171916,
       "tag": "0019_email_payload",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788725100880,
+      "tag": "0020_curriculum_interest",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1788725453163,
+      "tag": "0021_tutor_invites",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1788725581459,
+      "tag": "0022_credentials_pre_approved",
+      "breakpoints": true
     }
   ]
 }

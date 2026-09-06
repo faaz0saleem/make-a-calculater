@@ -411,6 +411,15 @@ export const tutorProfiles = pgTable(
       .primaryKey()
       .references(() => users.id, { onDelete: 'cascade' }),
     status: tutorStatusEnum().notNull().default('draft'),
+    /**
+     * A human vetted this person before they ever saw the site (SPEC.md §3).
+     *
+     * Set only by an admin invite. It means the *document review* is already
+     * done, so submitting the profile goes straight to verified rather than
+     * into the queue. It does not skip the profile itself: subjects, rates and
+     * hours are still theirs to fill in, because nobody else can.
+     */
+    credentialsPreApproved: boolean().notNull().default(false),
     headline: varchar({ length: 80 }),
     bio: text(),
     introVideoId: uuid().references(() => videos.id, { onDelete: 'set null' }),
@@ -1674,6 +1683,102 @@ export const notifications = pgTable(
   (table) => [
     index('notifications_user_idx').on(table.userId, table.createdAt),
     uniqueIndex('notifications_dedupe_key').on(table.dedupeKey),
+  ],
+);
+
+/**
+ * A tutor invited by hand (SPEC.md §3, §14).
+ *
+ * The first cohort of a marketplace is recruited in person, not through a
+ * signup form. This is that path: an admin creates a single-use link, sends it
+ * however they actually reached the person, and the tutor lands on a page that
+ * already knows who they are.
+ *
+ * `preVerified` skips the *document review*, not the profile. Somebody the
+ * founder met and vetted does not need to photograph a degree certificate for a
+ * queue of one — but they still have to say what they teach, what they charge
+ * and when they are free, because nobody else can. A verified profile with no
+ * rates and no hours would be the empty-looking card this whole phase is about
+ * avoiding.
+ *
+ * The token is stored hashed. A link in a WhatsApp thread is a credential, and
+ * a database dump should not contain working ones.
+ */
+export const tutorInvites = pgTable(
+  'tutor_invites',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    email: varchar({ length: 255 }).notNull(),
+    name: varchar({ length: 120 }),
+    /** sha256 of the token in the link. The raw value is shown once. */
+    tokenHash: varchar({ length: 64 }).notNull(),
+    invitedBy: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    /** Why this person, in the admin's words. Reads back in the audit trail. */
+    note: text(),
+    preVerified: boolean().notNull().default(true),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    acceptedAt: timestamp({ withTimezone: true }),
+    acceptedUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('tutor_invites_token_key').on(table.tokenHash),
+    index('tutor_invites_email_idx').on(table.email),
+  ],
+);
+
+/**
+ * Somebody looked for a tutor we do not have (SPEC.md §4, §10).
+ *
+ * The admin dashboard already derives unmatched demand from what students have
+ * *declared*, which misses the two cases that matter most at launch: a visitor
+ * who has not signed up, and a student whose declaration is not the thing they
+ * are searching for today. This table is the other half — the position somebody
+ * asked for by name, and found nothing.
+ *
+ * Anonymous rows are allowed and are the point. A signed-out visitor filtering
+ * to CBSE Class 10 Maths and leaving is the single most valuable thing to know
+ * before recruiting the next tutor, and requiring them to sign up first would
+ * mean never learning it.
+ */
+export const curriculumInterest = pgTable(
+  'curriculum_interest',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    /** Null for a visitor who has not signed in. */
+    userId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    boardId: varchar({ length: 32 })
+      .notNull()
+      .references(() => boards.id, { onDelete: 'cascade' }),
+    levelId: varchar({ length: 64 }).notNull(),
+    subjectId: uuid()
+      .notNull()
+      .references(() => subjects.id, { onDelete: 'cascade' }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: 'curriculum_interest_level_fk',
+      columns: [table.boardId, table.levelId],
+      foreignColumns: [curriculumLevels.boardId, curriculumLevels.id],
+    }).onDelete('cascade'),
+    index('curriculum_interest_position_idx').on(table.boardId, table.levelId, table.subjectId),
+    // One row per person per position per day: a student refreshing a page is
+    // one piece of demand, not fifteen. Anonymous visitors collapse to a single
+    // row per position per day, because a null user id does not equal another
+    // null one and fifty refreshes would otherwise read as fifty people.
+    uniqueIndex('curriculum_interest_daily_key').on(
+      sql`coalesce(${table.userId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      table.boardId,
+      table.levelId,
+      table.subjectId,
+      // `at time zone 'UTC'` because a bare `::date` on a timestamptz depends on
+      // the session's TimeZone and Postgres will not index a function that can
+      // change its mind.
+      sql`((created_at at time zone 'UTC')::date)`,
+    ),
   ],
 );
 

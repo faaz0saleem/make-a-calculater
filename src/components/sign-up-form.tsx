@@ -20,7 +20,10 @@
  */
 
 import { signIn } from 'next-auth/react';
+
 import { useEffect, useMemo, useState } from 'react';
+
+import { PASSWORD_RULE } from '@/lib/auth/password-rules';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -155,9 +158,7 @@ export function SignUpForm({
         Password
       </label>
       <Input id="password" name="password" type="password" required autoComplete="new-password" />
-      <p className="text-xs text-muted-foreground">
-        At least 10 characters, with a letter and a number.
-      </p>
+      <p className="text-xs text-muted-foreground">{PASSWORD_RULE}</p>
 
       <fieldset className="mt-1 flex flex-col gap-2" data-testid="age-question">
         <legend className="text-sm font-medium">Are you 18 or over?</legend>

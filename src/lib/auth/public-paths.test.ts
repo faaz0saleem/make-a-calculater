@@ -69,6 +69,12 @@ describe('isPublicPath', () => {
     expect(isPublicPath('/dashboard/')).toBe(false);
   });
 
+  it('lets an invited tutor reach the page that creates their account', () => {
+    expect(isPublicPath('/invite/some-token')).toBe(true);
+    // The admin side of the same feature stays private.
+    expect(isPublicPath('/admin/invite')).toBe(false);
+  });
+
   it('lets an unsubscribe link work without a session', () => {
     expect(isPublicPath('/unsubscribe')).toBe(true);
     expect(isPublicPath('/unsubscribe/some-token')).toBe(true);

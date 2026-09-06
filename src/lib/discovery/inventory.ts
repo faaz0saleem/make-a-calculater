@@ -1,0 +1,84 @@
+/**
+ * What the feed should look like when there is barely anything in it
+ * (SPEC.md §4).
+ *
+ * The seeded world has forty tutors. Launch has three, and every surface that
+ * assumes depth looks broken on day one: rails that are the grid again under a
+ * different heading, category chips that lead nowhere, a filter panel taller
+ * than its own results. None of that is a bug in the usual sense — each piece
+ * works — and all of it says "this place is empty" to the first person through
+ * the door.
+ *
+ * So the shape of the page is a function of how much there is to show, decided
+ * here rather than by six components each guessing.
+ */
+
+/**
+ * Below this, a rail is not a selection — it is the whole catalogue with a
+ * heading on it.
+ *
+ * Eight is deliberate: a rail shows about four cards before scrolling, so a
+ * rail drawn from fewer than double that is mostly the same faces the grid
+ * below is about to show again. A student seeing Farah three times does not
+ * think "curated", they think "is that all there is".
+ */
+export const RAILS_NEED_TUTORS = 8;
+
+/** Below this, the grid is a short list and should be introduced as one. */
+export const SPARSE_GRID_TUTORS = 6;
+
+export type FeedShape = {
+  /** Rails between the chips and the grid. */
+  showRails: boolean;
+  /** Say how few there are, rather than letting a three-card grid speak. */
+  acknowledgeSmallCatalogue: boolean;
+  /**
+   * There is nothing at all, and no filter caused it.
+   *
+   * The day-one state, and the one that most needs its own words: "nothing
+   * matched those filters" in front of somebody who has not set a filter reads
+   * as a broken site, and the fix they are being offered — clear your
+   * filters — does nothing.
+   */
+  catalogueEmpty: boolean;
+  /** Filtering an empty catalogue is a form with nothing behind it. */
+  showFilters: boolean;
+  /** The heading over the grid. */
+  gridHeading: string;
+};
+
+export function feedShape(visibleTutors: number, browsing: boolean): FeedShape {
+  if (!browsing) {
+    return {
+      showRails: false,
+      acknowledgeSmallCatalogue: false,
+      catalogueEmpty: false,
+      showFilters: true,
+      gridHeading: 'Results',
+    };
+  }
+
+  return {
+    showRails: visibleTutors >= RAILS_NEED_TUTORS,
+    acknowledgeSmallCatalogue: visibleTutors > 0 && visibleTutors < SPARSE_GRID_TUTORS,
+    catalogueEmpty: visibleTutors === 0,
+    showFilters: visibleTutors > 0,
+    gridHeading: visibleTutors < SPARSE_GRID_TUTORS ? 'Every tutor on Tutorly' : 'All tutors',
+  };
+}
+
+/**
+ * How to describe a very small catalogue without apologising for it.
+ *
+ * The honest framing is the one that is also the most attractive: a small
+ * roster is a vetted roster. What it must not do is pretend — "12 tutors
+ * matched" over three cards is the sentence that loses somebody's trust for
+ * good.
+ */
+export function smallCatalogueNote(visibleTutors: number): string {
+  if (visibleTutors === 1) {
+    return 'One tutor so far. We verify every one by hand before they appear here, and we are adding them a few at a time.';
+  }
+
+  return `${visibleTutors} tutors so far. We verify every one by hand before they appear here, and we are adding them a few at a time.`;
+}

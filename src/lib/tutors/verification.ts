@@ -52,16 +52,45 @@ export async function submitForReview(tutorId: string): Promise<void> {
     throw new VerificationError(`Finish these steps first: ${missing}.`);
   }
 
+  const now = new Date();
+
+  // An invited tutor's credentials were vetted by a person before they ever saw
+  // the site (SPEC.md §3). Sending them to a queue of one to be approved by the
+  // same person who invited them is theatre, and it delays the only thing that
+  // matters at launch — a real profile in the feed.
+  const [profile] = await db
+    .select({ preApproved: tutorProfiles.credentialsPreApproved, invitedBy: tutorProfiles.verifiedBy })
+    .from(tutorProfiles)
+    .where(eq(tutorProfiles.userId, tutorId))
+    .limit(1);
+
+  if (profile?.preApproved) {
+    await db
+      .update(tutorProfiles)
+      .set({
+        status: 'verified',
+        submittedAt: now,
+        verifiedAt: now,
+        rejectionReason: null,
+        updatedAt: now,
+      })
+      .where(eq(tutorProfiles.userId, tutorId));
+
+    await recomputeTutorRankingFor(tutorId);
+    await emailVerificationDecision({ tutorId, decision: 'approved' });
+    return;
+  }
+
   const next = transitionTutor(snapshot.status, 'pending_review');
 
   await db
     .update(tutorProfiles)
     .set({
       status: next,
-      submittedAt: new Date(),
+      submittedAt: now,
       // A resubmission clears the previous rejection so the queue shows it fresh.
       rejectionReason: null,
-      updatedAt: new Date(),
+      updatedAt: now,
     })
     .where(eq(tutorProfiles.userId, tutorId));
 }

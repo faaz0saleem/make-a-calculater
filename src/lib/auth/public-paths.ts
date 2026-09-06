@@ -28,6 +28,9 @@ const PUBLIC_PREFIXES = [
   // the link useless (SPEC.md §11).
   '/unsubscribe',
   '/api/unsubscribe',
+  // An invited tutor has no account yet, so the page that creates one for them
+  // cannot be behind a session (SPEC.md §3).
+  '/invite',
 ] as const;
 
 /** These exact paths, and nothing beneath them. */

@@ -29,6 +29,7 @@ import {
   CardMetric,
   CardTitle,
 } from '@/components/ui/card';
+import { askedAndMissing } from '@/db/demand';
 import { formatReconciliationReport, reconcileLedger } from '@/db/ledger';
 import {
   moneyOverview,
@@ -60,6 +61,9 @@ function pct(basisPoints: number): string {
 }
 
 const NAV = [
+  // First, because it is the one to open before the numbers.
+  { href: '/admin/alerts', label: 'Alerts' },
+  { href: '/admin/invite', label: 'Invite a tutor' },
   { href: '/admin/verification', label: 'Verification' },
   { href: '/admin/payouts', label: 'Payouts' },
   { href: '/admin/reports', label: 'Reports' },
@@ -71,7 +75,7 @@ const NAV = [
 export default async function AdminPage() {
   const admin = await requireRole('admin');
 
-  const [money, ops, packs, providers, subjects, positions, unmatched, reconciliation, payouts, verification] =
+  const [money, ops, packs, providers, subjects, positions, unmatched, asked, reconciliation, payouts, verification] =
     await Promise.all([
       moneyOverview(),
       operations(),
@@ -80,6 +84,7 @@ export default async function AdminPage() {
       topSubjects(8),
       topCurriculumPositions(8),
       unmatchedDemand(12),
+      askedAndMissing(10),
       reconcileLedger(db),
       payoutQueue(),
       db
@@ -314,6 +319,54 @@ export default async function AdminPage() {
               board. A row with several of them is a conversation — they may already be able to teach
               it and have not said so. A row with none is a hire.
             </p>
+
+            {/* The other half of demand, and at launch the more useful one: the
+                table above needs a student to have *declared* a position, and
+                most people looking on day one have not signed up at all. */}
+            <div className="border-t border-border pt-4">
+              <p className="text-sm font-medium">Searched for and not found</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Somebody filtered to this position and got nothing, in the last 90 days. Signed-out
+                visitors count once a day per position — we cannot tell two of them apart, and
+                pretending otherwise would inflate the list you recruit from.
+              </p>
+
+              {asked.length === 0 ? (
+                <p className="mt-3 text-sm text-muted-foreground">
+                  Nobody has searched for a position we cannot serve.
+                </p>
+              ) : (
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full min-w-120 text-sm">
+                    <caption className="sr-only">Positions people searched for and did not find</caption>
+                    <thead className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                      <tr className="border-b border-border">
+                        <th className="py-2 pr-3 font-medium">Board</th>
+                        <th className="py-2 pr-3 font-medium">Level</th>
+                        <th className="py-2 pr-3 font-medium">Subject</th>
+                        <th className="py-2 pr-3 text-right font-medium">Asks</th>
+                        <th className="py-2 text-right font-medium">Signed in</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {asked.map((row) => (
+                        <tr
+                          key={`${row.board}-${row.level}-${row.subject}`}
+                          className="border-b border-border last:border-0"
+                          data-testid="asked-row"
+                        >
+                          <td className="py-2 pr-3">{row.board}</td>
+                          <td className="py-2 pr-3">{row.level}</td>
+                          <td className="py-2 pr-3">{row.subject}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{row.asks}</td>
+                          <td className="py-2 text-right tabular-nums">{row.signedIn}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
 

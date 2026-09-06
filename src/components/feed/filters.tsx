@@ -29,6 +29,7 @@ export function Filters({
   viewerTimezone,
   curriculum,
   exactOnly,
+  collapsed = false,
 }: {
   filters: DiscoveryFilters;
   subjects: { slug: string; name: string }[];
@@ -41,6 +42,15 @@ export function Filters({
   /** The board and class currently in the URL, so the form renders them back. */
   curriculum: { board?: string; level?: string };
   exactOnly: boolean;
+  /**
+   * Start folded, showing only the search box.
+   *
+   * Twelve controls above three results is a form apologising for the
+   * catalogue. It is a `details` element, so it still opens without
+   * JavaScript, and it opens itself whenever a filter is already set — landing
+   * on a filtered URL and not being able to see the filter would be worse.
+   */
+  collapsed?: boolean;
 }) {
   return (
     <form
@@ -60,7 +70,12 @@ export function Filters({
         <Button type="submit">Search</Button>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <details open={!collapsed} className="flex flex-col gap-4">
+        <summary className="cursor-pointer text-sm font-medium marker:text-muted-foreground">
+          {collapsed ? 'More ways to narrow it down' : 'Filters'}
+        </summary>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <CurriculumFields
           boards={boards}
           subjects={subjects}
@@ -192,6 +207,8 @@ export function Filters({
           </p>
         </div>
       </fieldset>
+
+      </details>
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
         <p className="text-sm text-muted-foreground">

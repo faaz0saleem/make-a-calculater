@@ -8,29 +8,24 @@
 
 import bcrypt from 'bcryptjs';
 
+// The policy itself lives in a bcrypt-free module so client components can
+// render the rule without pulling a hashing library into the browser.
+export {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_RULE,
+  passwordProblem,
+} from './password-rules';
+
+import { passwordProblem as checkPassword } from './password-rules';
+
 const COST = 12;
 
 /** A real bcrypt hash of a value nobody can guess, used to burn time on misses. */
 const DUMMY_HASH = '$2b$12$C6UzMDM.H6dfI/f/IKcEeO3zC5eF0h/OFbT4rqRJ1i0z2eKQ7l0Aq';
 
-export const PASSWORD_MIN_LENGTH = 10;
-export const PASSWORD_MAX_LENGTH = 200;
-
-export function passwordProblem(password: string): string | null {
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    return `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`;
-  }
-  if (password.length > PASSWORD_MAX_LENGTH) {
-    return `Password must be at most ${PASSWORD_MAX_LENGTH} characters.`;
-  }
-  if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
-    return 'Password must contain at least one letter and one number.';
-  }
-  return null;
-}
-
 export async function hashPassword(password: string): Promise<string> {
-  const problem = passwordProblem(password);
+  const problem = checkPassword(password);
   if (problem) throw new Error(problem);
   return bcrypt.hash(password, COST);
 }

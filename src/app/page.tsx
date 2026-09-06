@@ -26,7 +26,7 @@ import { Filters } from '@/components/feed/filters';
 import { Rail } from '@/components/feed/rail';
 import { TutorCard } from '@/components/feed/tutor-card';
 import { SiteHeader } from '@/components/site-header';
-import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   listSubjects,
   listTutorCountries,
@@ -55,6 +55,8 @@ import { currentUser } from '@/lib/auth/guards';
 import { countryFromTimeZone } from '@/lib/geo/timezone-country';
 import { isValidTimeZone, zonedTimeToUtc } from '@/lib/time';
 import { toCardData } from '@/lib/tutors/card';
+import { nearestPositions, recordCurriculumInterest, subjectsWithTutors } from '@/db/demand';
+import { feedShape, smallCatalogueNote } from '@/lib/discovery/inventory';
 import { hasQueryParameters, pageMetadata } from '@/lib/seo/site';
 import { LAST_SUBJECT_COOKIE } from '@/middleware';
 
@@ -253,12 +255,22 @@ function hrefWith(params: SearchParams, changes: Record<string, string | null>):
 export default async function HomePage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const params = await searchParams;
 
-  const [viewer, jar, subjects, countries] = await Promise.all([
+  const [viewer, jar, allSubjects, countries, teachable] = await Promise.all([
     currentUser(),
     cookies(),
     listSubjects(),
     listTutorCountries(),
+    subjectsWithTutors(),
   ]);
+
+  // Chips are built from what is actually bookable, not from every subject the
+  // catalogue defines. A chip that leads to an empty page is a dead end
+  // somebody blames themselves for, and with three tutors most of them would.
+  const teachableSlugs = new Set(teachable.map((row) => row.slug));
+  const chipSubjects = allSubjects.filter((subject) => teachableSlugs.has(subject.slug));
+  // The filter dropdown keeps every subject: narrowing to nothing is a
+  // deliberate act there, and the empty state answers it properly.
+  const subjects = allSubjects;
 
   const cookieTimezone = jar.get(TIMEZONE_COOKIE)?.value;
   // Two different things, deliberately. `knownTimezone` is null when nobody has
@@ -311,6 +323,30 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   // not send the rails away. A board or class they typed themselves does.
   const browsing = isBrowsing(filters) && curriculum.source !== 'filter';
   const grid = await toCardData(results.tutors, timezone);
+
+  // How much there is decides the shape of the page. With three tutors, rails
+  // are the grid again under a different heading, which reads as padding.
+  const shape = feedShape(results.total, browsing);
+
+  // Somebody asked for a curriculum position and got nothing. Record it — this
+  // is the single most useful thing to know before recruiting the next tutor —
+  // and find them the nearest thing they could actually book.
+  const missed =
+    grid.length === 0 && curriculum.filter && curriculum.raw.board && curriculum.raw.level
+      ? await (async () => {
+          const subjectId = subjects.find((subject) => subject.slug === filters.subject)?.id;
+          if (!subjectId) return null;
+
+          const position = {
+            boardId: curriculum.raw.board!,
+            levelId: curriculum.raw.level!,
+            subjectId,
+          };
+
+          await recordCurriculumInterest(position, viewer?.id ?? null);
+          return nearestPositions(position);
+        })()
+      : null;
 
   const buildHref = (slug: string | undefined) => {
     const next = new URLSearchParams();
@@ -367,7 +403,10 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
             asked a question, and the answer should not be below an introduction. */}
         {!viewer && browsing ? <SignedOutIntro /> : null}
 
-        <CategoryChips subjects={subjects} active={filters.subject} buildHref={buildHref} />
+        {/* No chips rather than a lone "All" chip standing on its own. */}
+        {chipSubjects.length > 0 ? (
+          <CategoryChips subjects={chipSubjects} active={filters.subject} buildHref={buildHref} />
+        ) : null}
 
         {viewer && declared.length === 0 && !promptDismissed ? (
           <CurriculumPrompt
@@ -397,6 +436,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           />
         ) : null}
 
+        {shape.showFilters ? (
         <Filters
           filters={filters}
           subjects={subjects}
@@ -407,9 +447,12 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           viewerTimezone={timezone}
           curriculum={curriculum.raw}
           exactOnly={first(params, 'exact') === '1'}
+          // Folded when there is little to filter and nothing filtered yet.
+          collapsed={shape.acknowledgeSmallCatalogue && browsing && !hasQueryParameters(params)}
         />
+        ) : null}
 
-        {browsing ? (
+        {shape.showRails ? (
           <>
             {curriculumCards.length > 0 && curriculum.summary ? (
               <Rail
@@ -448,10 +491,40 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
         <section id="tutor-feed" className="flex flex-col gap-4 scroll-mt-6">
           <h2 className="text-lg font-semibold tracking-tight">
-            {browsing ? 'All tutors' : `${results.total} result${results.total === 1 ? '' : 's'}`}
+            {browsing ? shape.gridHeading : `${results.total} result${results.total === 1 ? '' : 's'}`}
           </h2>
 
-          {grid.length === 0 ? (
+          {shape.acknowledgeSmallCatalogue ? (
+            /* Said out loud rather than left for the reader to notice. "12
+               tutors matched" over three cards is the sentence that loses
+               somebody's trust for good. */
+            <p className="text-sm text-muted-foreground" data-testid="small-catalogue">
+              {smallCatalogueNote(results.total)}
+            </p>
+          ) : null}
+
+          {shape.catalogueEmpty ? (
+            /* Day one. No filter caused this, so no filter can fix it, and
+               saying otherwise would send somebody round a loop. */
+            <Card data-testid="catalogue-empty">
+              <CardHeader>
+                <CardTitle as="h3">No tutors are listed yet</CardTitle>
+                <CardDescription>
+                  Every tutor here is verified by hand before they appear, and we are working
+                  through the first ones now. Nothing is charged for looking, and there is nothing
+                  to book today.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-wrap gap-4 text-sm">
+                <Link href="/teach" className="underline underline-offset-4">
+                  Teach on Tutorly
+                </Link>
+                <Link href="/signup" className="underline underline-offset-4">
+                  Make an account and hear when we open
+                </Link>
+              </CardContent>
+            </Card>
+          ) : grid.length === 0 ? (
             <Card>
               <CardHeader>
                 {curriculum.filter ? (
@@ -460,6 +533,40 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
                       No tutor teaches {emptyPosition} yet
                     </CardTitle>
                     <CardDescription>
+                      {/* Recorded, whether or not they are signed in. The admin
+                          dashboard reads it as the list of who to recruit next,
+                          and saying so is more honest than a silent log. */}
+                      We have noted that you looked. It is what decides which
+                      tutor we go and find next.
+                    </CardDescription>
+
+                    {missed && missed.length > 0 ? (
+                      <div className="mt-4 flex flex-col gap-2" data-testid="nearest-positions">
+                        <p className="text-sm font-medium">What you could book today</p>
+                        <ul className="flex flex-col gap-2 text-sm">
+                          {missed.map((option) => (
+                            <li key={option.label}>
+                              <Link
+                                href={hrefWith(params, {
+                                  board: option.filters.board ?? null,
+                                  level: option.filters.level ?? null,
+                                  subject: option.filters.subject ?? null,
+                                  exact: null,
+                                })}
+                                className="underline underline-offset-4"
+                              >
+                                {option.label}
+                              </Link>{' '}
+                              <span className="text-muted-foreground">
+                                — {option.tutors} tutor{option.tutors === 1 ? '' : 's'}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+
+                    <CardDescription className="mt-4">
                       {first(params, 'exact') === '1' ? (
                         <>
                           You asked for an exact board and class match.{' '}
@@ -471,9 +578,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
                           </Link>
                           , or{' '}
                         </>
-                      ) : (
-                        <>Nobody is teaching that combination right now. </>
-                      )}
+                      ) : null}
                       <Link
                         href={hrefWith(params, {
                           noCurriculum: '1',
