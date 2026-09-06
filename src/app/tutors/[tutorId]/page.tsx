@@ -423,6 +423,20 @@ export default async function TutorProfilePage({
               <Button className="min-h-11">Book a session</Button>
             </Link>
           )}
+
+          {!problem && viewer && viewer.id !== tutor.id ? (
+            <p className="mt-3 text-sm text-muted-foreground">
+              Studying with {tutor.name.split(' ')[0]} every week?{' '}
+              <Link
+                href={`/tutors/${tutor.id}/series`}
+                className="underline underline-offset-4"
+                data-testid="standing-slot-link"
+              >
+                Set up a standing slot
+              </Link>{' '}
+              — booked once, and nothing is paid up front.
+            </p>
+          ) : null}
         </div>
 
         {query.reported ? (

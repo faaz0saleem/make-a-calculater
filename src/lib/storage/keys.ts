@@ -53,6 +53,17 @@ export function attachmentKey(threadId: string, attachmentId: string, extension:
   return assertValidObjectKey(`attachments/${threadId}/${attachmentId}.${normaliseExtension(extension)}`);
 }
 
+/**
+ * A homework submission — a scanned page, a photo of working, a PDF.
+ *
+ * Private, and read back through `/api/files`, which re-checks that the viewer
+ * is the student who submitted it or the tutor who set it. Somebody's marked
+ * work is not something to leave at a guessable URL.
+ */
+export function homeworkKey(homeworkId: string, attachmentId: string, extension: string): string {
+  return assertValidObjectKey(`homework/${homeworkId}/${attachmentId}.${normaliseExtension(extension)}`);
+}
+
 /** Intro videos. Public bucket. Phase 2 replaces the raw file with an HLS ladder. */
 export function introVideoKey(userId: string, videoId: string, extension: string): string {
   return assertValidObjectKey(`videos/${userId}/${videoId}.${normaliseExtension(extension)}`);

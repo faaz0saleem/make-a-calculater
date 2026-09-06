@@ -17,6 +17,7 @@ import {
 } from '@/app/dashboard/actions';
 import { BookingActions, RescheduleInbox } from '@/components/bookings/booking-actions';
 import { ReviewPrompt } from '@/components/reviews/review-prompt';
+import { StandingSlots } from '@/components/series/standing-slots';
 import { JoinLink } from '@/components/sessions/join-link';
 import { OutgoingTrials } from '@/components/trials/outgoing-trials';
 import { TrialConversion, type ConversionSlot } from '@/components/trials/trial-conversion';
@@ -32,6 +33,8 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { db } from '@/db/client';
+import { seriesFor } from '@/db/series';
+import { stopSeries } from '@/app/tutors/[tutorId]/series/actions';
 import { bookings, studentWallets, users } from '@/db/schema';
 import { openReschedulesFor } from '@/db/bookings';
 import { getStudentCurriculum } from '@/db/curriculum';
@@ -64,6 +67,8 @@ export default async function DashboardPage({
     credited?: string;
     reminders?: string;
     reminderError?: string;
+    series?: string;
+    until?: string;
     error?: string;
   }>;
 }) {
@@ -81,6 +86,34 @@ export default async function DashboardPage({
     .limit(1);
 
   const tutorName = { name: users.name };
+
+  const standing = await seriesFor(user.id, 'student', db, now);
+
+  /**
+   * The moment to offer a weekly slot (SPEC.md §5).
+   *
+   * After the second completed session with the same tutor: the first could
+   * have been luck, and by the third they have already decided how they book.
+   * Two is when somebody is weighing it up anyway, and asking then is a
+   * question rather than an interruption.
+   */
+  const weeklyCandidates = (await db.execute(sql`
+    select b.tutor_id::text as tutor_id, u.name, count(*)::int as sessions
+    from bookings b
+    join users u on u.id = b.tutor_id
+    where b.student_id = ${user.id}::uuid
+      and not b.is_trial
+      and b.completed_at is not null
+      and not exists (
+        select 1 from recurring_series r
+        where r.student_id = b.student_id and r.tutor_id = b.tutor_id
+          and r.status in ('active', 'ending')
+      )
+    group by b.tutor_id, u.name
+    having count(*) >= 2
+    order by count(*) desc
+    limit 2
+  `)) as unknown as { tutor_id: string; name: string; sessions: number }[];
 
   const upcoming = await db
     .select({
@@ -320,6 +353,35 @@ export default async function DashboardPage({
             </CardContent>
           </Card>
         </div>
+
+        {weeklyCandidates.length > 0 ? (
+          <Card data-testid="weekly-prompt">
+            <CardHeader>
+              <CardTitle>Make it weekly?</CardTitle>
+              <CardDescription>
+                You have had {weeklyCandidates[0]!.sessions} sessions with{' '}
+                {weeklyCandidates[0]!.name}. Book the same time every week once, instead of every
+                week.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+              {weeklyCandidates.map((candidate) => (
+                <Link key={candidate.tutor_id} href={`/tutors/${candidate.tutor_id}/series`}>
+                  <Button size="sm" variant="outline" data-testid="make-weekly">
+                    A standing slot with {candidate.name.split(' ')[0]}
+                  </Button>
+                </Link>
+              ))}
+            </CardContent>
+          </Card>
+        ) : null}
+
+        <StandingSlots
+          series={standing}
+          viewer="student"
+          timezone={user.timezone}
+          endAction={stopSeries}
+        />
 
         {upcoming.length > 0 || student?.phone ? (
           <ReminderPreference

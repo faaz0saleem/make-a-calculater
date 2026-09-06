@@ -276,6 +276,25 @@ export async function createBooking(
   }
 }
 
+/**
+ * What the student typed that no chapter covers.
+ *
+ * Scoped to the student on the booking inside the query, so a stray id in a
+ * form cannot write a note onto somebody else's session. The tutor reads it
+ * before the lesson, and before accepting a trial.
+ */
+export async function setBookingNote(
+  bookingId: string,
+  studentId: string,
+  note: string,
+  database: DbLike = defaultDb,
+): Promise<void> {
+  await database
+    .update(bookings)
+    .set({ topicNote: note.slice(0, 2_000) || null, updatedAt: new Date() })
+    .where(and(eq(bookings.id, bookingId), eq(bookings.studentId, studentId)));
+}
+
 // ---------------------------------------------------------------------------
 // Slot holds
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import { withdrawProfile } from '@/app/tutor/onboarding/actions';
 import { TutorReviews } from '@/components/reviews/tutor-reviews';
 import { TrialRequests } from '@/components/trials/trial-requests';
 import { JoinLink } from '@/components/sessions/join-link';
+import { StandingSlots } from '@/components/series/standing-slots';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -38,6 +39,8 @@ import { pendingTrialsForTutor } from '@/db/trials';
 import { loadWizardSnapshot } from '@/db/tutors';
 import { requireRole } from '@/lib/auth/guards';
 import { wizardProgress } from '@/lib/tutors/wizard';
+import { seriesFor } from '@/db/series';
+import { stopSeries } from '@/app/tutors/[tutorId]/series/actions';
 import { formatCents } from '@/lib/money/cents';
 import { takeHomeFor } from '@/lib/money/commission';
 import {
@@ -94,6 +97,7 @@ export default async function TutorPage({
     );
   }
 
+  const standing = await seriesFor(user.id, 'tutor', db, now);
   const snapshot = await loadWizardSnapshot(user.id);
   const progress = snapshot ? wizardProgress(snapshot) : null;
 
@@ -106,6 +110,14 @@ export default async function TutorPage({
       isTrial: bookings.isTrial,
       priceCents: bookings.priceCents,
       studentName: users.name,
+      topicNote: bookings.topicNote,
+      // What the session is for, so the tutor can prepare rather than spend the
+      // first five minutes of a paid hour finding out.
+      topics: sql<string | null>`(
+        select string_agg(t.name, ', ' order by t.sort_order)
+        from booking_topics bt join topics t on t.id = bt.topic_id
+        where bt.booking_id = ${bookings.id}
+      )`,
     })
     .from(bookings)
     .innerJoin(users, eq(users.id, bookings.studentId))
@@ -113,7 +125,7 @@ export default async function TutorPage({
       and(
         eq(bookings.tutorId, user.id),
         sql`${bookings.startAtUtc} + make_interval(mins => ${bookings.durationMinutes}) >= now()`,
-        inArray(bookings.status, ['pending_tutor', 'confirmed', 'in_progress']),
+        inArray(bookings.status, ['scheduled', 'pending_tutor', 'confirmed', 'in_progress']),
       ),
     )
     .orderBy(bookings.startAtUtc)
@@ -270,6 +282,13 @@ export default async function TutorPage({
           action={answerTrial}
         />
 
+        <StandingSlots
+          series={standing}
+          viewer="tutor"
+          timezone={user.timezone}
+          endAction={stopSeries}
+        />
+
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card>
             <CardHeader>
@@ -392,6 +411,16 @@ export default async function TutorPage({
                         <p className="text-muted-foreground">
                           {formatInTimeZone(booking.startAtUtc, user.timezone)} · {booking.durationMinutes} min
                         </p>
+                        {booking.topics ? (
+                          <p className="text-xs text-muted-foreground" data-testid="upcoming-topics">
+                            {booking.topics}
+                          </p>
+                        ) : null}
+                        {booking.topicNote ? (
+                          <p className="text-xs italic text-muted-foreground">
+                            &ldquo;{booking.topicNote}&rdquo;
+                          </p>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
                         {booking.isTrial ? (
@@ -430,7 +459,14 @@ export default async function TutorPage({
                           {booking.durationMinutes} min
                         </p>
                       </div>
-                      <Badge variant="outline">{booking.status}</Badge>
+                      <span className="flex items-center gap-2">
+                        <Badge variant="outline">{booking.status}</Badge>
+                        <Link href={`/tutor/sessions/${booking.id}`}>
+                          <Button size="sm" variant="outline" data-testid="after-session">
+                            What happened
+                          </Button>
+                        </Link>
+                      </span>
                     </div>
 
                     <BookingActions

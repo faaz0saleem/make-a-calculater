@@ -59,6 +59,16 @@ export function TrialRequests({
                     <p className="text-muted-foreground">
                       {formatInTimeZone(request.startAtUtc, timezone)} · {request.durationMinutes} min
                     </p>
+                    {request.topics ? (
+                      <p className="text-xs text-muted-foreground" data-testid="trial-topics">
+                        {request.topics}
+                      </p>
+                    ) : null}
+                    {request.topicNote ? (
+                      <p className="text-xs italic text-muted-foreground">
+                        &ldquo;{request.topicNote}&rdquo;
+                      </p>
+                    ) : null}
                   </div>
                   <Badge variant="secondary">{timeLeft(request.expiresAt, now)}</Badge>
                 </div>

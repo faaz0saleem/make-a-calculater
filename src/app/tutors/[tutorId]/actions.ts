@@ -11,9 +11,10 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 
-import { createBooking, holdSlot, releaseHold } from '@/db/bookings';
+import { createBooking, holdSlot, releaseHold, setBookingNote } from '@/db/bookings';
 import { followTutor, unfollowTutor } from '@/db/follows';
 import { confirmStudentName, linkGuardian } from '@/db/students';
+import { setBookingTopics } from '@/db/topics';
 import { requestTrial } from '@/db/trials';
 import { currentUser, requireUser } from '@/lib/auth/guards';
 import { ensureGuestToken, readGuestToken } from '@/lib/bookings/guest';
@@ -139,6 +140,15 @@ export async function confirmBooking(
   const result = await createBooking({ studentId: user.id, tutorId, startAtUtc, durationMinutes });
 
   if (result.ok) {
+    // What the session is for. Attached after the booking exists rather than
+    // inside it, because a chapter list is not worth failing a booking over —
+    // a session with no topics is a session, and the tutor can ask.
+    const topicIds = formData.getAll('topicIds').map(String).filter(Boolean);
+    const topicNote = String(formData.get('topicNote') ?? '').trim();
+
+    if (topicIds.length > 0) await setBookingTopics(result.bookingId, topicIds);
+    if (topicNote) await setBookingNote(result.bookingId, user.id, topicNote);
+
     revalidatePath(`/tutors/${tutorId}`);
     revalidatePath('/dashboard');
     redirect(`/dashboard?booked=${result.bookingId}`);
