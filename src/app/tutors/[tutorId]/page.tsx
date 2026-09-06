@@ -166,7 +166,10 @@ export default async function TutorProfilePage({
       <SiteHeader />
       <TimezoneProbe current={cookieTimezone ?? null} />
 
-      <main className="mx-auto flex max-w-4xl flex-col gap-6 px-4 sm:px-6 py-10">
+      {/* `pb-28` clears the sticky booking bar below. Without it the last card
+          on the page sits under the bar and looks cut off — which on a phone is
+          most of what somebody sees. */}
+      <main className="mx-auto flex max-w-4xl flex-col gap-6 px-4 pb-28 pt-10 sm:px-6">
         {isPreview ? (
           <p className="rounded-md bg-secondary px-3 py-2 text-sm">
             Preview — this profile is <strong>{tutor.status}</strong>, so nobody else can see it and it
@@ -397,7 +400,12 @@ export default async function TutorProfilePage({
           }
         />
 
-        <div className="sticky bottom-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+        {/* Floats over the page as you scroll, and has to look like it.
+            It used to be styled exactly like the cards it floats over, so on a
+            phone it read as a card pasted on top of another one, cutting a
+            sentence of somebody's bio in half. The upward shadow is the thing
+            that says "docked to the bottom" rather than "part of the page". */}
+        <div className="sticky bottom-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-4 shadow-[0_-10px_30px_-12px_rgb(0_0_0/0.35)] ring-1 ring-border">
           <p className="text-sm text-muted-foreground">
             {problem
               ? problem === 'suspended'

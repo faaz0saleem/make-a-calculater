@@ -217,6 +217,27 @@ export async function askedAndMissing(
 }
 
 /**
+ * How many tutors exist at all, ignoring every filter.
+ *
+ * The feed's shape is decided on this rather than on the current result count.
+ * They are not the same question: a student whose declared curriculum matches
+ * two tutors is looking at a narrow *result*, not a small *catalogue*, and
+ * folding away the filters at that moment hides the controls they need to widen
+ * the search — which is exactly what happened the first time this was wired to
+ * `results.total`.
+ */
+export async function visibleTutorCount(database: DbLike = defaultDb): Promise<number> {
+  const [row] = (await database.execute(sql`
+    select count(*)::int as n
+    from tutor_profiles tp
+    join users u on u.id = tp.user_id
+    where tp.status = 'verified' and u.suspended_at is null
+  `)) as unknown as { n: number }[];
+
+  return Number(row?.n ?? 0);
+}
+
+/**
  * Subjects with at least one bookable tutor behind them.
  *
  * The category chips are built from this rather than from every subject that

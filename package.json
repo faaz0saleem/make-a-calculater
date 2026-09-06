@@ -33,6 +33,8 @@
     "prove:curriculum": "tsx --tsconfig tsconfig.scripts.json src/scripts/prove-curriculum.ts",
     "prove:rates": "tsx --tsconfig tsconfig.scripts.json src/scripts/prove-rates-frozen.ts",
     "prove:payout-privacy": "tsx --tsconfig tsconfig.scripts.json src/scripts/prove-payout-privacy.ts",
+    "prove:restore": "tsx --tsconfig tsconfig.scripts.json src/scripts/prove-restore.ts",
+    "launch:sql": "tsx --tsconfig tsconfig.scripts.json src/scripts/launch-sql.ts",
     "measure:regions": "tsx --tsconfig tsconfig.scripts.json src/scripts/measure-regions.ts"
   },
   "dependencies": {

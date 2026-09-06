@@ -95,6 +95,7 @@ import { createSeries, endSeries, runSeriesJobs } from './series';
 import { dateInZone } from '@/lib/series/occurrences';
 import { DatabaseAvailability } from '@/lib/availability/database';
 import { TOPIC_SEEDS } from '@/lib/curriculum/topics';
+import { SUBJECTS } from '@/lib/tutors/subjects';
 import { MockEmailProvider, setEmailProvider } from '@/lib/email';
 import { fileReport, recordContactFlag } from './reports';
 import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
@@ -164,20 +165,6 @@ const SEED_PASSWORD = 'tutorly-dev-2026';
 /** "Now" for the seeded world. Bookings are placed relative to this. */
 const NOW = new Date();
 
-const SUBJECTS = [
-  { slug: 'math', name: 'Math' },
-  { slug: 'physics', name: 'Physics' },
-  { slug: 'chemistry', name: 'Chemistry' },
-  { slug: 'biology', name: 'Biology' },
-  { slug: 'english', name: 'English' },
-  { slug: 'ielts-toefl', name: 'IELTS / TOEFL' },
-  { slug: 'programming', name: 'Programming' },
-  { slug: 'quran-arabic', name: 'Quran & Arabic' },
-  { slug: 'business', name: 'Business' },
-  { slug: 'music', name: 'Music' },
-  { slug: 'test-prep', name: 'Test Prep' },
-  { slug: 'languages', name: 'Languages' },
-] as const;
 
 const LOCALES = [
   { timezone: 'Asia/Karachi', country: 'PK', city: 'Karachi' },

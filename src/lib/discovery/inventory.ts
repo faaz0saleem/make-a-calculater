@@ -47,6 +47,11 @@ export type FeedShape = {
   gridHeading: string;
 };
 
+/**
+ * `visibleTutors` is the size of the whole catalogue, never the current result
+ * count. Folding the filters away because *this search* matched two tutors
+ * hides the controls somebody needs to widen it.
+ */
 export function feedShape(visibleTutors: number, browsing: boolean): FeedShape {
   if (!browsing) {
     return {

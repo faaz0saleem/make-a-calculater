@@ -15,7 +15,111 @@ Phases follow `SPEC.md` §15.
 | 6B — student signup + the paywall moved | **Done** |
 | 6C — payouts + admin dashboard + reports queue | **Done** |
 | 7 — recurring bookings, topics, attendance, homework | **Done** |
+| 8 — content merge, email delivery, day-one states, operations | **Done** |
 | 8 — real payment provider, SEO, analytics | Not started |
+
+---
+
+## Phase 8 — surviving contact with real people — done
+
+The last code phase before launch. Four things: Codex's content branch brought
+in and its integration stops landed, email that actually sends, a product that
+looks deliberate with three tutors in it, and the operational surface for one
+person running this alone from a phone.
+
+### Reconciling with Codex
+
+Its work was **not** merged into main — it was an open draft PR, based on a
+commit from before Phase 7. Merged here.
+
+The boundary held completely: 47 new files, zero modifications, and nothing in
+`db/`, `src/app/api/`, money, bookings, sessions, payouts or curriculum.
+`CODEX_NOTES.md` names five places it stopped rather than working around, and
+three of those were mine to land:
+
+- **The public routes.** Every legal page, the sitemap and robots.txt redirected
+  anonymous visitors to sign-in. `lib/auth/public-paths.ts` is now one
+  allowlist, derived from the content modules rather than copied, so adding a
+  policy cannot silently produce a page nobody can read.
+- **The homepage intro**, for a signed-out unfiltered visit only.
+- **One canonical for the feed**, with every filtered variant noindex.
+
+It also read the money code it was forbidden to touch and flagged a real bug:
+`minutesBeforeStart` floors, so a student cancelling with 24 hours and thirty
+seconds' notice fell into the half-refund tier. Fixed, with the boundary pinned
+from both sides.
+
+### Email that sends
+
+Fourteen templates existed and nothing delivered them — which is why session
+reminders did not exist.
+
+- **An outbox, not an inline send.** The row holds *what happened*; the job
+  renders and sends it. A send that fails inside a booking transaction either
+  rolls back a lesson over an email or is swallowed.
+- **Retries with backoff and jitter, five attempts, then a dead letter** an
+  admin can see and requeue. A 422 for a bad address is final; a 429 is "later".
+- **Every message has an expiry.** A T-1h reminder delivered after the lesson
+  tells somebody to join a session that ended.
+- **Seven kinds are optional and seven are not**, and `/settings/email` says
+  which and why rather than showing a switch that does nothing. One-tap
+  unsubscribe with no session, per kind, plus `List-Unsubscribe` one-click.
+- Resend behind the same provider-interface pattern as payments.
+
+Two things this uncovered: rendering pulls in `react-dom/server`, which Next
+refuses to have in a page's module graph — hence the runtime import and the
+split between `db/email.ts` and `db/email-queue.ts`; and `tsx` needed its own
+tsconfig for JSX, without which the seed logged an enqueue failure instead of
+sending anything.
+
+**Three crons did not exist.** `reminders` and `series` were scripts only, so a
+production deployment would have sent no reminders and never charged a standing
+session.
+
+### Day one
+
+I shrank the world to three tutors and looked. Everything worked; all of it said
+"this place is empty" — the same three people under four headings, twelve chips
+leading to nine empty pages, a filter panel taller than its results.
+
+The feed's shape is now a function of its inventory (`lib/discovery/inventory.ts`,
+pure and tested): no rails under eight tutors, the count said out loud under
+six, chips built from what is actually bookable, and a real empty state instead
+of "clear the filters you did not set". A curriculum search that finds nothing
+is recorded — anonymously when signed out — and answered with the nearest
+positions that have a tutor behind them.
+
+`/admin/invite` makes a single-use link for hand-recruiting. It skips the
+document queue and not the wizard, because a verified profile with no rates is
+the empty card this phase is about.
+
+### Operations
+
+`/admin/alerts` is the screen to open first: ledger drift, settlement behind,
+payouts stuck, sessions nobody joined, stalled payments, refund spikes, dead
+letters, a queue that is not draining — each saying what to do and linking to
+the runbook heading. `/api/health` checks four dependencies for real, including
+a write-and-read-back against object storage. Structured logs carry a
+correlation id (`booking:<id>`) through bookings, ledger, LiveKit, settlement
+and email.
+
+`RUNBOOK.md`, `LAUNCH.md` and `FLOW_REVIEW.md` are the three documents this
+phase owes. The restore procedure is **proven**, not described: `pnpm
+prove:restore` dumps, restores into a scratch database, checks every critical
+table and that the ledger still balances, then drops it.
+
+### What the flow review found
+
+Eleven defects, all found by walking rather than reading — the worst being that
+`/admin/alerts`, the screen built to say what is broken, returned a 500 on every
+load because its query read a column that does not exist.
+
+It also found the two things that stop a launch and are **not fixed**: there is
+no password reset, and email addresses are never verified. Both are written up
+in `FLOW_REVIEW.md` with what they need. Password reset is an authentication
+flow and deserves to be built deliberately rather than at the end of a long
+session; verification is waiting on `DECISIONS_NEEDED.md` item 6, which is a
+product decision about gating.
 
 ---
 
@@ -1268,14 +1372,15 @@ says the videos were skipped.
 
 ```
 pnpm typecheck   clean
-pnpm test        48 files, 692 tests passed
-pnpm build       compiled, 48 routes
+pnpm test        55 files, 777 tests passed
+pnpm build       compiled, 68 routes
 pnpm seed        66 users · 40 verified · 5 pending · 1 draft · 1 rejected
                  10 boards · 214 tutor curriculum positions · 16 student ones
                  222 bookings spanning the repricing: 15/16/20/22 all present
                  3 standing arrangements, one already through a T-48h charge
                  152 chapters · 151 attached to sessions · 77 marked covered
                  27 pieces of homework: 27 set, 17 handed in, 12 marked
+                 22 emails sent through the mock, 2 in dead letters
                  2 contact flags · 3 open reports · no sanctions
                  5 established pairs gone quiet, 3 still booking
                  zero ledger drift
@@ -1284,6 +1389,10 @@ pnpm reconcile   zero drift — including straight after the e2e run
 pnpm prove:curriculum      the database refuses all three
 pnpm prove:rates           the rate change reached no booking that already existed
 pnpm prove:payout-privacy  a dump of payout_methods yields nothing usable
+pnpm prove:restore         dump, restore into a scratch database, check every
+                           critical table and the ledger, drop it
+pnpm launch:sql            5 packs · 10 boards · 46 classes · 12 subjects ·
+                           152 chapters, applied twice against an empty database
 ```
 
 Lighthouse on the built app, desktop preset: feed **99 performance / 100

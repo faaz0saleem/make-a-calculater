@@ -22,6 +22,12 @@ not like a directory table.
 [`PROGRESS.md`](./PROGRESS.md) says what is built right now.
 [`DECISIONS_NEEDED.md`](./DECISIONS_NEEDED.md) lists the questions that are
 genuinely blocked on a human.
+[`LAUNCH.md`](./LAUNCH.md) is the deployment gate — env, DNS, migration order
+from an empty database, and a smoke test to run before opening the doors.
+[`RUNBOOK.md`](./RUNBOOK.md) is what to do when something breaks, written for
+2am on a phone.
+[`FLOW_REVIEW.md`](./FLOW_REVIEW.md) walks every journey as a person and says
+what is still wrong with each.
 
 ---
 
@@ -121,6 +127,9 @@ The seed also plants the payout boundary cases from `SPEC.md` §16:
 | `pnpm settle` | Release escrow on sessions past their dispute window. `--at <iso>` runs it as if it were then; `--dry-run` lists what it would touch |
 | `pnpm series` | Roll recurring series forward: materialise the next four weeks, warn at T-72h, debit at T-48h, lapse what went unpaid |
 | `pnpm reminders` | Send what is due — T-24h and T-1h to both sides, T-10min to the tutor — and expire trial requests nobody accepted |
+| `pnpm email` | Drain the email outbox: render, send, retry, dead-letter. `--limit 200` |
+| `pnpm launch:sql` | Regenerate `docs/launch/*.sql` — the packs and curriculum a production database needs |
+| `pnpm prove:restore` | Dump, restore into a scratch database, check every table and the ledger, then drop it |
 | `pnpm prove:booking` | Fire N parallel bookings at one slot and print the result. `--clients 4` |
 | `pnpm prove:commission` | What commission a booking between two people would carry right now |
 | `pnpm prove:curriculum` | Show the database refusing a class from the wrong board, and a second primary position |
@@ -641,6 +650,85 @@ exists here**. Two people who take the relationship to WhatsApp keep the
 lessons and lose the record of what was taught, what was set, and what came
 back marked.
 
+## Notifications, and what actually sends
+
+Fourteen kinds of email, one outbox, and a job that sends it. Nothing is sent
+inline: `enqueueEmail` writes a row and `pnpm email` delivers it. Three reasons,
+in the order they cost you:
+
+1. A send that fails inside a booking transaction either rolls back a lesson
+   over an email, or is swallowed. Both are wrong.
+2. **A reminder that silently failed is a no-show.** A row with five attempts and
+   a last error is something an admin can see; a caught exception is not.
+3. Retrying needs somewhere to remember it is retrying.
+
+The row stores *what happened* rather than a rendered document, so a fix to a
+template reaches mail that is already queued. Retries back off with jitter and
+give up after five attempts into dead letters, which `/admin/alerts` shows and
+can requeue. Every message carries an expiry: a T-1h reminder finally delivered
+after the lesson would tell somebody to join a session that already ended, so it
+dies in the queue instead and the row says so.
+
+**Seven kinds can be switched off and seven cannot.** The line is not
+importance — it is whether the message is part of a transaction you are already
+in. You cannot unsubscribe from being told your payout was sent, that your
+credential review was rejected, or that a lesson you paid for was cancelled.
+`/settings/email` lists the second group and says why, rather than showing a
+switch that does nothing.
+
+Unsubscribing works in one tap with no session: an HMAC token per kind, plus
+`List-Unsubscribe` one-click so a mail client draws its own button instead of a
+"report spam" one. One link per kind, because somebody tired of hearing that a
+tutor they follow opened time is not asking to stop hearing that their lesson
+starts in an hour.
+
+Resend sits behind an `EmailProvider` interface — `fetch` and a bearer token,
+not an SDK — and the mock records instead of sending. With no `RESEND_API_KEY`
+the app queues and delivers nothing, which is right for a preview deployment and
+a disaster in production, so `/api/health` reports which one you are on.
+
+### Delivering to an inbox, not a spam folder
+
+Three DNS records before you send anything, all in [`LAUNCH.md`](./LAUNCH.md):
+SPF (`v=spf1 include:_spf.resend.com ~all`), DKIM (a CNAME Resend gives you) and
+DMARC (start at `p=none`, read the reports, then tighten). A domain's sending
+reputation is far easier to protect than to repair.
+
+## When there are only three tutors
+
+The seeded world has forty. Launch has three, and every surface that assumes
+depth looks broken on day one — rails that are the grid again under a different
+heading, category chips that lead nowhere, a filter panel taller than its own
+results.
+
+So the shape of the feed is a function of how much is in it
+(`lib/discovery/inventory.ts`, pure and tested):
+
+- **Under eight tutors, no rails.** A rail drawn from three is not a selection.
+- **Under six, the grid says so**: "3 tutors so far. We verify every one by hand
+  before they appear here." A small roster is a vetted roster, and the honest
+  framing is also the attractive one.
+- **Chips come from subjects that have a bookable tutor**, not from every
+  subject the catalogue defines.
+- **With none at all**, the feed says no tutors are listed yet and offers the two
+  things worth doing — rather than telling somebody to clear filters they never
+  set.
+
+A curriculum search that finds nothing is **recorded and answered**: the position
+goes into `curriculum_interest` (anonymously when the visitor is signed out,
+which at launch is most of them), and the page offers the nearest positions that
+have a real tutor behind them. The admin dashboard reads it back as the list of
+who to recruit next.
+
+### Inviting the first cohort
+
+Nobody finds a marketplace's signup page on day one. `/admin/invite` makes a
+single-use link — shown once, stored hashed — that lands a tutor on a page which
+already knows their name. It skips the *document review*, because somebody
+already vetted them in person, and it does not skip the wizard: subjects, rates
+and hours are still theirs to fill in, since a verified profile without them is
+the empty card this whole design is avoiding.
+
 ## How files work
 
 Two buckets. `private` holds credential documents; `public` holds avatars and
@@ -838,12 +926,22 @@ src/
     api/cron/           ranking, reconciliation and settlement, on a schedule
     api/livekit/        the webhook attendance is measured from
     api/bookings/       the .ics a session is added to a calendar with
+    api/unsubscribe/    one-click unsubscribe, the machine-readable half
+    api/health/         four dependencies, checked for real
     credits/            buying credits, and the mock provider's checkout
     messages/           conversations, masked on write
     notifications/      the in-app bell
     sessions/           the classroom
     progress/           what a student and one tutor have covered
     homework/           set, submitted, marked — both sides have a view
+    admin/alerts/       the screen to open before the numbers
+    admin/invite/       single-use links for the first cohort
+    settings/email/     what we may email you about, and what always arrives
+    invite/             where an invited tutor lands
+    unsubscribe/        one tap, no session
+    (legal)/            five policy drafts, noindex, marked DRAFT
+    (marketing)/        welcome, teach, pricing
+    (seo)/              six editorial search pages, robots and sitemap
   auth.ts               Auth.js: credentials + Google, Node runtime
   auth.config.ts        the edge-safe half, used by middleware
   components/           UI primitives and the wizard's step forms
@@ -858,6 +956,12 @@ src/
     topics.ts           what was asked for, what was covered, and progress
     homework.ts         assign, submit, mark
     reminders.ts        what is due to be sent, and the absent-party nudge
+    email.ts            the outbox: enqueue, preferences, dead letters
+    email-queue.ts      the half that renders and sends
+    email-events.ts     one function per thing worth an email
+    alerts.ts           what is going wrong right now
+    demand.ts           what people asked for and could not book
+    invites.ts          hand-recruiting a tutor
     disputes.ts         reporting a problem, and the settlement freeze
     moderation.ts       the only reader of raw message bodies
     purchases.ts        credit packs, checkout, and the idempotent webhook
@@ -873,6 +977,11 @@ src/
     bookings/           the state machine, slot holds, reschedule rules
     series/             DST-safe occurrence maths, and the series rules
     calendar/           .ics generation and the Google Calendar link
+    email/              the provider interface, Resend, retries, unsubscribe
+    discovery/          what the feed looks like when there is little in it
+    observability/      structured logs and the correlation id
+    cron/               the one check every scheduled endpoint makes
+    seo/                canonical URLs, robots, sitemap, structured data
     availability/       the scheduling engine, and the port discovery reads
     curriculum/         boards, match tiers, and the credential-relevance flag
     geo/                a timezone-to-country guess, used only to order a list
@@ -891,6 +1000,9 @@ src/
     crypto.ts           AES-256-GCM for payout details
     time.ts             IANA timezone conversion
     rate-limit.ts
+  emails/               fourteen templates, props-only, HTML and plain text
+content/                legal and editorial copy, as data
+docs/launch/            generated SQL a production database needs
 e2e/                    Playwright journeys
 drizzle/                generated SQL migrations
 ```

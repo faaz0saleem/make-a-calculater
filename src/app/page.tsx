@@ -55,7 +55,12 @@ import { currentUser } from '@/lib/auth/guards';
 import { countryFromTimeZone } from '@/lib/geo/timezone-country';
 import { isValidTimeZone, zonedTimeToUtc } from '@/lib/time';
 import { toCardData } from '@/lib/tutors/card';
-import { nearestPositions, recordCurriculumInterest, subjectsWithTutors } from '@/db/demand';
+import {
+  nearestPositions,
+  recordCurriculumInterest,
+  subjectsWithTutors,
+  visibleTutorCount,
+} from '@/db/demand';
 import { feedShape, smallCatalogueNote } from '@/lib/discovery/inventory';
 import { hasQueryParameters, pageMetadata } from '@/lib/seo/site';
 import { LAST_SUBJECT_COOKIE } from '@/middleware';
@@ -263,6 +268,11 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
     subjectsWithTutors(),
   ]);
 
+  // How many tutors exist, not how many match. A student whose class narrows
+  // the feed to two is looking at a narrow result, not an empty marketplace,
+  // and must keep the filters that let them widen it.
+  const catalogueSize = await visibleTutorCount();
+
   // Chips are built from what is actually bookable, not from every subject the
   // catalogue defines. A chip that leads to an empty page is a dead end
   // somebody blames themselves for, and with three tutors most of them would.
@@ -326,7 +336,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
 
   // How much there is decides the shape of the page. With three tutors, rails
   // are the grid again under a different heading, which reads as padding.
-  const shape = feedShape(results.total, browsing);
+  const shape = feedShape(catalogueSize, browsing);
 
   // Somebody asked for a curriculum position and got nothing. Record it — this
   // is the single most useful thing to know before recruiting the next tutor —
@@ -499,7 +509,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
                tutors matched" over three cards is the sentence that loses
                somebody's trust for good. */
             <p className="text-sm text-muted-foreground" data-testid="small-catalogue">
-              {smallCatalogueNote(results.total)}
+              {smallCatalogueNote(catalogueSize)}
             </p>
           ) : null}
 

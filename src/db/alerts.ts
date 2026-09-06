@@ -110,14 +110,14 @@ export async function activeAlerts(
       -- Refund share of the last day's settled money.
       -- Credits going back to a student for a reason that is not a purchase:
       -- the :refund suffix is what resolveBookingOutcome writes.
-      (select coalesce(sum(amount_cents), 0) from ledger_entries
-        where account = 'student_credits' and amount_cents > 0
+      (select coalesce(sum(delta_cents), 0) from ledger_entries
+        where account = 'student_credits' and delta_cents > 0
           and reason like '%:refund'
-          and created_at > ${at}::timestamptz - interval '1 day'
+          and at > ${at}::timestamptz - interval '1 day'
       )::int as refunded_cents,
 
-      (select coalesce(sum(amount_cents), 0) from ledger_entries
-        where account = 'platform_revenue' and created_at > ${at}::timestamptz - interval '1 day'
+      (select coalesce(sum(delta_cents), 0) from ledger_entries
+        where account = 'platform_revenue' and at > ${at}::timestamptz - interval '1 day'
       )::int as revenue_cents,
 
       (select count(*) from reports where status = 'open')::int as open_reports

@@ -28,6 +28,15 @@ describe('feedShape', () => {
     expect(feedShape(0, true).acknowledgeSmallCatalogue).toBe(false);
   });
 
+  it('is about the catalogue, not the current search', () => {
+    // A student whose declared class matches two tutors is looking at a narrow
+    // result, not an empty marketplace. Passing the filtered count here folded
+    // the filter panel away at the exact moment they needed it.
+    const wholeCatalogue = feedShape(40, true);
+    expect(wholeCatalogue.showFilters).toBe(true);
+    expect(wholeCatalogue.acknowledgeSmallCatalogue).toBe(false);
+  });
+
   it('gives an empty catalogue its own state rather than a filter apology', () => {
     // The day-one page. Telling somebody who has set no filters to clear their
     // filters is a dead end that also reads as broken.
