@@ -619,8 +619,13 @@ twenty $5 packs is $10, not 50c.
 ## 31. When a quiet pair means something
 
 **Settled, and it is a signal rather than a finding.** Three settled sessions,
-then forty-five days of silence, and the student has not booked anyone else
-here in the meantime.
+then **thirty** days of silence, and the student has not booked anyone else
+here in the meantime. All three clauses, together.
+
+Thirty rather than forty-five because of item 32: in a market whose normal
+shape is a monthly commitment, a pair that misses a whole month has not gone
+on holiday. Forty-five days was calibrated against ad-hoc hourly booking, which
+is not what this market does.
 
 One quiet pair is a student who passed their exam. The number that means
 something is the **ratio per tutor**: eleven quiet against two still active is a
@@ -634,3 +639,44 @@ left, and counting them would make every popular tutor look guilty.
 `QUIET_AFTER_SESSIONS` and `QUIET_DAYS` are in `src/db/reports.ts`. Nothing
 acts on the output: it is a table on the moderation page, to be read beside the
 tutor's messages and reviews by somebody who then decides.
+
+
+## 32. What the market actually sells is a month, not an hour
+
+**A real quote, and it changes the shape of the product.** A Lahore tutor:
+**50,000 PKR a month for three sessions a week across two subjects** — about
+**$13.70 an hour** once you divide it out.
+
+The rate is the least interesting part of that. The structure is the point:
+
+- **It is a commitment, not a transaction.** The student is not deciding
+  whether to book Tuesday. They decided once, and Tuesday happens. A product
+  that makes them decide every week is asking a question the market has already
+  answered, and losing a little of the relationship every time it asks.
+- **It is multi-subject.** Two subjects with one tutor, not two tutors. The
+  curriculum position a student declares is not one row.
+- **It is priced by the month**, which is how the tutor thinks about their
+  income and how the parent thinks about the bill.
+
+What follows from it, and what deliberately does not:
+
+**Recurring series exist because of this.** "Same time every Tuesday and
+Thursday" is one decision, made once — the shape the market already has.
+
+**But the money still moves per session.** This is the one place the product
+deliberately does *not* copy the market. Taking 50,000 PKR up front would mean
+holding a month of somebody's money against tutoring that has not happened, on
+a platform they have used twice. Every session is charged at its own T-48h,
+with a warning at T-72h if the wallet cannot cover it, and an occurrence that
+cannot be paid for **lapses visibly** rather than vanishing.
+
+So the series is the commitment and the ledger is per session. The tutor gets
+the predictability — the slot is reserved, one-off bookings cannot take it —
+without the platform holding a float it has not earned. If tutors turn out to
+want the monthly certainty badly enough to price for it, the honest version is
+a *discount* on a committed series, not a prepayment.
+
+**$13.70/hour sits in the middle of the current price band**, which runs from
+$5 to $200. That is the right place for the anchor to land, and it is worth
+re-checking once there is real supply: if the launch market clusters at $10-15
+and the band's top half is empty, the band is wrong, not the market.

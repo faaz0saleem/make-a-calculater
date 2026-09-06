@@ -3,7 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { maskFromUtcHours, OVERLAP_MAX_BPS, studyWindowMaskUtc } from '@/lib/ranking/overlap';
 import { computeRanking } from '@/lib/ranking/score';
 import { MATCH_TIERS } from './match';
-import { adjustedScore, compareForViewer, sortForViewer, type FeedOrderInputs } from './ordering';
+import {
+  adjustedScore,
+  compareForViewer,
+  sortForViewer,
+  topicBonusBps,
+  TOPIC_MAX_BPS,
+  type FeedOrderInputs,
+} from './ordering';
 
 const NOW = new Date('2026-01-15T12:00:00.000Z');
 const KARACHI = studyWindowMaskUtc('Asia/Karachi', NOW);
@@ -162,5 +169,50 @@ describe('the ordering is total', () => {
     expect(compareForViewer(left, right, KARACHI)).toBeLessThan(0);
     expect(compareForViewer(right, left, KARACHI)).toBeGreaterThan(0);
     expect(compareForViewer(left, left, KARACHI)).toBe(0);
+  });
+});
+
+
+describe('the chapter tiebreak', () => {
+  const base = { score: 8_000, freeHoursMask: 0, name: 'Alike', tutorId: 'a' } as const;
+
+  it('orders two otherwise identical tutors by chapters declared', () => {
+    const declared = { ...base, tier: MATCH_TIERS.exact, topicMatches: 3, tutorId: 'a', name: 'A' };
+    const silent = { ...base, tier: MATCH_TIERS.exact, topicMatches: 0, tutorId: 'b', name: 'B' };
+
+    expect(sortForViewer([silent, declared], 0, 3).map((t) => t.tutorId)).toEqual(['a', 'b']);
+  });
+
+  it('is graduated — half the chapters earns half the nudge', () => {
+    expect(topicBonusBps(3, 3)).toBe(TOPIC_MAX_BPS);
+    expect(topicBonusBps(0, 3)).toBe(0);
+    expect(topicBonusBps(2, 4)).toBe(TOPIC_MAX_BPS / 2);
+  });
+
+  /**
+   * The load-bearing one. A chapter match must not out-argue a rating gap that
+   * actually means something — 225 points is roughly a 4.6 against a 4.9.
+   */
+  it('cannot overturn three tenths of a star', () => {
+    const worse = { ...base, tier: MATCH_TIERS.exact, score: 7_800, topicMatches: 5, tutorId: 'a', name: 'A' };
+    const better = { ...base, tier: MATCH_TIERS.exact, score: 8_025, topicMatches: 0, tutorId: 'b', name: 'B' };
+
+    expect(sortForViewer([worse, better], 0, 5).map((t) => t.tutorId)).toEqual(['b', 'a']);
+    expect(TOPIC_MAX_BPS).toBeLessThan(225);
+  });
+
+  it('never lifts a tutor out of a lower tier, whatever they declare', () => {
+    const lower = { ...base, tier: MATCH_TIERS.board, topicMatches: 99, tutorId: 'a', name: 'A' };
+    const exact = { ...base, tier: MATCH_TIERS.exact, topicMatches: 0, score: 1, tutorId: 'b', name: 'B' };
+
+    expect(sortForViewer([lower, exact], 0, 99).map((t) => t.tutorId)).toEqual(['b', 'a']);
+  });
+
+  it('does nothing at all when the viewer asked about no chapters', () => {
+    const declared = { ...base, tier: MATCH_TIERS.exact, topicMatches: 5, tutorId: 'a', name: 'B' };
+    const silent = { ...base, tier: MATCH_TIERS.exact, topicMatches: 0, tutorId: 'b', name: 'A' };
+
+    // Falls through to the name tiebreak, so A comes first.
+    expect(sortForViewer([declared, silent], 0, 0).map((t) => t.tutorId)).toEqual(['b', 'a']);
   });
 });

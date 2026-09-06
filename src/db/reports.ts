@@ -800,8 +800,15 @@ export async function decideContactFlag(
 
 /** Sessions a pair must complete before going quiet means anything. */
 export const QUIET_AFTER_SESSIONS = 3;
-/** How long silence has to last. Shorter than this is a holiday. */
-export const QUIET_DAYS = 45;
+/**
+ * How long silence has to last.
+ *
+ * Thirty days, not forty-five. In a market where the normal shape is a monthly
+ * commitment — three sessions a week, paid by the month — a pair that misses a
+ * whole month has not gone on holiday, they have stopped. Forty-five days was
+ * calibrated against ad-hoc hourly booking, which is not what this market does.
+ */
+export const QUIET_DAYS = 30;
 
 export type QuietPairSignal = {
   tutorId: string;

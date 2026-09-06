@@ -13,16 +13,42 @@
  * is awake matters more than three tenths of a star; teaching their syllabus
  * matters more than either.
  *
+ * Below that again sits the chapter tiebreak, and it is deliberately the
+ * smallest term here — see `TOPIC_MAX_BPS`.
+ *
  * `src/db/discovery.ts` builds the same ordering in SQL. This module is the
  * readable statement of it, and what the tests check.
  */
 
 import { overlapBonusBps } from '@/lib/ranking/overlap';
-import type { MatchTier } from './match';
+import { MATCH_TIERS, type MatchTier } from './match';
+
+/**
+ * The most a chapter match can move a tutor.
+ *
+ * Two hundred points, and the number is chosen against a specific comparison:
+ * the gap between a 4.6 and a 4.9 tutor is roughly 225 points, so a chapter
+ * match **cannot** overturn three tenths of a star. It orders tutors who are
+ * otherwise alike, which is what a tiebreak is for.
+ *
+ * It applies inside the exact-match tier and nowhere else. A tutor who has
+ * ticked "Electrolysis" but teaches a different board does not climb past one
+ * who teaches the student's actual syllabus, however many boxes they tick —
+ * that is what "never a new tier" means.
+ */
+export const TOPIC_MAX_BPS = 200;
+
+/** Graduated: half the chapters declared earns half the bonus. */
+export function topicBonusBps(matched: number, requested: number): number {
+  if (requested <= 0 || matched <= 0) return 0;
+  return Math.round((Math.min(matched, requested) * TOPIC_MAX_BPS) / requested);
+}
 
 export type FeedOrderInputs = {
   /** 0-3, from `./match.ts`. Zero when the viewer declared no curriculum. */
   tier: MatchTier;
+  /** How many of the chapters the viewer is asking about this tutor declares. */
+  topicMatches?: number;
   /** The nightly ranking score, or null for a tutor not scored yet. */
   score: number | null;
   /** The tutor's free-hours mask from the nightly job. */
@@ -53,16 +79,29 @@ export function compareForViewer(
   a: FeedOrderInputs,
   b: FeedOrderInputs,
   viewerMask: number,
+  /** How many chapters the viewer asked about. Zero means no tiebreak at all. */
+  requestedTopics = 0,
 ): number {
   if (a.tier !== b.tier) return b.tier - a.tier;
 
-  const byScore = adjustedScore(b.score, b.freeHoursMask, viewerMask) -
-    adjustedScore(a.score, a.freeHoursMask, viewerMask);
+  // Only inside the exact tier, where every tutor already teaches the right
+  // board, class and subject and the question is which of them knows these
+  // particular chapters.
+  const bonus = (tutor: FeedOrderInputs) =>
+    a.tier === MATCH_TIERS.exact ? topicBonusBps(tutor.topicMatches ?? 0, requestedTopics) : 0;
+
+  const byScore =
+    adjustedScore(b.score, b.freeHoursMask, viewerMask) + bonus(b) -
+    (adjustedScore(a.score, a.freeHoursMask, viewerMask) + bonus(a));
   if (byScore !== 0) return byScore;
 
   return a.name.localeCompare(b.name) || a.tutorId.localeCompare(b.tutorId);
 }
 
-export function sortForViewer<T extends FeedOrderInputs>(tutors: readonly T[], viewerMask: number): T[] {
-  return [...tutors].sort((a, b) => compareForViewer(a, b, viewerMask));
+export function sortForViewer<T extends FeedOrderInputs>(
+  tutors: readonly T[],
+  viewerMask: number,
+  requestedTopics = 0,
+): T[] {
+  return [...tutors].sort((a, b) => compareForViewer(a, b, viewerMask, requestedTopics));
 }

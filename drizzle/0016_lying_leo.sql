@@ -1,0 +1,2 @@
+ALTER TABLE "recurring_series" DROP CONSTRAINT "recurring_series_duration";--> statement-breakpoint
+ALTER TABLE "recurring_series" ADD CONSTRAINT "recurring_series_duration" CHECK (duration_minutes in (30, 60));

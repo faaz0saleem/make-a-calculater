@@ -44,8 +44,13 @@ import {
   availabilityExceptions,
   messages,
   notifications,
+  bookingTopics,
+  homework,
   payoutMethods,
   payouts,
+  recurringSeries,
+  topics,
+  tutorTopics,
   reviews,
   sessionEvents,
   studentCurriculum,
@@ -79,6 +84,10 @@ import { deriveHalfHourCents, priceForBooking } from '@/lib/money/pricing';
 import { scoreContactIntent, shouldQueueForReview } from '@/lib/messaging/contact-intent';
 import { maskContactInfo } from '@/lib/messaging/masking';
 import { methodsForCountry } from '@/lib/payments/catalogue';
+import { createSeries, endSeries, runSeriesJobs } from './series';
+import { dateInZone } from '@/lib/series/occurrences';
+import { DatabaseAvailability } from '@/lib/availability/database';
+import { TOPIC_SEEDS } from '@/lib/curriculum/topics';
 import { fileReport, recordContactFlag } from './reports';
 import { TRIAL_BUFFER_MINUTES } from '@/lib/trials/rules';
 import {
@@ -414,10 +423,13 @@ async function reset(): Promise<void> {
   // One statement so foreign keys never block the order.
   await db.execute(sql`
     truncate table
-      ledger_entries, session_events, reviews, bookings,
+      ledger_entries, session_events, reviews, homework,
+      booking_topics, bookings, recurring_series,
       payouts, payout_methods, credit_purchases, credit_packs,
       follows, messages, threads, notifications, reports, admin_audit,
+      contact_flags, user_sanctions,
       availability_exceptions, availability_rules,
+      tutor_topics, topics,
       tutor_subjects, tutor_curriculum, student_curriculum, tutor_languages,
       tutor_ranking, credentials, tutor_profiles,
       student_wallets, platform_accounts, videos, subjects,
@@ -1326,8 +1338,17 @@ async function seedCurriculumDeclarations(
   }[] = [];
 
   for (const student of students) {
-    const boardId = pick(boardsForSeedCountry(countryById.get(student.id) ?? null));
-    const levelId = pick(levelsOf(boardId));
+    // Two thirds land on the launch board, which is where the chapter taxonomy
+    // is and where the market this product is aimed at actually sits. The rest
+    // are spread as before, so nothing downstream may assume everybody is on
+    // Cambridge.
+    const boardId = chance(0.65)
+      ? 'caie'
+      : pick(boardsForSeedCountry(countryById.get(student.id) ?? null));
+    const levelId =
+      boardId === 'caie'
+        ? pick(['caie:igcse', 'caie:o-level', 'caie:as-level', 'caie:a2-level'])
+        : pick(levelsOf(boardId));
     const slug = pick([...BOARD_SUBJECT_SLUGS]);
     const subjectId = subjectIds.get(slug);
     if (!subjectId) continue;
@@ -2176,6 +2197,252 @@ async function seedRegularPairs(
   return { quiet: quietCount, active: activeCount };
 }
 
+/**
+ * Standing arrangements (SPEC.md §5, DECISIONS_NEEDED item 32).
+ *
+ * Three of them, deliberately at different points in their life, because a
+ * series is only interesting once it has run for a while:
+ *
+ *  - one a week old, so it has an occurrence already charged and a month of
+ *    `scheduled` ones ahead;
+ *  - one brand new, so the first-session rate is still on its first occurrence;
+ *  - one ending, so the seven days' notice is visible on a real row.
+ *
+ * They go through `createSeries` and `runSeriesJobs` rather than being written
+ * by hand, so what the seed produces is what the product produces.
+ */
+/**
+ * The chapter taxonomy (SPEC.md §4).
+ *
+ * Cambridge only, for now, across the four subjects that carry the demand —
+ * see `lib/curriculum/topics.ts` for why that is the honest scope rather than
+ * a stub for every board.
+ */
+async function seedTopics(subjectIds: Map<string, string>): Promise<number> {
+  let inserted = 0;
+
+  for (const set of TOPIC_SEEDS) {
+    const subjectId = subjectIds.get(set.subjectSlug);
+    if (!subjectId) continue;
+
+    const rows = await db
+      .insert(topics)
+      .values(
+        set.topics.map((topic, index) => ({
+          boardId: set.boardId,
+          levelId: set.levelId,
+          subjectId,
+          name: topic.name,
+          reference: topic.reference,
+          sortOrder: index,
+        })),
+      )
+      .onConflictDoNothing()
+      .returning({ id: topics.id });
+
+    inserted += rows.length;
+  }
+
+  return inserted;
+}
+
+/**
+ * What sessions were booked for, and what they covered.
+ *
+ * Attached to settled sessions whose tutor and student share a curriculum
+ * position, so the progress view has something real in it. Most attached
+ * chapters were covered; some were not, because an hour that gets through
+ * everything it planned is not the common case and a seed that pretended
+ * otherwise would make the progress bars meaningless.
+ */
+async function seedBookingTopics(now: Date): Promise<{ attached: number; covered: number }> {
+  // The student's own syllabus decides what they can pick, not the tutor's.
+  // A student books a chapter because it is on *their* exam; whether the tutor
+  // has declared that exact position is the ranking's problem, not this one's.
+  const candidates = (await db.execute(sql`
+    select b.id::text as booking_id, t.id::text as topic_id, b.completed_at
+    from bookings b
+    join student_curriculum sc on sc.student_id = b.student_id
+    join topics t
+      on t.board_id = sc.board_id and t.level_id = sc.level_id and t.subject_id = sc.subject_id
+    where b.status in ('settled', 'confirmed', 'scheduled')
+    order by b.start_at_utc, t.sort_order
+  `)) as unknown as { booking_id: string; topic_id: string; completed_at: string | null }[];
+
+  const byBooking = new Map<string, { topicId: string; completed: boolean }[]>();
+  for (const row of candidates) {
+    const list = byBooking.get(row.booking_id) ?? [];
+    if (list.length >= 3) continue;
+    list.push({ topicId: row.topic_id, completed: row.completed_at !== null });
+    byBooking.set(row.booking_id, list);
+  }
+
+  let attached = 0;
+  let covered = 0;
+
+  for (const [bookingId, list] of byBooking) {
+    // A student picks one to three chapters, weighted towards fewer.
+    const wanted = list.slice(0, chance(0.55) ? 1 : chance(0.6) ? 2 : 3);
+
+    for (const [index, entry] of wanted.entries()) {
+      // Only a session that happened can have covered anything. The first
+      // chapter usually gets done; the third usually does not.
+      const done = entry.completed && (index === 0 ? chance(0.85) : chance(0.45));
+
+      await db
+        .insert(bookingTopics)
+        .values({
+          bookingId,
+          topicId: entry.topicId,
+          covered: entry.completed ? done : null,
+          grasp: done ? pick(['struggling', 'developing', 'secure', 'secure'] as const) : null,
+          markedAt: entry.completed ? now : null,
+        })
+        .onConflictDoNothing();
+
+      attached += 1;
+      if (done) covered += 1;
+    }
+  }
+
+  return { attached, covered };
+}
+
+/**
+ * Chapters a tutor says they are strong on.
+ *
+ * Half of each tutor's chapters, so the tiebreak has something to break and
+ * something to leave alone.
+ */
+async function seedTutorTopics(): Promise<number> {
+  const rows = (await db.execute(sql`
+    select tc.tutor_id::text, t.id::text as topic_id
+    from tutor_curriculum tc
+    join topics t
+      on t.board_id = tc.board_id and t.level_id = tc.level_id and t.subject_id = tc.subject_id
+    order by tc.tutor_id, t.sort_order
+  `)) as unknown as { tutor_id: string; topic_id: string }[];
+
+  const values = rows
+    .filter(() => chance(0.5))
+    .map((row) => ({ tutorId: row.tutor_id, topicId: row.topic_id }));
+
+  if (values.length === 0) return 0;
+
+  const written = await db
+    .insert(tutorTopics)
+    .values(values)
+    .onConflictDoNothing()
+    .returning({ topicId: tutorTopics.topicId });
+
+  return written.length;
+}
+
+async function seedRecurringSeries(
+  students: SeededStudent[],
+  tutors: SeededTutor[],
+  wallets: Wallets,
+  now: Date,
+): Promise<{ created: number; charged: number }> {
+  const availability = new DatabaseAvailability(db);
+  const candidates = tutors.filter(
+    (tutor) => !(PAYOUT_FIXTURE_EMAILS as readonly string[]).includes(tutor.email),
+  );
+
+  let created = 0;
+  let charged = 0;
+  let studentIndex = 0;
+
+  for (const [index, tutor] of candidates.entries()) {
+    if (created >= 3) break;
+
+    const student = students[studentIndex % students.length]!;
+
+    // A slot the engine really offers, so the series sits on published hours.
+    const free = await availability.freeSlotsFor(
+      {
+        tutorId: tutor.id,
+        durationMinutes: 60,
+        fromUtc: daysFromNow(3, 0),
+        toUtc: daysFromNow(10, 0),
+        limit: 20,
+      },
+      now,
+    );
+
+    if (!free.known || free.value.length === 0) continue;
+
+    const slot = free.value[0]!.startUtc;
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tutor.timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      weekday: 'short',
+    }).formatToParts(slot);
+    const part = (type: string) => parts.find((entry) => entry.type === type)?.value ?? '';
+    const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(part('weekday'));
+    if (weekday < 0) continue;
+
+    // The first one started a week ago, so it has history. The rest start now.
+    const startedAt = created === 0 ? daysFromNow(-8, 9) : now;
+
+    const result = await createSeries(
+      {
+        studentId: student.id,
+        tutorId: tutor.id,
+        weekdays: created === 1 ? [weekday, (weekday + 2) % 7] : [weekday],
+        startTimeLocal: `${part('hour')}:${part('minute')}:00`,
+        durationMinutes: 60,
+        startsOn: dateInZone(startedAt, tutor.timezone),
+      },
+      startedAt,
+      db,
+    );
+
+    if (!result.ok) {
+      studentIndex += 1;
+      continue;
+    }
+
+    created += 1;
+    studentIndex += 1;
+
+    // The week-old one has been through the job, so one session is paid for
+    // and one is on its way. Run it at the moment that occurrence's credits
+    // fall due, which is what the hourly cron would have done.
+    if (created === 1) {
+      await ensureCredits(wallets, student.id, result.priceCents * 4);
+
+      const [next] = (await db.execute(sql`
+        select start_at_utc from bookings
+        where series_id = ${result.seriesId}::uuid and start_at_utc > ${now.toISOString()}::timestamptz
+        order by start_at_utc limit 1
+      `)) as unknown as { start_at_utc: string }[];
+
+      if (next) {
+        const at = new Date(new Date(next.start_at_utc).getTime() - 47 * 3_600_000);
+        const money = await runSeriesJobs(at < now ? now : at, db);
+        charged += money.charged;
+      }
+    }
+
+    // The third is on its way out, with the notice period running.
+    if (created === 3) {
+      await endSeries(
+        result.seriesId,
+        index % 2 === 0 ? 'student' : 'tutor',
+        index % 2 === 0 ? student.id : tutor.id,
+        index % 2 === 0 ? 'Exams are over for the year.' : 'My Thursdays have gone.',
+        now,
+        db,
+      );
+    }
+  }
+
+  return { created, charged };
+}
+
 async function seedNotifications(students: SeededStudent[], now: Date): Promise<void> {
   const student = students.find((candidate) => candidate.email === 'student@tutorly.test');
   if (!student) return;
@@ -2662,6 +2929,8 @@ async function main() {
     exceptionsByTutor,
     passwordHash,
   );
+  const topicCount = await seedTopics(subjectIds);
+  const series = await seedRecurringSeries(students, verified, wallets, NOW);
   const payoutFixtures = await seedPayoutFixtures(
     verified,
     students,
@@ -2683,6 +2952,11 @@ async function main() {
   }
 
   const curriculum = await seedCurriculumDeclarations([...verified, ...pending], students, subjectIds);
+
+  // After the declarations, because both of these join through them: a chapter
+  // is only offered to somebody whose declared position it belongs to.
+  const covered = await seedBookingTopics(NOW);
+  const strengths = await seedTutorTopics();
 
   const conversations = await seedConversations(NOW);
   const reportCount = await seedReports(students, verified);
@@ -2736,6 +3010,12 @@ async function main() {
   );
   console.log(
     `  established pairs        ${regulars.quiet} that went quiet, ${regulars.active} still booking`,
+  );
+  console.log(
+    `  standing arrangements    ${series.created} series, ${series.charged} occurrence(s) already charged`,
+  );
+  console.log(
+    `  chapters                 ${topicCount} seeded · ${covered.attached} attached to sessions · ${covered.covered} marked covered · ${strengths} tutor strengths`,
   );
   console.log(`  awaiting settlement      ${counts.awaitingSettlement}`);
   console.log(`  reviews                  ${totals.reviews}`);

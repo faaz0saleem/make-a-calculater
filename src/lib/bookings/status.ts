@@ -6,6 +6,15 @@
  */
 
 export const BOOKING_STATUSES = [
+  /**
+   * A recurring occurrence that has been materialised but not paid for.
+   *
+   * It holds the slot — nobody else can take that hour — and carries no money.
+   * Credits are debited at its own T-48h, which is when it becomes `confirmed`.
+   * A month of sessions is a commitment, not a prepayment (SPEC.md §5,
+   * DECISIONS_NEEDED item 32).
+   */
+  'scheduled',
   'pending_tutor',
   'confirmed',
   'in_progress',
@@ -14,6 +23,14 @@ export const BOOKING_STATUSES = [
   'cancelled_by_student',
   'cancelled_by_tutor',
   'expired',
+  /**
+   * A recurring occurrence the student could not cover at T-48h.
+   *
+   * Distinct from `expired` because the tutor needs to know *why* their Tuesday
+   * disappeared, and distinct from a cancellation because nobody chose it. No
+   * money moved, so there is nothing to settle.
+   */
+  'lapsed',
   'no_show_student',
   'no_show_tutor',
   'disputed',
@@ -22,8 +39,14 @@ export const BOOKING_STATUSES = [
 
 export type BookingStatus = (typeof BOOKING_STATUSES)[number];
 
-/** Statuses that hold a slot on the tutor's calendar (see the partial unique index). */
-export const ACTIVE_BOOKING_STATUSES = ['pending_tutor', 'confirmed', 'in_progress'] as const;
+/**
+ * Statuses that hold a slot on the tutor's calendar (see the partial unique index).
+ *
+ * `scheduled` is in here even though no money has moved: the whole point of a
+ * recurring series is that Tuesday at six is *taken*, and a one-off booking
+ * must not be able to walk into it.
+ */
+export const ACTIVE_BOOKING_STATUSES = ['scheduled', 'pending_tutor', 'confirmed', 'in_progress'] as const;
 
 /** Statuses no transition can leave. */
 export const TERMINAL_BOOKING_STATUSES = [
@@ -31,10 +54,14 @@ export const TERMINAL_BOOKING_STATUSES = [
   'cancelled_by_student',
   'cancelled_by_tutor',
   'expired',
+  'lapsed',
   'refunded',
 ] as const;
 
 const TRANSITIONS: Record<BookingStatus, readonly BookingStatus[]> = {
+  // A materialised recurring occurrence. It becomes `confirmed` when its
+  // credits are taken at T-48h, and `lapsed` when they cannot be.
+  scheduled: ['confirmed', 'cancelled_by_student', 'cancelled_by_tutor', 'lapsed'],
   // Trials only: the tutor must accept before the slot is really held.
   pending_tutor: ['confirmed', 'cancelled_by_student', 'cancelled_by_tutor', 'expired'],
   confirmed: [
@@ -56,6 +83,8 @@ const TRANSITIONS: Record<BookingStatus, readonly BookingStatus[]> = {
   cancelled_by_student: [],
   cancelled_by_tutor: [],
   expired: [],
+  // Nothing was ever charged, so there is nothing to settle or refund.
+  lapsed: [],
   refunded: [],
 };
 

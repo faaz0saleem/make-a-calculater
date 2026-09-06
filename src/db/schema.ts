@@ -136,6 +136,25 @@ export const sanctionStatusEnum = pgEnum('sanction_status', [
 /** A confidence-scored contact-info detection, waiting for a person. */
 export const contactFlagStatusEnum = pgEnum('contact_flag_status', ['pending', 'confirmed', 'dismissed']);
 
+/**
+ * A recurring series (SPEC.md §5, DECISIONS_NEEDED item 32).
+ *
+ * `ending` is not decoration: either side may end a series with seven days'
+ * notice, and during those seven days the series is neither running normally
+ * nor over. Occurrences inside the notice period still happen.
+ */
+export const recurringStatusEnum = pgEnum('recurring_status', ['active', 'ending', 'ended']);
+
+/** What a tutor said about a topic after teaching it. */
+export const graspEnum = pgEnum('grasp', ['struggling', 'developing', 'secure']);
+
+export const homeworkStatusEnum = pgEnum('homework_status', [
+  'assigned',
+  'submitted',
+  'marked',
+  'cancelled',
+]);
+
 export const rescheduleStatusEnum = pgEnum('reschedule_status', [
   'pending',
   'accepted',
@@ -159,6 +178,19 @@ export const notificationKindEnum = pgEnum('notification_kind', [
   'new_availability',
   /** A warning, a restriction or an appeal outcome. Always links to /settings/notices. */
   'account_notice',
+  /** T-24h, T-1h and the tutor's stronger T-10min (SPEC.md §7). */
+  'session_reminder',
+  /** One person is in the room and the other is not. */
+  'session_waiting',
+  /** A recurring occurrence is about to be charged and the wallet is short. */
+  'series_short',
+  /** A recurring occurrence went unpaid and did not happen. */
+  'series_lapsed',
+  /** Either side ended a recurring series. */
+  'series_ending',
+  'homework_assigned',
+  'homework_submitted',
+  'homework_marked',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -556,6 +588,114 @@ export const curriculumLevels = pgTable(
   ],
 );
 
+/**
+ * The chapters inside a (board, class, subject) (SPEC.md §4).
+ *
+ * Nobody teaches a whole syllabus in an hour. Without this, a booking says
+ * "Chemistry" and both sides find out what it was actually for in the first
+ * five minutes — which is five minutes of an hour somebody paid for.
+ *
+ * Scoped the same way a level is: the composite foreign key onto
+ * `curriculum_levels (board_id, id)` means "Electrolysis, CAIE, IGCSE" cannot
+ * be stored under CBSE whatever the application believes.
+ *
+ * It is also the retention engine. A student who can see fourteen of
+ * twenty-two chapters covered has a reason to book the fifteenth, and that is
+ * a better reason than a discount.
+ */
+export const topics = pgTable(
+  'topics',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    boardId: varchar({ length: 32 })
+      .notNull()
+      .references(() => boards.id, { onDelete: 'cascade' }),
+    levelId: varchar({ length: 64 }).notNull(),
+    subjectId: uuid()
+      .notNull()
+      .references(() => subjects.id, { onDelete: 'cascade' }),
+    name: varchar({ length: 160 }).notNull(),
+    /** Chapter or unit number as the syllabus prints it, when it has one. */
+    reference: varchar({ length: 32 }),
+    sortOrder: smallint().notNull().default(0),
+    isActive: boolean().notNull().default(true),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: 'topics_level_fk',
+      columns: [table.boardId, table.levelId],
+      foreignColumns: [curriculumLevels.boardId, curriculumLevels.id],
+    }).onDelete('cascade'),
+    uniqueIndex('topics_position_name_key').on(
+      table.boardId,
+      table.levelId,
+      table.subjectId,
+      table.name,
+    ),
+    index('topics_position_idx').on(table.boardId, table.levelId, table.subjectId, table.sortOrder),
+  ],
+);
+
+/** How many topics a student may attach to one booking. */
+export const MAX_TOPICS_PER_BOOKING = 5;
+
+/**
+ * What a session was for, and what it turned out to cover.
+ *
+ * Written twice: the student picks topics at booking, and the tutor marks
+ * `covered` afterwards. They are separate columns because they are separate
+ * facts — a session that was booked for three chapters and got through one is
+ * a normal session, and pretending otherwise would make the progress view a
+ * lie.
+ */
+export const bookingTopics = pgTable(
+  'booking_topics',
+  {
+    bookingId: uuid()
+      .notNull()
+      .references(() => bookings.id, { onDelete: 'cascade' }),
+    topicId: uuid()
+      .notNull()
+      .references(() => topics.id, { onDelete: 'cascade' }),
+    /** Null until the tutor says. Not the same as false. */
+    covered: boolean(),
+    /** Optional, and deliberately three rungs rather than five stars. */
+    grasp: graspEnum(),
+    markedAt: timestamp({ withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.bookingId, table.topicId] }),
+    index('booking_topics_topic_idx').on(table.topicId),
+  ],
+);
+
+/**
+ * Topics a tutor says they are strong on.
+ *
+ * A tiebreak *within* an existing tier of the ranking, never a tier of its
+ * own — see `lib/curriculum/ordering.ts`. A tutor who teaches the exact board,
+ * class and subject outranks one who does not, whatever either of them has
+ * declared here.
+ */
+export const tutorTopics = pgTable(
+  'tutor_topics',
+  {
+    tutorId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    topicId: uuid()
+      .notNull()
+      .references(() => topics.id, { onDelete: 'cascade' }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tutorId, table.topicId] }),
+    index('tutor_topics_topic_idx').on(table.topicId),
+  ],
+);
+
 /** How many curriculum positions one tutor may declare. */
 export const MAX_TUTOR_CURRICULUM = 15;
 
@@ -699,6 +839,17 @@ export const bookings = pgTable(
     subjectId: uuid().references(() => subjects.id, { onDelete: 'set null' }),
     isTrial: boolean().notNull().default(false),
 
+    /**
+     * The standing arrangement this occurrence belongs to, if any.
+     *
+     * A booking with a series is not a lesser booking: it moves through the
+     * same state machine, holds the same slot and settles the same way. The
+     * only difference is when its credits are taken.
+     */
+    seriesId: uuid().references(() => recurringSeries.id, { onDelete: 'set null' }),
+    /** The local date of the occurrence, so materialisation cannot double up. */
+    occurrenceDate: date(),
+
     startAtUtc: timestamp({ withTimezone: true }).notNull(),
     durationMinutes: smallint().notNull(),
     status: bookingStatusEnum().notNull(),
@@ -713,6 +864,16 @@ export const bookings = pgTable(
     tutorTz: varchar({ length: 64 }).notNull(),
 
     livekitRoom: varchar({ length: 100 }),
+
+    /**
+     * What the student typed that no topic covers — "I do not understand
+     * titration calculations".
+     *
+     * The list of topics is a taxonomy somebody curated; this is the sentence
+     * the student would actually say, and it is often the more useful of the
+     * two. The tutor sees it before the session, and before accepting a trial.
+     */
+    topicNote: text(),
 
     rescheduleCount: smallint().notNull().default(0),
     /**
@@ -735,14 +896,109 @@ export const bookings = pgTable(
      */
     uniqueIndex('booking_no_overlap')
       .on(table.tutorId, table.startAtUtc)
-      .where(sql`status in ('pending_tutor', 'confirmed', 'in_progress')`),
+      // Kept in step with ACTIVE_BOOKING_STATUSES by hand, because a partial
+      // index predicate cannot be interpolated. `scheduled` belongs here: a
+      // recurring occurrence holds its hour from the moment it is materialised.
+      .where(sql`status in ('scheduled', 'pending_tutor', 'confirmed', 'in_progress')`),
     /** SPEC.md §6: one free trial per student-tutor pair, for life. */
     uniqueIndex('one_trial_per_pair')
       .on(table.studentId, table.tutorId)
       .where(sql`is_trial = true`),
+    /**
+     * One booking per series occurrence.
+     *
+     * The materialisation job is meant to be safe to run twice — a cron that
+     * fires on a retry, two workers, a hand-run during a backfill — and this
+     * is what makes that true rather than hoped for. Cancelled occurrences are
+     * still in here, so re-running does not resurrect a cancelled Tuesday.
+     */
+    uniqueIndex('one_booking_per_occurrence')
+      .on(table.seriesId, table.occurrenceDate)
+      .where(sql`series_id is not null`),
+    index('bookings_series_idx').on(table.seriesId, table.startAtUtc),
     index('bookings_student_idx').on(table.studentId, table.startAtUtc),
     index('bookings_tutor_idx').on(table.tutorId, table.startAtUtc),
     index('bookings_status_idx').on(table.status, table.startAtUtc),
+  ],
+);
+
+/**
+ * A standing arrangement: same time, same weekdays, until somebody stops it
+ * (SPEC.md §5, DECISIONS_NEEDED item 32).
+ *
+ * The market this is for sells a month, not an hour — "three sessions a week,
+ * 50,000 a month". A student who has decided that should not have to decide it
+ * again every Tuesday. So the series is the commitment, made once.
+ *
+ * Two things it deliberately does not do:
+ *
+ *  - **It does not take a month's money.** There is no balance on this row.
+ *    Each occurrence is charged at its own T-48h, and one that cannot be paid
+ *    for lapses visibly. Holding four weeks of somebody's money against
+ *    tutoring that has not happened is a float we have not earned.
+ *  - **It does not materialise forever.** `series_jobs` keeps four weeks of
+ *    real bookings ahead of today and rolls forward weekly. Rows stretching to
+ *    the heat death of the universe are not a schedule, they are a landfill.
+ *
+ * `price_cents` is snapshotted here rather than read from the tutor's rate at
+ * each materialisation, because a standing arrangement at an agreed price is
+ * what both sides think they agreed. A tutor who wants a new price ends the
+ * series and offers a new one.
+ *
+ * The weekday and the time are in `timezone`, which is the **tutor's** at
+ * creation. That side is anchored because the tutor's published hours are, so
+ * the slot keeps landing inside them across a DST change; the student sees the
+ * shift on their own upcoming list, which is what a standing appointment
+ * across five time zones actually does.
+ */
+export const recurringSeries = pgTable(
+  'recurring_series',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    studentId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    tutorId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    subjectId: uuid().references(() => subjects.id, { onDelete: 'set null' }),
+
+    /** 0 = Sunday, in `timezone`. One to seven of them. */
+    weekdays: smallint().array().notNull(),
+    /** `HH:MM:SS` in `timezone`. */
+    startTimeLocal: time().notNull(),
+    timezone: varchar({ length: 64 }).notNull(),
+    durationMinutes: smallint().notNull(),
+
+    /** The agreed price per session. Never re-read from the tutor's rate. */
+    priceCents: integer().notNull(),
+
+    startsOn: date().notNull(),
+    /** Null while open-ended. Set to the notice date when somebody ends it. */
+    endsOn: date(),
+
+    status: recurringStatusEnum().notNull().default('active'),
+    endedBy: partyEnum(),
+    endedAt: timestamp({ withTimezone: true }),
+    /** The student and the tutor both read this. */
+    endReason: text(),
+
+    /** How far ahead occurrences have been created, so the job is idempotent. */
+    materialisedThrough: date(),
+
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('recurring_series_tutor_idx').on(table.tutorId, table.status),
+    index('recurring_series_student_idx').on(table.studentId, table.status),
+    check(
+      'recurring_series_weekdays',
+      sql`array_length(weekdays, 1) between 1 and 7
+          and weekdays <@ array[0,1,2,3,4,5,6]::smallint[]`,
+    ),
+    check('recurring_series_duration', sql`duration_minutes in (30, 60)`),
+    check('recurring_series_price', sql`price_cents > 0`),
   ],
 );
 
@@ -1242,6 +1498,68 @@ export const userSanctions = pgTable(
     index('user_sanctions_user_idx').on(table.userId, table.issuedAt),
     /** The lookup on every request that asks "is this person restricted?". */
     index('user_sanctions_active_idx').on(table.userId, table.restrictedUntil),
+  ],
+);
+
+/**
+ * Work between sessions (SPEC.md §9).
+ *
+ * The strongest thing on this platform against somebody taking the
+ * relationship elsewhere, and it is not a restriction — it is value that only
+ * exists here. A tutor and a student who move to WhatsApp keep the video call
+ * and lose this: the assignment tied to a chapter, the file, the mark, and the
+ * record of both.
+ *
+ * Tied to a booking rather than floating free, because "revise what we did on
+ * Tuesday" is the assignment that gets done and "revise chapter four" is the
+ * one that does not.
+ */
+export const homework = pgTable(
+  'homework',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    bookingId: uuid()
+      .notNull()
+      .references(() => bookings.id, { onDelete: 'cascade' }),
+    tutorId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    studentId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** What it is about, so it lands in the progress view. */
+    topicId: uuid().references(() => topics.id, { onDelete: 'set null' }),
+
+    title: varchar({ length: 200 }).notNull(),
+    body: text(),
+    /** Papers the tutor attached, through the same presigned path as messages. */
+    attachments: jsonb().notNull().default(sql`'[]'::jsonb`),
+    dueAt: timestamp({ withTimezone: true }),
+
+    status: homeworkStatusEnum().notNull().default('assigned'),
+
+    /** The submission. One per assignment; resubmitting replaces it. */
+    submissionBody: text(),
+    submissionAttachments: jsonb().notNull().default(sql`'[]'::jsonb`),
+    submittedAt: timestamp({ withTimezone: true }),
+
+    /**
+     * The mark, out of `markOutOf`, or null for work that is not marked
+     * numerically — which is most of it. The feedback is the point.
+     */
+    mark: smallint(),
+    markOutOf: smallint(),
+    feedback: text(),
+    markedAt: timestamp({ withTimezone: true }),
+
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('homework_student_idx').on(table.studentId, table.status, table.dueAt),
+    index('homework_tutor_idx').on(table.tutorId, table.status),
+    index('homework_booking_idx').on(table.bookingId),
+    check('homework_mark_range', sql`mark is null or (mark_out_of is not null and mark between 0 and mark_out_of)`),
   ],
 );
 

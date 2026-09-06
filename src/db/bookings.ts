@@ -84,7 +84,7 @@ function isRaceLoss(error: unknown): boolean {
  * Whether this student has already had a session with this tutor that actually
  * happened — the one fact the commission rate turns on.
  */
-async function hasCompletedPaidSession(
+export async function hasCompletedPaidSession(
   studentId: string,
   tutorId: string,
   database: DbLike,
