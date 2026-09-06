@@ -112,6 +112,29 @@ describe('policy: student cancels more than 24h before', () => {
   it('refunds 100% a week out', () => {
     expect(resolveBookingOutcome(booking(), cancelledAt(7 * 24 * 60)).refundCents).toBe(2_500);
   });
+
+  it('refunds 100% at 24 hours and thirty seconds', () => {
+    // The tier used to be decided on floored minutes, so 1440.5 minutes became
+    // 1440, `> 1440` was false, and somebody who cancelled with more than a
+    // day's notice lost half their money to a rounding step.
+    const at = new Date(START.getTime() - (24 * 60 * 60 + 30) * 1_000);
+    const outcome = resolveBookingOutcome(booking(), {
+      kind: 'cancellation',
+      by: 'student',
+      atUtc: at,
+    });
+
+    expect(outcome.refundCents).toBe(2_500);
+    expect(outcome.tutorCents).toBe(0);
+  });
+
+  it('still puts one second short of 24 hours in the 50% band', () => {
+    const at = new Date(START.getTime() - (24 * 60 * 60 - 1) * 1_000);
+    expect(
+      resolveBookingOutcome(booking(), { kind: 'cancellation', by: 'student', atUtc: at })
+        .refundCents,
+    ).toBe(1_250);
+  });
 });
 
 describe('policy: student cancels 2-24h before', () => {

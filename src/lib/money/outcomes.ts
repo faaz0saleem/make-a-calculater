@@ -148,6 +148,18 @@ export function minutesBeforeStart(startAtUtc: Date, atUtc: Date): number {
 }
 
 /**
+ * Notice as milliseconds, which is what the refund tiers are decided on.
+ *
+ * Deliberately not the floored minutes above. Flooring 24 hours and thirty
+ * seconds gives 1440, and `> 1440` is false, so a student who cancelled with
+ * genuinely more than a day's notice was given half their money back. The
+ * display can round; the money cannot.
+ */
+function noticeMs(startAtUtc: Date, atUtc: Date): number {
+  return startAtUtc.getTime() - atUtc.getTime();
+}
+
+/**
  * Classify what happened, without touching money. Split out so the routing rules
  * can be read and tested on their own.
  */
@@ -273,9 +285,9 @@ export function refundForResolution(
       if (attendance.kind !== 'cancellation') {
         throw new MoneyError('cancelled_by_student requires a cancellation attendance record');
       }
-      const notice = minutesBeforeStart(booking.startAtUtc, attendance.atUtc);
-      if (notice > FULL_REFUND_CUTOFF_MINUTES) return booking.priceCents;
-      if (notice >= PARTIAL_REFUND_CUTOFF_MINUTES) return divRoundHalfUp(booking.priceCents, 2);
+      const notice = noticeMs(booking.startAtUtc, attendance.atUtc);
+      if (notice > FULL_REFUND_CUTOFF_MINUTES * 60_000) return booking.priceCents;
+      if (notice >= PARTIAL_REFUND_CUTOFF_MINUTES * 60_000) return divRoundHalfUp(booking.priceCents, 2);
       return 0;
     }
   }
