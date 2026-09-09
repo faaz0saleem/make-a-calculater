@@ -31,6 +31,16 @@ async function standingSlotCandidate() {
         -- Nothing negotiated, so the rates below are the published 22/16
         -- rather than a recruitment floor.
         and tp.commission_bps is null
+        -- Somebody this student has never worked with. The assertion below is
+        -- that the first occurrence is priced as an acquisition at 22% and the
+        -- rest as rebookings at 16%, which is only true of a new pair — and
+        -- the seed, plus whatever the earlier specs booked, leaves plenty of
+        -- established ones in the pool.
+        and not exists (
+          select 1 from bookings b
+          join users su on su.id = b.student_id
+          where b.tutor_id = r.tutor_id and su.email = ${ACCOUNTS.student}
+        )
         and not exists (
           select 1 from recurring_series s where s.tutor_id = r.tutor_id
         )

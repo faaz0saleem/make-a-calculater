@@ -43,9 +43,9 @@ function newEmail(prefix: string): string {
  * Read from the database rather than hard-coded, so an admin editing the pack
  * moves the test with it instead of quietly breaking it.
  */
-async function proPackCreditsCents(): Promise<number> {
+async function packCreditsCents(packId: string): Promise<number> {
   const [pack] = await queryDatabase<{ credits: number }[]>(
-    (sql) => sql`select credits_cents::int as credits from credit_packs where id = 'pro'` as never,
+    (sql) => sql`select credits_cents::int as credits from credit_packs where id = ${packId}` as never,
   );
   return pack!.credits;
 }
@@ -146,8 +146,14 @@ test('the top-up is inline, and the hold survives the round trip through it', as
   const email = newEmail('topup');
 
   await signOut(page);
-  // Within one Pro pack, so buying once genuinely clears the shortfall.
-  const tutorId = await tutorWithAFreeSlot(page, await proPackCreditsCents());
+  // Within one Standard pack, so buying once genuinely clears the shortfall.
+  //
+  // Standard rather than Pro because this account is seconds old and has not
+  // confirmed its address yet, and anything over $25 is closed until it does
+  // (SPEC.md §1). That is the rule working, and it lands exactly here — the
+  // inline top-up is where most purchases will actually happen — so the test
+  // buys what a real new student can buy and checks the rest is refused.
+  const tutorId = await tutorWithAFreeSlot(page, await packCreditsCents('standard'));
   const slot = page.getByTestId('calendar-slot').first();
   const startUtc = (await slot.getAttribute('data-start'))!;
   await slot.click();
@@ -171,8 +177,12 @@ test('the top-up is inline, and the hold survives the round trip through it', as
     ` as never,
   ).then((rows) => rows[0]!.expires);
 
+  // The big packs are visibly closed to an unconfirmed account, and say why.
+  await expect(page.getByTestId('buy-pro')).toBeDisabled();
+  await expect(page.getByTestId('blocked-pro')).toContainText('confirmed email');
+
   // Buy enough, through the checkout, and come straight back here.
-  await page.getByTestId('buy-pro').click();
+  await page.getByTestId('buy-standard').click();
   await page.waitForURL(/\/credits\/checkout\//);
   await page.getByTestId('pay-now').click();
   await page.waitForURL(/\/book\?/);

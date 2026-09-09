@@ -75,6 +75,14 @@ describe('isPublicPath', () => {
     expect(isPublicPath('/admin/invite')).toBe(false);
   });
 
+  it('lets somebody locked out reach the pages that unlock them', () => {
+    expect(isPublicPath('/forgot-password')).toBe(true);
+    expect(isPublicPath('/reset-password/some-token')).toBe(true);
+    expect(isPublicPath('/verify-email/some-token')).toBe(true);
+    // Changing a password from inside the account still needs one.
+    expect(isPublicPath('/settings/password')).toBe(false);
+  });
+
   it('lets an unsubscribe link work without a session', () => {
     expect(isPublicPath('/unsubscribe')).toBe(true);
     expect(isPublicPath('/unsubscribe/some-token')).toBe(true);

@@ -13,7 +13,7 @@ import Google from 'next-auth/providers/google';
 
 import { cookies } from 'next/headers';
 
-import { authConfig } from '@/auth.config';
+import { authConfig, stampSessionStart } from '@/auth.config';
 import { db } from '@/db/client';
 import { accounts, sessions, studentWallets, users, verificationTokens } from '@/db/schema';
 import { verifyPassword } from '@/lib/auth/password';
@@ -65,7 +65,21 @@ const googleProviders = isGoogleConfigured()
     ]
   : [];
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+export const {
+  handlers,
+  auth,
+  signIn,
+  signOut,
+  /**
+   * Re-stamp the current session.
+   *
+   * Used by the change-password action and nowhere else: it re-issues this
+   * browser's token with a fresh `signedInAtMs` so the person making the
+   * change stays signed in while every other session falls behind the new
+   * `sessions_valid_from`.
+   */
+  unstable_update: refreshSession,
+} = NextAuth({
   ...authConfig,
   adapter: DrizzleAdapter(db, {
     usersTable: users,
@@ -166,6 +180,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
      * suspension takes effect without waiting for the token to expire.
      */
     async jwt({ token, user, trigger }) {
+      // Same claim the edge config writes, and it has to be written here too:
+      // this callback replaces that one in the Node runtime, which is where
+      // every real sign-in happens.
+      stampSessionStart(token, { isSignIn: Boolean(user), isUpdate: trigger === 'update' });
+
       if (user) {
         token.sub = user.id ?? token.sub;
         token.roles = (user.roles as UserRole[] | undefined) ?? ['student'];

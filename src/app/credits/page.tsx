@@ -40,7 +40,11 @@ export default async function CreditsPage({
       .from(studentWallets)
       .where(eq(studentWallets.userId, user.id))
       .limit(1),
-    db.select({ country: users.country }).from(users).where(eq(users.id, user.id)).limit(1),
+    db
+      .select({ country: users.country, emailVerified: users.emailVerified })
+      .from(users)
+      .where(eq(users.id, user.id))
+      .limit(1),
   ]);
 
   const balance = wallet[0]?.creditsCents ?? 0;
@@ -83,7 +87,12 @@ export default async function CreditsPage({
           </CardHeader>
         </Card>
 
-        <TopUp packs={packs} methods={methods} returnTo={returnTo} />
+        <TopUp
+          packs={packs}
+          methods={methods}
+          returnTo={returnTo}
+          emailVerified={profile[0]?.emailVerified != null}
+        />
 
         <p className="text-xs text-muted-foreground">
           Every provider here is a development stand-in — nothing is charged and no money moves. The

@@ -176,6 +176,8 @@ export const rescheduleStatusEnum = pgEnum('reschedule_status', [
  * labels and the optional/operational split.
  */
 export const emailKindEnum = pgEnum('email_kind', [
+  'password_reset',
+  'email_verification',
   'booking_confirmed',
   'booking_cancelled',
   'reminder_24h',
@@ -295,6 +297,15 @@ export const users = pgTable(
     /** Auth.js calls this `emailVerified`; the column is `email_verified_at`. */
     emailVerified: timestamp('email_verified_at', { withTimezone: true }),
     suspendedAt: timestamp({ withTimezone: true }),
+    /**
+     * Tokens issued before this instant are refused (SPEC.md §1).
+     *
+     * JWT sessions have no server-side store, so "sign out everywhere" has to
+     * be a timestamp the guard compares against. A password reset and a
+     * password change both bump it: somebody who has just taken their account
+     * back from an intruder should not be sharing it with them.
+     */
+    sessionsValidFrom: timestamp({ withTimezone: true }),
     /**
      * Set by the one-tap unsubscribe link, and it means *every* optional
      * message. Operational email — a payout, a cancellation, a verification
@@ -1683,6 +1694,71 @@ export const notifications = pgTable(
   (table) => [
     index('notifications_user_idx').on(table.userId, table.createdAt),
     uniqueIndex('notifications_dedupe_key').on(table.dedupeKey),
+  ],
+);
+
+/**
+ * A password reset in flight (SPEC.md §1).
+ *
+ * Hashed at rest, because a row in a backup should not be a working key to
+ * somebody's account. Single use is enforced by the `used_at is null` guard in
+ * the claiming update rather than by a check followed by a write — two clicks
+ * on the same link, or a mail scanner following it before the person does,
+ * must not both succeed.
+ *
+ * Rows are kept after use. "Somebody reset my password and it was not me" is a
+ * question you can only answer if the attempt is still on file, with the
+ * address it came from.
+ */
+export const passwordResets = pgTable(
+  'password_resets',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** sha256 of the token in the link. */
+    tokenHash: varchar({ length: 64 }).notNull(),
+    requestedIp: varchar({ length: 64 }),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    usedAt: timestamp({ withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('password_resets_token_key').on(table.tokenHash),
+    // The rate limit reads this: how many has this account asked for lately.
+    index('password_resets_user_idx').on(table.userId, table.createdAt),
+  ],
+);
+
+/**
+ * An email address waiting to be confirmed (SPEC.md §1).
+ *
+ * Verification is a nudge, not a gate: unverified people browse, book and take
+ * lessons. It is required before money moves in either direction — a tutor's
+ * first payout, and a student purchase over the threshold — because that is
+ * where sending a stranger's address the receipt actually costs somebody.
+ *
+ * Same shape as a reset for the same reasons, and a separate table because the
+ * two have different lifetimes and very different consequences.
+ */
+export const emailVerifications = pgTable(
+  'email_verifications',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** The address being confirmed, which may not be the one on the row yet. */
+    email: varchar({ length: 255 }).notNull(),
+    tokenHash: varchar({ length: 64 }).notNull(),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    usedAt: timestamp({ withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('email_verifications_token_key').on(table.tokenHash),
+    index('email_verifications_user_idx').on(table.userId, table.createdAt),
   ],
 );
 

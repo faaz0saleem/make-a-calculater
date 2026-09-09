@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { auth } from '@/auth';
 import { SignUpForm } from '@/components/sign-up-form';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { currentUser } from '@/lib/auth/guards';
 import { defaultLandingPath } from '@/lib/auth/roles';
 import { isGoogleConfigured } from '@/lib/env';
 
@@ -23,8 +24,10 @@ export default async function SignUpPage({
   const { next: rawNext, held } = await searchParams;
   const next = safeNext(rawNext);
 
-  const session = await auth();
-  if (session?.user) redirect(next ?? defaultLandingPath(session.user.roles));
+  // The guard, not the raw session: a stale cookie must not bounce somebody
+  // between here and a dashboard they cannot open.
+  const user = await currentUser();
+  if (user) redirect(next ?? defaultLandingPath(user.roles));
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-6 py-12">

@@ -1,3 +1,7 @@
+export { default as PasswordReset } from './password-reset';
+export type { PasswordResetProps } from './password-reset';
+export { default as EmailVerification } from './email-verification';
+export type { EmailVerificationProps } from './email-verification';
 export { default as BookingConfirmed } from './booking-confirmed';
 export type { BookingConfirmedProps } from './booking-confirmed';
 export { default as Reminder24h } from './reminder-24h';

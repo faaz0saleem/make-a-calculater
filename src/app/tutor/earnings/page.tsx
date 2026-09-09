@@ -27,6 +27,7 @@ import {
 } from '@/db/payouts';
 import { users } from '@/db/schema';
 import { requireRole } from '@/lib/auth/guards';
+import { payoutGate } from '@/lib/auth/verification';
 import { TERMINAL_BOOKING_STATUSES } from '@/lib/bookings/status';
 import { formatCents } from '@/lib/money/cents';
 import {
@@ -75,10 +76,17 @@ export default async function EarningsPage({
     earningsFor(user.id),
     payoutMethodFor(user.id),
     payoutHistoryFor(user.id),
-    db.select({ country: users.country }).from(users).where(eq(users.id, user.id)).limit(1),
+    db
+      .select({ country: users.country, emailVerified: users.emailVerified })
+      .from(users)
+      .where(eq(users.id, user.id))
+      .limit(1),
   ]);
 
   const eligibility = canRequestPayout(summary.availableCents, summary.availableCents);
+  // Checked here as well as in `requestPayout`, so a tutor who cannot be paid
+  // yet reads why before filling in an amount rather than after (SPEC.md §1).
+  const verified = payoutGate(profile[0]?.emailVerified != null);
   const openPayout = payouts.find((payout) => payout.status !== 'paid' && payout.status !== 'rejected');
 
   // The rates actually present in this tutor's history, so the note explaining
@@ -153,6 +161,16 @@ export default async function EarningsPage({
           </CardHeader>
 
           <CardContent className="flex flex-col gap-4">
+            {!verified.allowed ? (
+              <p className="rounded-md bg-secondary px-3 py-2 text-sm" data-testid="payout-unverified">
+                {verified.reason}{' '}
+                <Link href="/settings/email" className="underline underline-offset-4">
+                  Send yourself the link
+                </Link>
+                .
+              </p>
+            ) : null}
+
             {!method ? (
               <p className="rounded-md bg-secondary px-3 py-2 text-sm">
                 Add the account you want to be paid into first — the form is below.
@@ -184,7 +202,12 @@ export default async function EarningsPage({
                     required
                   />
                 </div>
-                <Button type="submit" className="min-h-11" disabled={!method} data-testid="request-payout">
+                <Button
+                  type="submit"
+                  className="min-h-11"
+                  disabled={!method || !verified.allowed}
+                  data-testid="request-payout"
+                >
                   Request {formatCents(summary.availableCents)}
                 </Button>
               </form>

@@ -58,8 +58,15 @@ describe('the ten steps', () => {
     expect(WIZARD_STEPS.map((step) => step.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 
-  it('marks only payout details as optional (SPEC.md §3 step 9)', () => {
-    expect(WIZARD_STEPS.filter((step) => step.optional).map((step) => step.slug)).toEqual(['payout']);
+  it('marks payout details and email confirmation as optional', () => {
+    // Payout because SPEC.md §3 step 9 says so, and account because
+    // verification nudges rather than gates (SPEC.md §1): a tutor who has not
+    // clicked the link can still be reviewed, published and booked. The payout
+    // is where a confirmed address is actually required.
+    expect(WIZARD_STEPS.filter((step) => step.optional).map((step) => step.slug)).toEqual([
+      'account',
+      'payout',
+    ]);
   });
 
   it('walks forwards and backwards', () => {
@@ -99,8 +106,13 @@ describe('step completion', () => {
     }
   });
 
-  it('needs a verified email for step 1', () => {
-    expect(stepState('account', completeSnapshot({ emailVerified: false }))).toBe('incomplete');
+  it('shows step 1 as unfinished until the email is confirmed, without blocking', () => {
+    const snapshot = completeSnapshot({ emailVerified: false });
+    expect(stepState('account', snapshot)).toBe('incomplete');
+    // Unfinished and not blocking are different things, and this is the whole
+    // shape of the verification decision.
+    expect(wizardProgress(snapshot).canSubmit).toBe(true);
+    expect(wizardProgress(snapshot).blocking).toEqual([]);
   });
 
   it('needs a country, city, timezone and at least one language for identity', () => {
@@ -173,7 +185,7 @@ describe('wizardProgress', () => {
     expect(progress.canSubmit).toBe(true);
     expect(progress.blocking).toEqual([]);
     expect(progress.completedRequired).toBe(progress.totalRequired);
-    expect(progress.totalRequired).toBe(8);
+    expect(progress.totalRequired).toBe(7);
     expect(progress.resumeSlug).toBe('review');
   });
 
@@ -183,7 +195,7 @@ describe('wizardProgress', () => {
     );
     expect(progress.canSubmit).toBe(false);
     expect(progress.blocking.map((step) => step.slug)).toEqual(['profile', 'credentials', 'availability']);
-    expect(progress.completedRequired).toBe(5);
+    expect(progress.completedRequired).toBe(4);
   });
 
   it('resumes at the first unfinished step', () => {

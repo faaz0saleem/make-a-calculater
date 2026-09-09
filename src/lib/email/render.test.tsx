@@ -20,6 +20,22 @@ const LESSON = {
 /** One plausible payload per kind, so the whole set is exercised. */
 const PAYLOADS: EmailPayload[] = [
   {
+    kind: 'password_reset',
+    data: {
+      resetUrl: `${ORIGIN}/reset-password/token`,
+      expiresInMinutes: 30,
+      requestedFrom: '203.0.113.7',
+    },
+  },
+  {
+    kind: 'email_verification',
+    data: {
+      verifyUrl: `${ORIGIN}/verify-email/token`,
+      expiresInHours: 24,
+      purchaseThresholdCents: 2_500,
+    },
+  },
+  {
     kind: 'booking_confirmed',
     data: { ...LESSON, recipientRole: 'student', isTrial: false, priceCents: 3_000 },
   },
@@ -87,7 +103,7 @@ describe('rendering every email', () => {
     resetEnvCache();
   });
 
-  it('covers all fourteen kinds', () => {
+  it('covers all sixteen kinds', () => {
     // A kind added without a payload here means a template nothing can send.
     expect(PAYLOADS.map((payload) => payload.kind).sort()).toEqual([...EMAIL_KINDS].sort());
   });
@@ -135,14 +151,26 @@ describe('rendering every email', () => {
   it('gives each kind its own unsubscribe link', async () => {
     // One link for everything would make somebody choose between "stop telling
     // me a tutor I follow opened time" and "stop telling me my lesson starts".
-    const reminder = (await renderEmail(PAYLOADS[2]!, RECIPIENT, ORIGIN)).unsubscribeUrl;
-    const follows = (await renderEmail(PAYLOADS[13]!, RECIPIENT, ORIGIN)).unsubscribeUrl;
+    // Found by kind rather than by position: adding a payload to the list
+    // above should not silently retarget this test at a different pair.
+    const byKind = (kind: EmailPayload['kind']) => PAYLOADS.find((p) => p.kind === kind)!;
+    const reminder = (await renderEmail(byKind('reminder_24h'), RECIPIENT, ORIGIN)).unsubscribeUrl;
+    const follows = (await renderEmail(byKind('followed_tutor_slots'), RECIPIENT, ORIGIN))
+      .unsubscribeUrl;
+
+    expect(reminder).not.toBeNull();
 
     expect(reminder).not.toEqual(follows);
   });
 
   it('shows the time in the recipient timezone, not the server one', async () => {
-    const karachi = (await renderEmail(PAYLOADS[2]!, RECIPIENT, ORIGIN)).text;
+    const karachi = (
+      await renderEmail(
+        { kind: 'reminder_24h', data: LESSON },
+        RECIPIENT,
+        ORIGIN,
+      )
+    ).text;
     const newYork = (
       await renderEmail(
         { kind: 'reminder_24h', data: { ...LESSON, timezone: 'America/New_York' } },

@@ -18,6 +18,7 @@ import { redirect } from 'next/navigation';
 
 import { db } from '@/db/client';
 import { attachInviteUser, claimInvite, inviteByToken } from '@/db/invites';
+import { requestEmailVerification } from '@/db/verification';
 import { studentWallets, tutorProfiles, users } from '@/db/schema';
 import { requestIp, writeAudit } from '@/lib/admin/audit';
 import { hashPassword, passwordProblem } from '@/lib/auth/password';
@@ -98,6 +99,11 @@ export async function acceptInviteAction(token: string, formData: FormData): Pro
       reason: 'invited tutor accepted',
       ip: await requestIp(),
     });
+
+    // An invited tutor confirms their address like everybody else. The link
+    // they just used is not proof of it: the admin screen hands the link to a
+    // human to pass on, and it usually travels by WhatsApp.
+    await requestEmailVerification({ userId: created.id }, new Date(), tx);
 
     return created.id;
   });

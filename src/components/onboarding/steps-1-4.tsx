@@ -5,6 +5,8 @@
  * JavaScript and every submit is a draft save.
  */
 
+import Link from 'next/link';
+
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,8 +48,16 @@ export function AccountStep({ email, emailVerified }: { email: string; emailVeri
       <p className="text-muted-foreground">
         {emailVerified
           ? 'Your account is ready. Move on to your identity.'
-          : 'Verification emails are sent once the email provider is wired up in Phase 7. Seeded accounts are already verified.'}
+          : 'We sent a link when you signed up. Nothing here waits for it — you can finish this wizard, be approved and teach — but your first payout does, because that address is where the receipt goes.'}
       </p>
+      {emailVerified ? null : (
+        <p className="text-muted-foreground">
+          <Link href="/settings/email" className="underline underline-offset-4">
+            Send yourself another link
+          </Link>
+          .
+        </p>
+      )}
     </div>
   );
 }

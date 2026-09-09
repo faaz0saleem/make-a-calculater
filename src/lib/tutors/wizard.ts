@@ -39,7 +39,17 @@ export type WizardStep = {
 };
 
 export const WIZARD_STEPS: readonly WizardStep[] = [
-  { slug: 'account', number: 1, title: 'Account', blurb: 'Your sign-in details.', optional: false },
+  {
+    slug: 'account',
+    number: 1,
+    title: 'Account',
+    blurb: 'Your sign-in details. Confirming your email can wait until your first payout.',
+    // Optional in the sense that matters here: it does not block submission.
+    // Verification nudges and gates money, not access (SPEC.md §1) — a tutor
+    // whose profile is finished should be in front of students while they get
+    // round to clicking a link, and the payout is where it actually bites.
+    optional: true,
+  },
   {
     slug: 'identity',
     number: 2,

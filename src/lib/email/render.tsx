@@ -42,6 +42,8 @@ type Data<Props> = Props extends unknown ? Omit<Props, keyof OptionalEmailProps>
  * or a payload whose fields do not match its template, fails to compile.
  */
 export type EmailPayload =
+  | { kind: 'password_reset'; data: Data<templates.PasswordResetProps> }
+  | { kind: 'email_verification'; data: Data<templates.EmailVerificationProps> }
   | { kind: 'booking_confirmed'; data: Data<templates.BookingConfirmedProps> }
   | { kind: 'booking_cancelled'; data: Data<templates.BookingCancelledProps> }
   | { kind: 'reminder_24h'; data: Data<templates.Reminder24hProps> }
@@ -69,6 +71,8 @@ export type RenderedEmail = {
    type boundary; inside this map the component and its props are matched by
    construction and TypeScript cannot follow the pairing through a lookup. */
 const COMPONENTS: Record<EmailKind, any> = {
+  password_reset: templates.PasswordReset,
+  email_verification: templates.EmailVerification,
   booking_confirmed: templates.BookingConfirmed,
   booking_cancelled: templates.BookingCancelled,
   reminder_24h: templates.Reminder24h,

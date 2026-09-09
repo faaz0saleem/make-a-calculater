@@ -38,6 +38,7 @@ import { studentWallets } from '@/db/schema';
 import { loadStudentProfile } from '@/db/students';
 import { topicsForStudent } from '@/db/topics';
 import { loadTutorDossier } from '@/db/tutors';
+import { verificationStatus } from '@/db/verification';
 import { currentUser } from '@/lib/auth/guards';
 import { TIMEZONE_COOKIE } from '@/components/timezone-probe';
 import { formatCents } from '@/lib/money/cents';
@@ -90,7 +91,7 @@ export default async function BookPage({
     (cookieTimezone && isValidTimeZone(cookieTimezone) ? cookieTimezone : null) ??
     'UTC';
 
-  const [profile, wallet, packs, holds, topicOptions] = await Promise.all([
+  const [profile, wallet, packs, holds, topicOptions, account] = await Promise.all([
     loadStudentProfile(user.id),
     db
       .select({ creditsCents: studentWallets.creditsCents })
@@ -102,6 +103,7 @@ export default async function BookPage({
     // The student's own syllabus, not the tutor's. What they need to cover is
     // decided by their exam, and the tutor teaching it is why they are here.
     topicsForStudent(user.id, null),
+    verificationStatus(user.id),
   ]);
 
   const { priceCents } = priceForBooking({
@@ -207,6 +209,7 @@ export default async function BookPage({
                 packs={packs}
                 methods={methods}
                 shortfallCents={shortfall}
+                emailVerified={account?.verified ?? true}
                 returnTo={`/tutors/${tutorId}/book?mode=${durationMinutes}&at=${encodeURIComponent(
                   startAtUtc.toISOString(),
                 )}`}

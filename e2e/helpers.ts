@@ -54,7 +54,13 @@ export async function signIn(page: Page, email: string): Promise<void> {
  */
 export async function createStudent(
   email: string,
-  overrides: { isAdult?: boolean; country?: string | null; creditsCents?: number } = {},
+  overrides: {
+    isAdult?: boolean;
+    country?: string | null;
+    creditsCents?: number;
+    /** Seeded accounts are confirmed; pass false to exercise the nudge. */
+    emailVerified?: boolean;
+  } = {},
 ): Promise<string> {
   return queryDatabase(async (sql) => {
     const [seeded] = await sql`select password_hash from users where email = ${ACCOUNTS.student}`;
@@ -69,7 +75,7 @@ export async function createStudent(
         'UTC',
         ${overrides.country ?? null},
         ${overrides.isAdult ?? true},
-        now()
+        ${overrides.emailVerified === false ? null : new Date()}
       )
       returning id
     `;
@@ -120,6 +126,61 @@ export async function grantCredits(userId: string, cents: number): Promise<void>
       update student_wallets set credits_cents = credits_cents + ${cents}
       where user_id = ${userId}
     `;
+  });
+}
+
+/**
+ * Give this page its own client IP.
+ *
+ * The reset and resend endpoints are rate limited per IP — five a minute, which
+ * is right for a person and wrong for a suite that walks four accounts through
+ * a reset in twenty seconds. Every request in this run otherwise comes from
+ * 127.0.0.1 and the sixth one is refused, which would make the suite fail on
+ * something that is working correctly.
+ *
+ * `x-forwarded-for` is what `clientIp()` reads, and setting it is exactly what
+ * the proxy in front of a real deployment does.
+ */
+export async function ownIp(page: Page): Promise<void> {
+  const octet = () => Math.floor(Math.random() * 254) + 1;
+  await page.setExtraHTTPHeaders({ 'x-forwarded-for': `198.51.100.${octet()}` });
+}
+
+/** Sign in with a password that is not the seed's — for the reset tests. */
+export async function signInWith(page: Page, email: string, password: string): Promise<void> {
+  await page.goto('/signin');
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+}
+
+/**
+ * The newest link of one kind that was queued for an address.
+ *
+ * Read out of the outbox rather than out of the database's token table,
+ * because the token table stores a hash — and because reading the queued
+ * payload is what a person does when they open the email. If this returns
+ * nothing, the email was never queued, which is the failure worth catching.
+ */
+export async function latestEmailLink(
+  email: string,
+  kind: string,
+  field: string,
+): Promise<string | null> {
+  return queryDatabase(async (sql) => {
+    const [row] = await sql`
+      select payload
+      from email_deliveries
+      where lower(to_email) = ${email.toLowerCase()} and kind = ${kind}
+      order by created_at desc
+      limit 1
+    `;
+
+    // The column holds the payload's `data`, not the whole envelope — the kind
+    // lives in its own column.
+    const payload = row?.payload as Record<string, unknown> | undefined;
+    const value = payload?.[field];
+    return typeof value === 'string' ? value : null;
   });
 }
 

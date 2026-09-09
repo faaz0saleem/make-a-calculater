@@ -24,6 +24,7 @@ import { z } from 'zod';
 
 import { db } from '@/db/client';
 import { studentWallets, tutorProfiles, users } from '@/db/schema';
+import { requestEmailVerification } from '@/db/verification';
 import { hashPassword, passwordProblem } from '@/lib/auth/password';
 import type { UserRole } from '@/lib/auth/roles';
 import { deriveHalfHourCents } from '@/lib/money/pricing';
@@ -151,6 +152,11 @@ export async function POST(request: Request) {
         halfHourCents: deriveHalfHourCents(2_500),
       });
     }
+
+    // Inside the transaction, so an account cannot exist without its
+    // confirmation email having been queued. It is a nudge, not a gate:
+    // nothing below waits for it and nothing above is blocked by it.
+    await requestEmailVerification({ userId: created.id }, new Date(), tx);
 
     return created.id;
   });

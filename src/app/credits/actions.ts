@@ -23,6 +23,8 @@ const START_FAILURES: Record<string, string> = {
   no_such_user: 'That account could not be found.',
   not_a_first_purchase:
     'The first-lesson pack is a one-off. Pick any of the others — they are better value anyway.',
+  unverified_email:
+    'Confirm your email address before a purchase this size. There is a link waiting in your inbox, and a button to send another in your email settings.',
 };
 
 export async function beginCheckout(formData: FormData): Promise<void> {

@@ -22,6 +22,7 @@ import { db as defaultDb } from './client';
 import type { DbLike } from './ledger';
 import { emailCreditsPurchased } from './email-events';
 import { creditPacks, creditPurchases, studentWallets, users } from './schema';
+import { purchaseGate } from '@/lib/auth/verification';
 import { creditPurchaseEntries } from '@/lib/money/ledger';
 import { CREDIT_PACKS, type CreditPack } from '@/lib/money/packs';
 import { getPaymentProvider, type PaymentEvent } from '@/lib/payments';
@@ -95,7 +96,10 @@ export async function findCreditPack(
 
 export type StartPurchaseResult =
   | { ok: true; purchaseId: string; checkoutUrl: string }
-  | { ok: false; reason: 'no_such_pack' | 'no_such_user' | 'not_a_first_purchase' };
+  | {
+      ok: false;
+      reason: 'no_such_pack' | 'no_such_user' | 'not_a_first_purchase' | 'unverified_email';
+    };
 
 /**
  * Open a checkout.
@@ -111,12 +115,20 @@ export async function startPurchase(
   if (!pack) return { ok: false, reason: 'no_such_pack' };
 
   const [user] = await database
-    .select({ email: users.email })
+    .select({ email: users.email, emailVerified: users.emailVerified })
     .from(users)
     .where(eq(users.id, input.userId))
     .limit(1);
 
   if (!user) return { ok: false, reason: 'no_such_user' };
+
+  // One of the two places a confirmed address is required (SPEC.md §1). The
+  // screen checks the same rule and hides the button, so this is the second
+  // line rather than the first — but it is the one that counts, because the
+  // form it defends can be posted without the screen.
+  if (!purchaseGate(pack.paidCents, user.emailVerified !== null).allowed) {
+    return { ok: false, reason: 'unverified_email' };
+  }
 
   // The $5 pack is a taste, not a tier: one per person, ever.
   //

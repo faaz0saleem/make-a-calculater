@@ -25,6 +25,7 @@ import { emailPayoutStatus } from './email-events';
 import type { DbLike } from './ledger';
 import { payoutMethods, payouts, tutorProfiles, users } from './schema';
 import { writeAudit, type AuditAction } from '@/lib/admin/audit';
+import { payoutGate } from '@/lib/auth/verification';
 import { decryptSecret, encryptSecret, last4 } from '@/lib/crypto';
 import { payoutPaidEntries, payoutReleaseEntries, payoutRequestEntries } from '@/lib/money/ledger';
 import {
@@ -210,6 +211,18 @@ export async function requestPayout(
       .limit(1);
 
     if (!profile) return { ok: false, reason: 'That tutor profile could not be found.' };
+
+    // The other place a confirmed address is required (SPEC.md §1). Checked
+    // before the balance, so a tutor who cannot be paid yet is told the real
+    // reason rather than something about their balance.
+    const [account] = await tx
+      .select({ emailVerified: users.emailVerified })
+      .from(users)
+      .where(eq(users.id, tutorId))
+      .limit(1);
+
+    const gate = payoutGate(account?.emailVerified != null);
+    if (!gate.allowed) return { ok: false, reason: gate.reason };
 
     const eligible = canRequestPayout(profile.availableCents, amountCents);
     if (!eligible.ok) return { ok: false, reason: eligible.reason };

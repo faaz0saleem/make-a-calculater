@@ -1,21 +1,33 @@
 import Link from 'next/link';
 
-import { auth, signOut } from '@/auth';
+import { signOut } from '@/auth';
 import { unreadCount } from '@/db/notifications';
 import { pendingNoticeFor } from '@/db/reports';
+import { verificationStatus } from '@/db/verification';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { VerifyEmailBanner } from '@/components/verify-email-banner';
+import { currentUser } from '@/lib/auth/guards';
 import { defaultLandingPath } from '@/lib/auth/roles';
 
 export async function SiteHeader() {
-  const session = await auth();
-  const roles = session?.user?.roles ?? [];
-  const unread = session?.user?.id ? await unreadCount(session.user.id) : 0;
+  // The guard, not `auth()`. A session revoked by a password reset still has a
+  // cookie; rendering a signed-in header for it offers links every one of
+  // which bounces to sign-in.
+  const user = await currentUser();
+  const roles = user?.roles ?? [];
+  const unread = user ? await unreadCount(user.id) : 0;
 
   // Only rendered when there is one. A warning somebody has to acknowledge is
   // not something to bury behind a settings page, and a nav item that is always
   // there stops being noticed.
-  const notice = session?.user?.id ? await pendingNoticeFor(session.user.id) : null;
+  const notice = user ? await pendingNoticeFor(user.id) : null;
+
+  // Read from the database rather than from the token, because the token holds
+  // whatever the address was when it was issued — somebody who has just changed
+  // theirs would otherwise see the old one in the header until they signed in
+  // again, and the banner below would be about the wrong address.
+  const account = user ? await verificationStatus(user.id) : null;
 
   return (
     <header className="border-b border-border">
@@ -25,11 +37,13 @@ export async function SiteHeader() {
         </Link>
 
         <nav className="flex items-center gap-2 text-sm sm:gap-3">
-          {session?.user ? (
+          {user ? (
             <>
               {/* Email and roles are context, not navigation: on a 360px phone
                   the buttons win the space. */}
-              <span className="hidden text-muted-foreground sm:inline">{session.user.email}</span>
+              <span className="hidden text-muted-foreground sm:inline">
+                {account?.email ?? user.email}
+              </span>
               {roles.map((role) => (
                 <Badge key={role} variant="secondary" className="hidden sm:inline-flex">
                   {role}
@@ -92,6 +106,8 @@ export async function SiteHeader() {
           )}
         </nav>
       </div>
+
+      {account && !account.verified ? <VerifyEmailBanner email={account.email} /> : null}
     </header>
   );
 }

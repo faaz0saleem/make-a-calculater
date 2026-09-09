@@ -15,9 +15,12 @@
  * students there — it is a closed door.
  */
 
+import Link from 'next/link';
+
 import { beginCheckout } from '@/app/credits/actions';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { purchaseGate, VERIFIED_PURCHASE_THRESHOLD_CENTS } from '@/lib/auth/verification';
 import { formatCents } from '@/lib/money/cents';
 import { packBonusBps, type CreditPack } from '@/lib/money/packs';
 import type { PaymentMethodDescriptor } from '@/lib/payments/catalogue';
@@ -28,11 +31,18 @@ export function TopUp({
   returnTo,
   /** When set, the cheapest pack that clears it is called out. */
   shortfallCents,
+  /**
+   * Whether the buyer has confirmed their address. Packs over the threshold
+   * are refused server-side without it, so they are shown refused here rather
+   * than letting somebody choose one and be turned away at the checkout.
+   */
+  emailVerified = true,
 }: {
   packs: CreditPack[];
   methods: PaymentMethodDescriptor[];
   returnTo: string;
   shortfallCents?: number;
+  emailVerified?: boolean;
 }) {
   const suggested =
     typeof shortfallCents === 'number'
@@ -75,6 +85,7 @@ export function TopUp({
         {packs.map((pack) => {
           const bonus = packBonusBps(pack);
           const isSuggested = suggested?.id === pack.id;
+          const blocked = !purchaseGate(pack.paidCents, emailVerified).allowed;
 
           return (
             <div
@@ -96,14 +107,26 @@ export function TopUp({
                 {formatCents(pack.creditsCents)} of credits for {formatCents(pack.paidCents)}
               </p>
 
+              {blocked ? (
+                <p className="mt-auto text-xs text-muted-foreground" data-testid={`blocked-${pack.id}`}>
+                  Over {formatCents(VERIFIED_PURCHASE_THRESHOLD_CENTS)} needs a confirmed email
+                  address.{' '}
+                  <Link href="/settings/email" className="underline underline-offset-4">
+                    Confirm yours
+                  </Link>
+                  .
+                </p>
+              ) : null}
+
               {/* Pushed to the bottom so a card with two badges lines up with
-                  one that has none. */}
+                  one that has none — unless the refusal above already is. */}
               <Button
                 type="submit"
                 name="packId"
                 value={pack.id}
                 variant={isSuggested ? 'default' : 'outline'}
-                className="mt-auto min-h-11 w-full"
+                className={blocked ? 'min-h-11 w-full' : 'mt-auto min-h-11 w-full'}
+                disabled={blocked}
                 data-testid={`buy-${pack.id}`}
               >
                 Buy {pack.name}

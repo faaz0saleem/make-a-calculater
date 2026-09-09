@@ -13,8 +13,8 @@
 
 import { NextResponse } from 'next/server';
 
-import { auth } from '@/auth';
 import { claimGuestHolds } from '@/db/bookings';
+import { currentUser } from '@/lib/auth/guards';
 import { GUEST_COOKIE } from '@/lib/bookings/guest';
 
 export const dynamic = 'force-dynamic';
@@ -30,8 +30,10 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const next = safeNext(url.searchParams.get('next'));
 
-  const session = await auth();
-  if (!session?.user?.id) {
+  // The guard rather than the raw session: a revoked session must not claim
+  // somebody's held slot on its way to a page it cannot open.
+  const user = await currentUser();
+  if (!user) {
     return NextResponse.redirect(new URL(`/signin?next=${encodeURIComponent(next)}`, url.origin));
   }
 
@@ -45,7 +47,7 @@ export async function GET(request: Request) {
   if (guestToken && /^[0-9a-f-]{36}$/i.test(guestToken)) {
     // A hold that expired while they were filling in the form is simply not
     // claimed. Ten minutes is ten minutes.
-    await claimGuestHolds(guestToken, session.user.id);
+    await claimGuestHolds(guestToken, user.id);
   }
 
   const response = NextResponse.redirect(new URL(next, url.origin));

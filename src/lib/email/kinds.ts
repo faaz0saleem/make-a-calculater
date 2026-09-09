@@ -9,6 +9,8 @@
  */
 
 export const EMAIL_KINDS = [
+  'password_reset',
+  'email_verification',
   'booking_confirmed',
   'booking_cancelled',
   'reminder_24h',
@@ -61,6 +63,14 @@ export function isEmailKind(value: string): value is EmailKind {
 
 /** What the preferences screen calls each one, and why somebody would want it. */
 export const EMAIL_KIND_LABELS: Record<EmailKind, { title: string; description: string }> = {
+  password_reset: {
+    title: 'Password reset',
+    description: 'The link that gets you back into your account.',
+  },
+  email_verification: {
+    title: 'Confirm your email',
+    description: 'Once, when you sign up or change your address.',
+  },
   booking_confirmed: {
     title: 'Booking confirmed',
     description: 'A receipt when a session is booked and credits are taken.',

@@ -10,13 +10,25 @@
 
 import Link from 'next/link';
 
-import { unsubscribeFromEverything, updateEmailPreferences } from '@/app/settings/email/actions';
+import {
+  changeEmailAction,
+  resendVerificationAction,
+  unsubscribeFromEverything,
+  updateEmailPreferences,
+} from '@/app/settings/email/actions';
 import { SiteHeader } from '@/components/site-header';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Field } from '@/components/ui/select';
 import { preferencesFor } from '@/db/email';
+import { verificationStatus } from '@/db/verification';
 import { requireUser } from '@/lib/auth/guards';
+import { VERIFY_TTL_HOURS } from '@/lib/auth/tokens';
+import { VERIFIED_PURCHASE_THRESHOLD_CENTS } from '@/lib/auth/verification';
 import { EMAIL_KINDS, EMAIL_KIND_LABELS, isOptionalEmail } from '@/lib/email/kinds';
+import { formatCents } from '@/lib/money/cents';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Email preferences' };
@@ -24,15 +36,25 @@ export const metadata = { title: 'Email preferences' };
 const DONE: Record<string, string> = {
   saved: 'Saved. New settings apply to the next email we send.',
   unsubscribed: 'Done — every optional email is off. Records of your money and your account still arrive.',
+  'verify-sent': `Sent. The link works once and expires in ${VERIFY_TTL_HOURS} hours.`,
+  'verify-too-many':
+    'That is several links in a short while. Use the newest one you have, or try again later.',
+  'verify-failed': 'That could not be sent. Try again in a moment.',
+  verified: 'This address is already confirmed. Nothing to do.',
+  'address-changed':
+    'Address changed. We have sent a link to confirm the new one — until you do, payouts and larger purchases are paused.',
 };
 
 export default async function EmailSettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ done?: string }>;
+  searchParams: Promise<{ done?: string; error?: string }>;
 }) {
   const [user, query] = await Promise.all([requireUser(), searchParams]);
-  const { unsubscribedAll, preferences } = await preferencesFor(user.id);
+  const [{ unsubscribedAll, preferences }, account] = await Promise.all([
+    preferencesFor(user.id),
+    verificationStatus(user.id),
+  ]);
   const operational = EMAIL_KINDS.filter((kind) => !isOptionalEmail(kind));
 
   return (
@@ -53,6 +75,82 @@ export default async function EmailSettingsPage({
             {DONE[query.done]}
           </p>
         ) : null}
+
+        {query.error ? (
+          <p
+            role="alert"
+            className="rounded-md bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            data-testid="email-error"
+          >
+            {query.error}
+          </p>
+        ) : null}
+
+        {/* ------------------------------------------------------------- */}
+        {/* The address itself (SPEC.md §1)                                */}
+        {/* ------------------------------------------------------------- */}
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">Your address</CardTitle>
+            <CardDescription>
+              Where all of this goes. Confirming it is not required to browse, book or teach — only
+              to be paid out, and to buy more than{' '}
+              {formatCents(VERIFIED_PURCHASE_THRESHOLD_CENTS)} of credits at once.
+            </CardDescription>
+          </CardHeader>
+
+          <CardContent className="flex flex-col gap-4 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <span data-testid="account-email">{account?.email ?? user.email}</span>
+              {account?.verified ? (
+                <Badge variant="success" data-testid="email-verified">
+                  Confirmed
+                </Badge>
+              ) : (
+                <span className="flex items-center gap-2">
+                  <Badge variant="secondary" data-testid="email-unverified">
+                    Not confirmed
+                  </Badge>
+                  <form action={resendVerificationAction}>
+                    <Button size="sm" type="submit" data-testid="resend-verification">
+                      Send me a link
+                    </Button>
+                  </form>
+                </span>
+              )}
+            </div>
+
+            <details className="rounded-md border border-border px-3 py-2">
+              <summary className="cursor-pointer font-medium">Use a different address</summary>
+              <form action={changeEmailAction} className="mt-3 flex flex-col gap-3">
+                <Field label="New address" htmlFor="new-email">
+                  <Input id="new-email" name="email" type="email" required autoComplete="email" />
+                </Field>
+                <Field
+                  label="Your password"
+                  htmlFor="current-password"
+                  hint="Your address is how you sign in, so we ask before changing it."
+                >
+                  <Input
+                    id="current-password"
+                    name="currentPassword"
+                    type="password"
+                    required
+                    autoComplete="current-password"
+                  />
+                </Field>
+                <p className="text-xs text-muted-foreground">
+                  You will sign in with the new address from now on, and it starts unconfirmed —
+                  payouts and purchases over {formatCents(VERIFIED_PURCHASE_THRESHOLD_CENTS)} pause
+                  until you confirm it.
+                </p>
+                <Button type="submit" size="sm" className="self-start" data-testid="change-email">
+                  Change my address
+                </Button>
+              </form>
+            </details>
+          </CardContent>
+        </Card>
 
         {unsubscribedAll ? (
           <Card>

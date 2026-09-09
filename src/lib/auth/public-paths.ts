@@ -31,6 +31,13 @@ const PUBLIC_PREFIXES = [
   // An invited tutor has no account yet, so the page that creates one for them
   // cannot be behind a session (SPEC.md §3).
   '/invite',
+  // Somebody who cannot sign in obviously cannot be asked to sign in first.
+  '/forgot-password',
+  '/reset-password',
+  // A confirmation link is read on a phone and clicked there. Requiring a
+  // session would mean signing in on a device somebody may never have signed
+  // in on, to confirm the address that would have got them back in anyway.
+  '/verify-email',
 ] as const;
 
 /** These exact paths, and nothing beneath them. */
