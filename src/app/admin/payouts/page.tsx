@@ -21,7 +21,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardMetric, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { payoutQueue, recentPayoutDecisions, type PayoutQueueRow } from '@/db/payouts';
+import {
+  payoutHistoryByTutor,
+  payoutQueue,
+  recentPayoutDecisions,
+  type PayoutQueueRow,
+  type TutorPayoutHistory,
+} from '@/db/payouts';
 import { requireRole } from '@/lib/auth/guards';
 import { formatCents } from '@/lib/money/cents';
 import { PAYOUT_STATUS_LABELS, PAYOUT_WALLETS, type PayoutStatus } from '@/lib/money/payouts';
@@ -51,6 +57,30 @@ function destination(row: PayoutQueueRow): string {
   return `${rail} ····${row.last4 ?? '????'} · ${row.accountTitle ?? '—'} · ${row.country ?? '—'}`;
 }
 
+/**
+ * This tutor's history with us, in one line.
+ *
+ * First payouts deserve a second look and routine ones do not, and a rejection
+ * in the past is the single most useful thing to know before approving the
+ * next one. Money only, never an account.
+ */
+function trackRecord(history: TutorPayoutHistory | undefined, timezone: string): string {
+  if (!history || history.paidCount === 0) {
+    const refused = history?.rejectedCount ?? 0;
+    return refused > 0
+      ? `first payout, ${refused} refused before`
+      : 'first payout — nothing paid to them yet';
+  }
+
+  const paid = `${history.paidCount} paid, ${formatCents(history.paidCents)} to date`;
+  const last = history.lastPaidAt
+    ? `, last on ${formatInTimeZone(history.lastPaidAt, timezone, { month: 'short', day: 'numeric', year: 'numeric' })}`
+    : '';
+  const refused = history.rejectedCount > 0 ? ` · ${history.rejectedCount} refused` : '';
+
+  return `${paid}${last}${refused}`;
+}
+
 export default async function AdminPayoutsPage({
   searchParams,
 }: {
@@ -60,6 +90,11 @@ export default async function AdminPayoutsPage({
   const query = await searchParams;
 
   const [queue, decided] = await Promise.all([payoutQueue(), recentPayoutDecisions(20)]);
+
+  // What each of these tutors has been paid before. An admin approving $400 is
+  // really asking whether this is a first payout or a routine one, and until
+  // now the only way to find out was to leave this screen.
+  const history = await payoutHistoryByTutor(queue.map((row) => row.tutorId));
 
   const owedCents = queue.reduce((total, row) => total + row.amountCents, 0);
 
@@ -134,7 +169,10 @@ export default async function AdminPayoutsPage({
                     </div>
 
                     <p className="text-xs text-muted-foreground">
-                      Requested {formatInTimeZone(row.requestedAt, admin.timezone)}
+                      Requested {formatInTimeZone(row.requestedAt, admin.timezone)} ·{' '}
+                      <span data-testid="payout-track-record">
+                        {trackRecord(history.get(row.tutorId), admin.timezone)}
+                      </span>
                     </p>
 
                     <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">

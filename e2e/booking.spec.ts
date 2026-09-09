@@ -14,7 +14,7 @@ import { promisify } from 'node:util';
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { ACCOUNTS, SEED_PASSWORD, queryDatabase, signIn, signOut } from './helpers';
+import { ACCOUNTS, SEED_PASSWORD, queryDatabase, revealEveryDay, signIn, signOut } from './helpers';
 
 const run = promisify(execFile);
 const BASE_URL = process.env.E2E_BASE_URL ?? 'http://localhost:3000';
@@ -55,6 +55,10 @@ async function signInAs(page: Page, email: string): Promise<void> {
 async function slotAtLeastHoursAway(page: Page, hours: number): Promise<string> {
   const slots = page.getByTestId('calendar-slot');
   await expect(slots.first()).toBeVisible();
+
+  // The slot this returns is usually a day or two out, which is behind the
+  // fold. Open it so the caller can click what it is handed.
+  await revealEveryDay(page);
 
   const cutoff = Date.now() + hours * 3_600_000;
   const starts = await slots.evaluateAll((nodes) =>

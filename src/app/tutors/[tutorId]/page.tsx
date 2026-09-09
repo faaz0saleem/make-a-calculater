@@ -11,7 +11,7 @@
  */
 
 import Link from 'next/link';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 
 import { askForTrial, bookSession, dropHold, toggleFollow } from '@/app/tutors/[tutorId]/actions';
@@ -31,6 +31,7 @@ import { ratingSummaryFor, reviewsForTutor } from '@/db/reviews';
 import { pairHasHadTrial } from '@/db/trials';
 import { getStudentCurriculum, getTutorCurriculum, toPosition } from '@/db/curriculum';
 import { loadTutorDossier } from '@/db/tutors';
+import { knownViewerTimezone } from '@/lib/geo/infer';
 import { currentUser } from '@/lib/auth/guards';
 import { readGuestToken } from '@/lib/bookings/guest';
 import { formatCents } from '@/lib/money/cents';
@@ -83,13 +84,15 @@ export default async function TutorProfilePage({
     viewerPositions.map((position) => `${position.levelId}:${position.subjectId}`),
   );
 
-  // The viewer's timezone: their account if they have one, the cookie the
-  // browser set otherwise, and UTC only if neither is available.
-  const cookieTimezone = jar.get(TIMEZONE_COOKIE)?.value;
+  // The viewer's timezone: their account, the cookie the browser set, what the
+  // edge already knows about where the request came from, and UTC only if none
+  // of the three is available.
   const studentTimezone =
-    viewer?.timezone ??
-    (cookieTimezone && isValidTimeZone(cookieTimezone) ? cookieTimezone : null) ??
-    'UTC';
+    knownViewerTimezone({
+      accountTimezone: viewer?.timezone,
+      cookieValue: jar.get(TIMEZONE_COOKIE)?.value,
+      headers: await headers(),
+    }) ?? 'UTC';
 
   // Who this viewer is to this tutor decides what the calendar offers.
   const [alreadyTrialled, following, followers, ratings, reviews] = await Promise.all([
@@ -164,7 +167,10 @@ export default async function TutorProfilePage({
   return (
     <>
       <SiteHeader />
-      <TimezoneProbe current={cookieTimezone ?? null} />
+      {/* Compared against the cookie, not against the timezone above: the
+          edge's guess is a fallback for rendering, and letting it stand in for
+          "what this browser last told us" would stop the probe correcting it. */}
+      <TimezoneProbe current={jar.get(TIMEZONE_COOKIE)?.value ?? null} />
 
       {/* `pb-28` clears the sticky booking bar below. Without it the last card
           on the page sits under the bar and looks cut off — which on a phone is

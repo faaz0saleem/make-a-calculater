@@ -966,10 +966,24 @@ export const bookings = pgTable(
       // index predicate cannot be interpolated. `scheduled` belongs here: a
       // recurring occurrence holds its hour from the moment it is materialised.
       .where(sql`status in ('scheduled', 'pending_tutor', 'confirmed', 'in_progress')`),
-    /** SPEC.md §6: one free trial per student-tutor pair, for life. */
+    /**
+     * SPEC.md §6: one free trial per student-tutor pair, for life.
+     *
+     * `expired` is outside the predicate, and that is a deliberate softening of
+     * "for life". A request expires for exactly one reason — the tutor never
+     * answered it — and burning a student's only trial with somebody because
+     * that person ignored them punishes the wrong party. It matches the rule a
+     * few lines away in `gatherFacts`, where a trial the tutor *declined* does
+     * not use up the student's week either.
+     *
+     * Everything else still counts: a trial that happened, one the tutor turned
+     * down, and one the student cancelled after it was accepted. The student
+     * cannot loop, because the three-outstanding and five-a-week caps still
+     * apply to every request including the ones that lapse.
+     */
     uniqueIndex('one_trial_per_pair')
       .on(table.studentId, table.tutorId)
-      .where(sql`is_trial = true`),
+      .where(sql`is_trial = true and status <> 'expired'`),
     /**
      * One booking per series occurrence.
      *

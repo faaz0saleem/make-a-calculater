@@ -10,7 +10,7 @@
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { ACCOUNTS, SEED_PASSWORD, queryDatabase, signIn, signOut } from './helpers';
+import { ACCOUNTS, SEED_PASSWORD, createStudent, queryDatabase, signIn, signOut } from './helpers';
 
 type TutorRow = { id: string; email: string; name: string; trial_minutes: number };
 
@@ -125,6 +125,54 @@ test.describe('free trials', () => {
     // No trial chip, no trial CTA — the offer is gone rather than failing later.
     await expect(page.getByRole('link', { name: 'Book free trial' })).toHaveCount(0);
     await expect(page.getByText('You have already had your free trial with this tutor.')).toBeVisible();
+  });
+
+  test('a request the tutor never answered gives the trial back', async ({ page }) => {
+    // A fresh pair, so this is genuinely their one free trial.
+    const student = `lapsed.trial.${Date.now().toString(36)}@example.test`;
+    await createStudent(student);
+    const tutor = await trialTutor();
+
+    await signIn(page, student);
+    await page.goto(`/tutors/${tutor.id}?mode=trial`);
+    await page.getByTestId('calendar-slot').first().click();
+    await page.waitForURL(/\/dashboard/);
+    await expect(page.getByTestId('outgoing-trial')).toContainText(tutor.name);
+
+    // The dashboard says what happens if nobody answers, and by when.
+    await expect(page.getByTestId('trial-deadline')).toBeVisible();
+    await expect(page.getByText('the slot goes back on their calendar')).toBeVisible();
+
+    // Nobody answers. Expiry is checked at read time, so pushing the request
+    // back past the window and loading the page is exactly what a day later
+    // looks like.
+    await queryDatabase(
+      (sql) => sql`
+        update bookings set created_at = now() - interval '13 hours'
+        where is_trial and status = 'pending_tutor'
+          and student_id = (select id from users where email = ${student})
+      `,
+    );
+
+    await page.goto('/dashboard');
+    await expect(page.getByTestId('outgoing-trial')).toHaveCount(0);
+
+    const [expired] = await queryDatabase<{ status: string }[]>(
+      (sql) => sql`
+        select b.status from bookings b join users s on s.id = b.student_id
+        where b.is_trial and s.email = ${student}
+      ` as never,
+    );
+    expect(expired?.status).toBe('expired');
+
+    // And the offer is back, because the tutor never answered it. The database
+    // has to agree, not just the page: the partial unique index is what would
+    // refuse the second request.
+    await page.goto(`/tutors/${tutor.id}?mode=trial`);
+    await expect(page.getByTestId('calendar-slot').first()).toBeVisible();
+    await page.getByTestId('calendar-slot').first().click();
+    await page.waitForURL(/\/dashboard/);
+    await expect(page.getByTestId('outgoing-trial')).toContainText(tutor.name);
   });
 
   test('the conversion moment survives closing the tab', async ({ page }) => {

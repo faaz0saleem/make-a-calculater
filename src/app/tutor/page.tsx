@@ -21,7 +21,7 @@ import { TrialRequests } from '@/components/trials/trial-requests';
 import { JoinLink } from '@/components/sessions/join-link';
 import { StandingSlots } from '@/components/series/standing-slots';
 import { TimezoneDrift } from '@/components/sessions/timezone-drift';
-import { reliabilityNotice } from '@/lib/tutors/reliability';
+import { reliabilityNotice, reliabilityPromise } from '@/lib/tutors/reliability';
 import { SiteHeader } from '@/components/site-header';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -47,6 +47,7 @@ import { formatCents } from '@/lib/money/cents';
 import { takeHomeFor } from '@/lib/money/commission';
 import {
   canRequestPayout,
+  distanceToPayout,
   PAYOUT_STATUS_LABELS,
   PAYOUT_THRESHOLD_CENTS,
   type PayoutStatus,
@@ -199,6 +200,9 @@ export default async function TutorPage({
   // What a tutor actually receives, not just what they charge.
   const takeHome = takeHomeFor(profile.hourlyCents, profile.commissionBps);
 
+  // And how far that is from a payout, counted in lessons rather than dollars.
+  const distance = distanceToPayout(profile.availableCents, takeHome.rebookingCents);
+
   return (
     <>
       <SiteHeader />
@@ -313,7 +317,14 @@ export default async function TutorPage({
               <CardDescription>{reliabilityNotice(profile.strikes)}</CardDescription>
             </CardHeader>
           </Card>
-        ) : null}
+        ) : (
+          /* Said once, quietly, to somebody who has done nothing wrong. A rule
+             you only hear about after you have broken it is not a rule you were
+             given a chance to keep. */
+          <p className="text-sm text-muted-foreground" data-testid="reliability-promise">
+            {reliabilityPromise()}
+          </p>
+        )}
 
         {awaitingAnswer.length > 0 ? (
           <Card data-testid="awaiting-answer">
@@ -414,6 +425,20 @@ export default async function TutorPage({
                 ? `You can request up to ${formatCents(profile.availableCents)}.`
                 : eligibility.reason}
             </p>
+
+            {/* The gap, in the unit a tutor works in. A balance and a threshold
+                leave them to do the subtraction and then convert it back into
+                hours; this is the answer they were going to work out anyway. */}
+            {eligibility.ok ? null : (
+              <p className="text-sm" data-testid="payout-distance">
+                <strong>{formatCents(distance.shortfallCents)} to go</strong>
+                {distance.sessions === null
+                  ? '.'
+                  : distance.sessions === 1
+                    ? ' — about one more session at your hourly rate.'
+                    : ` — about ${distance.sessions} more sessions at your hourly rate.`}
+              </p>
+            )}
             {payoutHistory.length > 0 ? (
               <ul className="flex flex-col divide-y divide-border">
                 {payoutHistory.map((payout) => (

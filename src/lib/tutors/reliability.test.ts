@@ -6,6 +6,7 @@ import {
   RELIABILITY_MAX_PENALTY,
   reliabilityNotice,
   reliabilityPenalty,
+  reliabilityPromise,
   STRIKES_BEFORE_MANUAL_ACCEPT,
 } from './reliability';
 
@@ -43,5 +44,21 @@ describe('the ladder', () => {
 
   it('never removes anybody — that is an admin decision about a whole record', () => {
     expect(reliabilityNotice(9)).not.toMatch(/suspend|remove|ban/i);
+  });
+});
+
+describe('reliabilityPromise', () => {
+  it('states the rule without publishing the ladder', () => {
+    const promise = reliabilityPromise();
+
+    // The two things a tutor needs before anything goes wrong.
+    expect(promise).toMatch(/ranked lower/i);
+    expect(promise).toMatch(/stop confirming automatically/i);
+
+    // And not the numbers. A visible penalty table is a map of how close
+    // somebody can get to the line, and the point values are ours.
+    expect(promise).not.toContain(String(RELIABILITY_MAX_PENALTY));
+    expect(promise).not.toMatch(/points/i);
+    expect(promise).not.toMatch(/strike/i);
   });
 });

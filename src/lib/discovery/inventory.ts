@@ -27,6 +27,20 @@ export const RAILS_NEED_TUTORS = 8;
 /** Below this, the grid is a short list and should be introduced as one. */
 export const SPARSE_GRID_TUTORS = 6;
 
+/**
+ * Below this, the filter panel costs more than it earns and starts folded.
+ *
+ * A panel of eight controls is the right shape in front of forty tutors and
+ * the wrong one in front of eight, where scrolling the whole grid is faster
+ * than deciding what to narrow. Twenty is where scanning stops being the
+ * quicker option — roughly two screens of cards on a phone.
+ *
+ * Folded, not hidden. The moment somebody *has* filtered, the panel is open
+ * whatever the catalogue size, because that is when they need to widen it —
+ * the mistake caught in P5 and worth not making twice in the other direction.
+ */
+export const FILTERS_EARN_THEIR_SPACE = 20;
+
 export type FeedShape = {
   /** Rails between the chips and the grid. */
   showRails: boolean;
@@ -43,6 +57,13 @@ export type FeedShape = {
   catalogueEmpty: boolean;
   /** Filtering an empty catalogue is a form with nothing behind it. */
   showFilters: boolean;
+  /**
+   * Show the panel, but closed.
+   *
+   * Only ever a default for somebody who has not filtered yet; the call site
+   * opens it as soon as any filter is set.
+   */
+  foldFilters: boolean;
   /** The heading over the grid. */
   gridHeading: string;
 };
@@ -59,6 +80,7 @@ export function feedShape(visibleTutors: number, browsing: boolean): FeedShape {
       acknowledgeSmallCatalogue: false,
       catalogueEmpty: false,
       showFilters: true,
+      foldFilters: false,
       gridHeading: 'Results',
     };
   }
@@ -68,6 +90,7 @@ export function feedShape(visibleTutors: number, browsing: boolean): FeedShape {
     acknowledgeSmallCatalogue: visibleTutors > 0 && visibleTutors < SPARSE_GRID_TUTORS,
     catalogueEmpty: visibleTutors === 0,
     showFilters: visibleTutors > 0,
+    foldFilters: visibleTutors > 0 && visibleTutors < FILTERS_EARN_THEIR_SPACE,
     gridHeading: visibleTutors < SPARSE_GRID_TUTORS ? 'Every tutor on Tutorly' : 'All tutors',
   };
 }

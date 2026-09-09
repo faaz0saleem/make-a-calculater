@@ -46,6 +46,24 @@ export function hasInstantBooking(strikes: number): boolean {
   return strikes < STRIKES_BEFORE_MANUAL_ACCEPT;
 }
 
+/**
+ * What a tutor with a clean record is told, before anything has gone wrong.
+ *
+ * Until now the reliability rules were only ever described to somebody who had
+ * already broken one, which is a rule you find out about by being punished by
+ * it. This says the two things that actually matter — showing up moves where
+ * you appear, and repeated absences cost instant booking — and deliberately
+ * stops there.
+ *
+ * No point values and no strike count. The full ladder is a map of how close
+ * somebody can get to the line without crossing it, and a tutor deciding
+ * whether to attend a session should be weighing the student, not arithmetic.
+ * `reliabilityNotice` names the next consequence once there is one to name.
+ */
+export function reliabilityPromise(): string {
+  return 'Turning up is the single biggest thing you control in where you appear on Tutorly — it counts for more than the difference between a 4.6 and a 4.9. Miss a session and the student is refunded in full and you are ranked lower; miss more than one and new bookings stop confirming automatically until it clears.';
+}
+
 /** What the tutor is told, on their own dashboard, in their own terms. */
 export function reliabilityNotice(strikes: number): string | null {
   if (strikes <= 0) return null;

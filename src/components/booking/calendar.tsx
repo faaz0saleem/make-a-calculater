@@ -56,6 +56,21 @@ export type CalendarProps = {
 
 type Day = { key: string; label: string; slots: CalendarSlot[] };
 
+/**
+ * How many days are open before the rest fold away.
+ *
+ * The calendar publishes four weeks. Rendered flat, at every half hour, that is
+ * roughly 2,500px of buttons on a 360px phone — so a tutor's reviews, their bio
+ * and their credentials all sit below a wall of times nobody scrolls past. Two
+ * days is what somebody booking this week actually reads; the rest is one tap
+ * away and the summary says exactly how much is behind it.
+ *
+ * A `details` element rather than component state: it works with JavaScript
+ * off, the keyboard already knows how to open it, and there is nothing to get
+ * wrong.
+ */
+const OPEN_DAYS = 2;
+
 function groupByStudentDay(slots: CalendarSlot[], timezone: string): Day[] {
   const days = new Map<string, Day>();
 
@@ -98,6 +113,56 @@ export function BookingCalendar({
 }: CalendarProps) {
   const sameZone = studentTimezone === tutorTimezone;
   const modes: CalendarMode[] = trialMinutes ? ['trial', 30, 60] : [30, 60];
+
+  const days = groupByStudentDay(slots ?? [], studentTimezone);
+  const openDays = days.slice(0, OPEN_DAYS);
+  const laterDays = days.slice(OPEN_DAYS);
+  const laterSlotCount = laterDays.reduce((total, day) => total + day.slots.length, 0);
+
+  const renderDay = (day: Day) => (
+    <div key={day.key} className="flex flex-col gap-2">
+      <h3 className="text-sm font-medium">{day.label}</h3>
+      <ul className="flex flex-wrap gap-2">
+        {day.slots.map((slot) => {
+          const time = formatClock(slot.startUtc, studentTimezone);
+          const theirTime = sameZone ? null : (
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              {formatClock(slot.startUtc, tutorTimezone)} for them
+            </span>
+          );
+
+          return (
+            <li key={slot.startUtc.toISOString()}>
+              {select ? (
+                <form action={select.action}>
+                  <input type="hidden" name="startUtc" value={slot.startUtc.toISOString()} />
+                  <button
+                    type="submit"
+                    data-testid="calendar-slot"
+                    data-start={slot.startUtc.toISOString()}
+                    aria-label={`${select.label} at ${time}`}
+                    className="flex min-h-11 min-w-20 flex-col items-center justify-center rounded-md border border-border px-3 py-1.5 text-sm transition-colors hover:border-primary hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  >
+                    <span className="font-medium tabular-nums">{time}</span>
+                    {theirTime}
+                  </button>
+                </form>
+              ) : (
+                <span
+                  data-testid="calendar-slot"
+                  data-start={slot.startUtc.toISOString()}
+                  className="flex min-w-20 flex-col items-center rounded-md border border-border px-3 py-1.5 text-sm"
+                >
+                  <span className="font-medium tabular-nums">{time}</span>
+                  {theirTime}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
 
   return (
     <section className="flex flex-col gap-4" aria-labelledby="calendar-heading">
@@ -155,50 +220,22 @@ export function BookingCalendar({
         </p>
       ) : (
         <div className="flex flex-col gap-4">
-          {groupByStudentDay(slots, studentTimezone).map((day) => (
-            <div key={day.key} className="flex flex-col gap-2">
-              <h3 className="text-sm font-medium">{day.label}</h3>
-              <ul className="flex flex-wrap gap-2">
-                {day.slots.map((slot) => {
-                  const time = formatClock(slot.startUtc, studentTimezone);
-                  const theirTime = sameZone ? null : (
-                    <span className="text-[11px] text-muted-foreground tabular-nums">
-                      {formatClock(slot.startUtc, tutorTimezone)} for them
-                    </span>
-                  );
+          {openDays.map(renderDay)}
 
-                  return (
-                    <li key={slot.startUtc.toISOString()}>
-                      {select ? (
-                        <form action={select.action}>
-                          <input type="hidden" name="startUtc" value={slot.startUtc.toISOString()} />
-                          <button
-                            type="submit"
-                            data-testid="calendar-slot"
-                            data-start={slot.startUtc.toISOString()}
-                            aria-label={`${select.label} at ${time}`}
-                            className="flex min-h-11 min-w-20 flex-col items-center justify-center rounded-md border border-border px-3 py-1.5 text-sm transition-colors hover:border-primary hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                          >
-                            <span className="font-medium tabular-nums">{time}</span>
-                            {theirTime}
-                          </button>
-                        </form>
-                      ) : (
-                        <span
-                          data-testid="calendar-slot"
-                          data-start={slot.startUtc.toISOString()}
-                          className="flex min-w-20 flex-col items-center rounded-md border border-border px-3 py-1.5 text-sm"
-                        >
-                          <span className="font-medium tabular-nums">{time}</span>
-                          {theirTime}
-                        </span>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
+          {laterDays.length > 0 ? (
+            <details className="rounded-lg border border-border" data-testid="more-days">
+              <summary className="flex min-h-11 cursor-pointer list-none items-center px-4 text-sm marker:content-none hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <span className="font-medium underline underline-offset-4">
+                  {laterDays.length} more {laterDays.length === 1 ? 'day' : 'days'}
+                </span>
+                <span className="ml-2 text-muted-foreground">
+                  · {laterSlotCount} more {laterSlotCount === 1 ? 'time' : 'times'}, to{' '}
+                  {laterDays[laterDays.length - 1]!.label}
+                </span>
+              </summary>
+              <div className="flex flex-col gap-4 px-4 pb-4">{laterDays.map(renderDay)}</div>
+            </details>
+          ) : null}
         </div>
       )}
 

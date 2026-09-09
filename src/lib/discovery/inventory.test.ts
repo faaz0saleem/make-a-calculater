@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   feedShape,
+  FILTERS_EARN_THEIR_SPACE,
   RAILS_NEED_TUTORS,
   smallCatalogueNote,
   SPARSE_GRID_TUTORS,
@@ -66,5 +67,31 @@ describe('smallCatalogueNote', () => {
     for (const n of [1, 2, 3, 4, 5]) {
       expect(smallCatalogueNote(n)).toContain(n === 1 ? 'One' : String(n));
     }
+  });
+});
+
+describe('foldFilters', () => {
+  it('starts the panel folded while the catalogue is small enough to scan', () => {
+    expect(feedShape(1, true).foldFilters).toBe(true);
+    expect(feedShape(8, true).foldFilters).toBe(true);
+    expect(feedShape(FILTERS_EARN_THEIR_SPACE - 1, true).foldFilters).toBe(true);
+  });
+
+  it('opens it once there is enough to be worth narrowing', () => {
+    expect(feedShape(FILTERS_EARN_THEIR_SPACE, true).foldFilters).toBe(false);
+    expect(feedShape(40, true).foldFilters).toBe(false);
+  });
+
+  it('never folds a panel somebody is already using', () => {
+    // `browsing: false` means a filter or a search is set. Folding then would
+    // hide the controls at the exact moment they are needed — the P5 mistake,
+    // in the other direction.
+    expect(feedShape(3, false).foldFilters).toBe(false);
+    expect(feedShape(3, false).showFilters).toBe(true);
+  });
+
+  it('has nothing to fold when the catalogue is empty', () => {
+    expect(feedShape(0, true).showFilters).toBe(false);
+    expect(feedShape(0, true).foldFilters).toBe(false);
   });
 });

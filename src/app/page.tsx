@@ -16,7 +16,7 @@
  */
 
 import Link from 'next/link';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 
 import { SignedOutIntro } from '@/app/(marketing)/_components/signed-out-intro';
 import { CategoryChips } from '@/components/feed/category-chips';
@@ -49,6 +49,7 @@ import {
   type BoardOption,
   type StudentCurriculumEntry,
 } from '@/db/curriculum';
+import { knownViewerTimezone } from '@/lib/geo/infer';
 import { CURRICULUM_PROMPT_COOKIE } from '@/lib/students/prompts';
 import { TIMEZONE_COOKIE, TimezoneProbe } from '@/components/timezone-probe';
 import { currentUser } from '@/lib/auth/guards';
@@ -282,14 +283,15 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   // deliberate act there, and the empty state answers it properly.
   const subjects = allSubjects;
 
-  const cookieTimezone = jar.get(TIMEZONE_COOKIE)?.value;
   // Two different things, deliberately. `knownTimezone` is null when nobody has
   // told us where the viewer is, and the timezone-overlap term stays out of the
   // ordering rather than assuming UTC. `timezone` is what times are *rendered*
   // in, where UTC is the honest last resort.
-  const knownTimezone =
-    viewer?.timezone ??
-    (cookieTimezone && isValidTimeZone(cookieTimezone) ? cookieTimezone : null);
+  const knownTimezone = knownViewerTimezone({
+    accountTimezone: viewer?.timezone,
+    cookieValue: jar.get(TIMEZONE_COOKIE)?.value,
+    headers: await headers(),
+  });
   const timezone = knownTimezone ?? 'UTC';
 
   // The country only decides which boards appear first. A signed-in user's own
@@ -397,7 +399,10 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   return (
     <>
       <SiteHeader />
-      <TimezoneProbe current={cookieTimezone ?? null} />
+      {/* Compared against the cookie, not against the timezone above: the
+          edge's guess is a fallback for rendering, and letting it stand in for
+          "what this browser last told us" would stop the probe correcting it. */}
+      <TimezoneProbe current={jar.get(TIMEZONE_COOKIE)?.value ?? null} />
 
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 sm:px-6 py-8">
         <section>
@@ -458,7 +463,10 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
           curriculum={curriculum.raw}
           exactOnly={first(params, 'exact') === '1'}
           // Folded when there is little to filter and nothing filtered yet.
-          collapsed={shape.acknowledgeSmallCatalogue && browsing && !hasQueryParameters(params)}
+          // "Little" is under twenty: at that size scanning the grid is faster
+          // than deciding what to narrow, and the panel is taller than its own
+          // results. One filter set and it opens again, whatever the size.
+          collapsed={shape.foldFilters && browsing && !hasQueryParameters(params)}
         />
         ) : null}
 

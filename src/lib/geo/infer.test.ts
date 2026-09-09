@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { countryName, countryOptions, inferPlace } from './infer';
+import { countryName, countryOptions, inferPlace, knownViewerTimezone } from './infer';
 import { countryFromTimeZone } from './timezone-country';
 
 describe('inferPlace', () => {
@@ -59,5 +59,53 @@ describe('countryOptions', () => {
   it('is sorted by the name, not the code', () => {
     const names = countryOptions().map((option) => option.name);
     expect([...names].sort((a, b) => a.localeCompare(b))).toEqual(names);
+  });
+});
+
+describe('knownViewerTimezone', () => {
+  const withHeaders = (values: Record<string, string>) => new Headers(values);
+
+  it('prefers the account over everything else', () => {
+    expect(
+      knownViewerTimezone({
+        accountTimezone: 'Asia/Karachi',
+        cookieValue: 'Europe/London',
+        headers: withHeaders({ 'x-vercel-ip-timezone': 'America/New_York' }),
+      }),
+    ).toBe('Asia/Karachi');
+  });
+
+  it('falls back to the cookie, then to the edge, then to nothing', () => {
+    const headers = withHeaders({ 'x-vercel-ip-timezone': 'America/New_York' });
+
+    expect(knownViewerTimezone({ cookieValue: 'Europe/London', headers })).toBe('Europe/London');
+    expect(knownViewerTimezone({ headers })).toBe('America/New_York');
+    expect(knownViewerTimezone({})).toBeNull();
+  });
+
+  it('reads Cloudflare as well as Vercel', () => {
+    expect(knownViewerTimezone({ headers: withHeaders({ 'cf-timezone': 'Asia/Dubai' }) })).toBe(
+      'Asia/Dubai',
+    );
+  });
+
+  it('ignores rubbish from any of the three', () => {
+    // A header or a cookie is attacker-controllable in principle, and an
+    // invalid zone would throw inside `Intl` at render time rather than here.
+    expect(
+      knownViewerTimezone({
+        accountTimezone: 'Mars/Olympus',
+        cookieValue: '; drop table',
+        headers: withHeaders({ 'x-vercel-ip-timezone': 'not a zone' }),
+      }),
+    ).toBeNull();
+  });
+
+  it('returns null rather than UTC when nobody has said', () => {
+    // The caller decides what to do with "unknown": the feed leaves the
+    // timezone-overlap term out of its ordering, and rendering falls back to
+    // UTC. Collapsing the two here would quietly rank everybody as if they
+    // lived in Greenwich.
+    expect(knownViewerTimezone({ accountTimezone: null, cookieValue: null })).toBeNull();
   });
 });

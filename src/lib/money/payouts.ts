@@ -65,6 +65,36 @@ export function canTransitionPayout(from: PayoutStatus, to: PayoutStatus): boole
   return PAYOUT_TRANSITIONS[from].includes(to);
 }
 
+/**
+ * How far a tutor is from being able to ask for money, in their own terms.
+ *
+ * A balance and a threshold are two numbers and a subtraction the tutor has to
+ * do themselves; what they actually want to know is "how many more lessons".
+ * `perSessionCents` is what they take home from one session at their own rate,
+ * so the answer is in the unit they work in rather than in dollars they have
+ * to convert back into hours.
+ *
+ * `sessions` is rounded *up*: four-and-a-bit sessions is five, because four
+ * would leave them short and a screen that says otherwise is worse than one
+ * that says nothing.
+ */
+export type PayoutDistance = { shortfallCents: number; sessions: number | null };
+
+export function distanceToPayout(
+  availableCents: number,
+  perSessionCents: number,
+): PayoutDistance {
+  const shortfallCents = Math.max(0, PAYOUT_THRESHOLD_CENTS - availableCents);
+  if (shortfallCents === 0) return { shortfallCents: 0, sessions: 0 };
+
+  // A tutor charging nothing — a rate of zero is possible while a profile is
+  // being filled in — gets the dollars and no session count, rather than a
+  // division by zero dressed up as advice.
+  if (perSessionCents <= 0) return { shortfallCents, sessions: null };
+
+  return { shortfallCents, sessions: Math.ceil(shortfallCents / perSessionCents) };
+}
+
 export type PayoutEligibility = { ok: true } | { ok: false; reason: string };
 
 export function canRequestPayout(availableCents: number, amountCents: number): PayoutEligibility {

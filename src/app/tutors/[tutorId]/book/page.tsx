@@ -19,7 +19,7 @@
  */
 
 import Link from 'next/link';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
 
 import { confirmBooking, dropHold } from '@/app/tutors/[tutorId]/actions';
@@ -39,6 +39,7 @@ import { loadStudentProfile } from '@/db/students';
 import { topicsForStudent } from '@/db/topics';
 import { loadTutorDossier } from '@/db/tutors';
 import { verificationStatus } from '@/db/verification';
+import { knownViewerTimezone } from '@/lib/geo/infer';
 import { currentUser } from '@/lib/auth/guards';
 import { TIMEZONE_COOKIE } from '@/components/timezone-probe';
 import { formatCents } from '@/lib/money/cents';
@@ -85,11 +86,13 @@ export default async function BookPage({
   if (!tutor) notFound();
   if (bookabilityProblem(tutor)) redirect(`/tutors/${tutorId}`);
 
-  const cookieTimezone = jar.get(TIMEZONE_COOKIE)?.value;
+
   const timezone =
-    user.timezone ??
-    (cookieTimezone && isValidTimeZone(cookieTimezone) ? cookieTimezone : null) ??
-    'UTC';
+    knownViewerTimezone({
+      accountTimezone: user.timezone,
+      cookieValue: jar.get(TIMEZONE_COOKIE)?.value,
+      headers: await headers(),
+    }) ?? 'UTC';
 
   const [profile, wallet, packs, holds, topicOptions, account] = await Promise.all([
     loadStudentProfile(user.id),

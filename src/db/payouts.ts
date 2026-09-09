@@ -17,7 +17,7 @@
  *     an admin is looking at it.
  */
 
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import { appendLedger } from './ledger';
 import { db as defaultDb } from './client';
@@ -493,6 +493,56 @@ export async function recentPayoutDecisions(
     .where(sql`${payouts.status} in ('paid', 'rejected')`)
     .orderBy(desc(payouts.decidedAt))
     .limit(limit) as unknown as Promise<PayoutQueueRow[]>;
+}
+
+/**
+ * What each of these tutors has been paid before.
+ *
+ * An admin looking at a $400 request is really asking one question: is this
+ * somebody's first payout or their tenth? The queue could not answer it, so the
+ * only way to check was to leave the screen. One grouped query rather than one
+ * per row, because the queue is a list and a per-row lookup is how a list
+ * quietly becomes twenty round trips.
+ *
+ * Deliberately no account details: this is history, not destinations, and the
+ * rule that an admin never sees the number holds here too.
+ */
+export type TutorPayoutHistory = {
+  paidCount: number;
+  paidCents: number;
+  rejectedCount: number;
+  lastPaidAt: Date | null;
+};
+
+export async function payoutHistoryByTutor(
+  tutorIds: readonly string[],
+  database: DbLike = defaultDb,
+): Promise<Map<string, TutorPayoutHistory>> {
+  if (tutorIds.length === 0) return new Map();
+
+  const rows = await database
+    .select({
+      tutorId: payouts.tutorId,
+      paidCount: sql<number>`count(*) filter (where ${payouts.status} = 'paid')::int`,
+      paidCents: sql<number>`coalesce(sum(${payouts.amountCents}) filter (where ${payouts.status} = 'paid'), 0)::int`,
+      rejectedCount: sql<number>`count(*) filter (where ${payouts.status} = 'rejected')::int`,
+      lastPaidAt: sql<Date | null>`max(${payouts.decidedAt}) filter (where ${payouts.status} = 'paid')`,
+    })
+    .from(payouts)
+    .where(inArray(payouts.tutorId, [...tutorIds]))
+    .groupBy(payouts.tutorId);
+
+  return new Map(
+    rows.map((row) => [
+      row.tutorId,
+      {
+        paidCount: Number(row.paidCount),
+        paidCents: Number(row.paidCents),
+        rejectedCount: Number(row.rejectedCount),
+        lastPaidAt: row.lastPaidAt ? new Date(row.lastPaidAt) : null,
+      },
+    ]),
+  );
 }
 
 export { PAYOUT_THRESHOLD_CENTS };

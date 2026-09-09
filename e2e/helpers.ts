@@ -146,6 +146,21 @@ export async function ownIp(page: Page): Promise<void> {
   await page.setExtraHTTPHeaders({ 'x-forwarded-for': `198.51.100.${octet()}` });
 }
 
+/**
+ * Open the calendar's folded days.
+ *
+ * Only the next two days are shown; the rest are behind a `details` so a tutor's
+ * profile is not 2,500px of buttons on a phone. A test that needs a slot further
+ * out has to open it, which is what a person does too.
+ */
+export async function revealEveryDay(page: Page): Promise<void> {
+  const more = page.getByTestId('more-days');
+  if (await more.isVisible().catch(() => false)) {
+    const open = await more.evaluate((node) => (node as HTMLDetailsElement).open);
+    if (!open) await more.locator('summary').click();
+  }
+}
+
 /** Sign in with a password that is not the seed's — for the reset tests. */
 export async function signInWith(page: Page, email: string, password: string): Promise<void> {
   await page.goto('/signin');

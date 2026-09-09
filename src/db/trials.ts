@@ -79,6 +79,32 @@ export async function expireStaleTrialRequests(
   return dead.length;
 }
 
+/**
+ * "This pair has used their one free trial."
+ *
+ * One predicate, because the same question is asked in three places — the
+ * guard that refuses a second request, the profile that decides whether to
+ * offer the button, and the partial unique index `one_trial_per_pair` — and
+ * three copies is three chances for them to disagree. They did disagree: the
+ * guard and the index were changed to forgive an unanswered request and the
+ * profile was not, so the button vanished for a student the database would
+ * happily have let book. The e2e caught it; this stops there being a fourth.
+ *
+ * `expired` is excluded because a request expires for exactly one reason —
+ * the tutor never answered — and burning somebody's only trial with a person
+ * because that person ignored them punishes the wrong party. Everything else
+ * counts: a trial that happened, one the tutor declined, and one the student
+ * cancelled after it was accepted.
+ */
+function pairTrialUsed(studentId: string, tutorId: string) {
+  return and(
+    eq(bookings.isTrial, true),
+    eq(bookings.studentId, studentId),
+    eq(bookings.tutorId, tutorId),
+    ne(bookings.status, 'expired'),
+  );
+}
+
 /** Everything the guards need to count, in one round trip. */
 async function gatherFacts(
   studentId: string,
@@ -96,7 +122,7 @@ async function gatherFacts(
   const [pair] = await database
     .select({ total: count() })
     .from(bookings)
-    .where(and(eq(bookings.isTrial, true), eq(bookings.studentId, studentId), eq(bookings.tutorId, tutorId)));
+    .where(pairTrialUsed(studentId, tutorId));
 
   const [outstanding] = await database
     .select({ total: count() })
@@ -555,7 +581,7 @@ export async function pairHasHadTrial(
   const [row] = await database
     .select({ total: count() })
     .from(bookings)
-    .where(and(eq(bookings.isTrial, true), eq(bookings.studentId, studentId), eq(bookings.tutorId, tutorId)));
+    .where(pairTrialUsed(studentId, tutorId));
 
   return (row?.total ?? 0) > 0;
 }

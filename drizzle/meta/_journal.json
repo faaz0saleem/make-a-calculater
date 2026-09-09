@@ -169,6 +169,13 @@
       "when": 1788966107840,
       "tag": "0023_password_reset_and_verification",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788969812619,
+      "tag": "0024_trial_pair_excludes_expired",
+      "breakpoints": true
     }
   ]
 }

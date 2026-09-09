@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { canRequestPayout, canTransitionPayout, netPayoutCents, PAYOUT_THRESHOLD_CENTS } from './payouts';
+import {
+  canRequestPayout,
+  canTransitionPayout,
+  distanceToPayout,
+  netPayoutCents,
+  PAYOUT_THRESHOLD_CENTS,
+} from './payouts';
 
 describe('canRequestPayout', () => {
   it('blocks a tutor at $99.50 and allows one at $100.00 (SPEC.md §16)', () => {
@@ -63,5 +69,29 @@ describe('payout status machine', () => {
     expect(canTransitionPayout('paid', 'rejected')).toBe(false);
     expect(canTransitionPayout('requested', 'paid')).toBe(false);
     expect(canTransitionPayout('rejected', 'approved')).toBe(false);
+  });
+});
+
+describe('distanceToPayout', () => {
+  it('says nothing is left when the threshold is met', () => {
+    expect(distanceToPayout(PAYOUT_THRESHOLD_CENTS, 2_000)).toEqual({
+      shortfallCents: 0,
+      sessions: 0,
+    });
+    expect(distanceToPayout(PAYOUT_THRESHOLD_CENTS + 1, 2_000).shortfallCents).toBe(0);
+  });
+
+  it('counts the gap in sessions, rounded up', () => {
+    // $96 with $23.40 a session: $4 to go, which is one session.
+    expect(distanceToPayout(9_600, 2_340)).toEqual({ shortfallCents: 400, sessions: 1 });
+
+    // $10 with $23.40 a session: $90 to go — 3.84 sessions, so four.
+    // Three would leave them short, and a screen that says three is worse
+    // than one that says nothing.
+    expect(distanceToPayout(1_000, 2_340)).toEqual({ shortfallCents: 9_000, sessions: 4 });
+  });
+
+  it('gives dollars and no session count when there is no rate yet', () => {
+    expect(distanceToPayout(1_000, 0)).toEqual({ shortfallCents: 9_000, sessions: null });
   });
 });

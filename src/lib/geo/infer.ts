@@ -102,3 +102,46 @@ export function countryOptions(locale = 'en'): { code: string; name: string }[] 
     (a, b) => a.name.localeCompare(b.name),
   );
 }
+
+/**
+ * The timezone the edge already knows, before the browser gets a chance to say.
+ *
+ * The probe in `TimezoneProbe` is fast but it is not instant: a first-time
+ * signed-out visitor has no cookie, so the first paint of a calendar labels
+ * every time UTC and then swaps. The label is honest and the swap is quick,
+ * but somebody in Karachi still sees 09:00 for a lesson that is at 14:00 for
+ * them, which is exactly the mistake this product cannot afford to make even
+ * for a moment.
+ *
+ * Both Vercel and Cloudflare resolve the visitor's timezone at the edge and
+ * pass it as a header, so most of the time there is no need to guess. Absent
+ * or nonsense, we are back to UTC and the probe, which is where we were.
+ */
+const EDGE_TIMEZONE_HEADERS = ['x-vercel-ip-timezone', 'cf-timezone'] as const;
+
+export function timezoneFromHeaders(headers: Headers): string | null {
+  for (const name of EDGE_TIMEZONE_HEADERS) {
+    const value = headers.get(name)?.trim();
+    if (value && isValidTimeZone(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * Where to render this viewer's times, best source first.
+ *
+ * Their account, then the cookie their browser set, then whatever the edge
+ * knows, then UTC. Returns null rather than UTC when nothing is known, because
+ * two callers need to tell those apart: the ranking leaves the overlap term
+ * out entirely rather than pretending everybody lives in Greenwich.
+ */
+export function knownViewerTimezone(input: {
+  accountTimezone?: string | null;
+  cookieValue?: string | null;
+  headers?: Headers | null;
+}): string | null {
+  if (input.accountTimezone && isValidTimeZone(input.accountTimezone)) return input.accountTimezone;
+  if (input.cookieValue && isValidTimeZone(input.cookieValue)) return input.cookieValue;
+  if (input.headers) return timezoneFromHeaders(input.headers);
+  return null;
+}
