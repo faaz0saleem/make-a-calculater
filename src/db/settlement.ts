@@ -140,6 +140,23 @@ export async function settleBooking(
   path.push(outcome.terminalStatus);
 
   await database.transaction(async (tx) => {
+    // Lock the booking and check it is still unsettled *inside* the
+    // transaction. The ledger's idempotency keys already make a second
+    // settlement move no money, but without this the losing run would still
+    // rewrite the status and `settled_at` from a decision it made before the
+    // winner committed. Two overlapping cron runs, or a re-run by hand while
+    // the scheduled one is going, are the cases (MONEY_AUDIT.md, Q2).
+    const [locked] = await tx
+      .select({ settledAt: bookings.settledAt })
+      .from(bookings)
+      .where(eq(bookings.id, booking.id))
+      .for('update')
+      .limit(1);
+
+    // `runSettlement` catches this and records it as skipped, which is exactly
+    // what it is: nothing was wrong, somebody else got there first.
+    if (locked?.settledAt) throw new Error(`booking ${booking.id} was already settled`);
+
     await appendLedger(tx, { entries: outcome.entries, external: false });
 
     // The hold between pending and available is currently zero hours, so the

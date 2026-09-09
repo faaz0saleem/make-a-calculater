@@ -229,30 +229,39 @@ export async function resolveDispute(
 
   if (!booking) return { ok: false, problem: 'not_found' };
 
-  let refundCents = 0;
-
-  if (input.decision === 'refund') {
-    const outcome = adminRefundOutcome(booking);
-    refundCents = outcome.refundCents;
-
-    await database.transaction(async (tx) => {
-      await appendLedger(tx, { entries: outcome.entries, external: false });
-      await moveBookingStatus(booking.id, 'refunded', { settledAt: now, updatedAt: now }, tx);
-    });
-  } else {
-    const line = await settleBooking(
-      { ...booking, status: booking.status as never },
-      now,
-      database,
-    );
-    refundCents = line.refundCents;
-  }
-
-  await database.transaction(async (tx) => {
-    await tx
+  /**
+   * One transaction: claim the report, move the money, write the audit row.
+   *
+   * The claim is first and is conditional on the report still being open, so
+   * two admins pressing at the same moment — or one pressing twice — resolve it
+   * once. Before, the money moved in one transaction and the report closed in
+   * another: the second press found an open report, tried to move the money
+   * again, and got an illegal-transition exception rather than an answer. The
+   * ledger's idempotency keys meant nothing moved twice, but "500" is not how
+   * to tell somebody their colleague got there first (MONEY_AUDIT.md, Q6).
+   */
+  const decided = await database.transaction(async (tx) => {
+    const claimed = await tx
       .update(reports)
       .set({ status: 'resolved', resolvedAt: now })
-      .where(eq(reports.id, report.id));
+      .where(and(eq(reports.id, report.id), eq(reports.status, 'open')))
+      .returning({ id: reports.id });
+
+    // Nothing else has been written, so returning here commits a no-op.
+    if (claimed.length === 0) return { ok: false as const, problem: 'not_found' as const };
+
+    let refundCents = 0;
+
+    if (input.decision === 'refund') {
+      const outcome = adminRefundOutcome(booking);
+      refundCents = outcome.refundCents;
+
+      await appendLedger(tx, { entries: outcome.entries, external: false });
+      await moveBookingStatus(booking.id, 'refunded', { settledAt: now, updatedAt: now }, tx);
+    } else {
+      const line = await settleBooking({ ...booking, status: booking.status as never }, now, tx);
+      refundCents = line.refundCents;
+    }
 
     await writeAudit(tx, {
       actorId: input.admin.id,
@@ -264,7 +273,12 @@ export async function resolveDispute(
       reason,
       ip: input.admin.ip ?? null,
     });
+
+    return { ok: true as const, refundCents };
   });
+
+  if (!decided.ok) return decided;
+  const refundCents = decided.refundCents;
 
   for (const userId of [booking.studentId, booking.tutorId]) {
     await notify(

@@ -291,11 +291,12 @@ export async function applyPaymentEvent(
       .set({ status: 'paid', settledAt: now, providerRef: event.providerRef })
       .where(and(eq(creditPurchases.id, purchase.id), eq(creditPurchases.status, 'pending')));
 
-    await tx
-      .update(studentWallets)
-      .set({ lifetimePurchasedCents: sql`${studentWallets.lifetimePurchasedCents} + ${purchase.creditsCents}` })
-      .where(eq(studentWallets.userId, purchase.userId));
-
+    // `lifetime_purchased_cents` is deliberately *not* touched here. Appending
+    // a `student_credits` entry that carries a purchase id already moves it,
+    // inside `applyToMaterialisedBalance`, and doing it again here counted
+    // every purchase twice — the dashboard told students they had bought
+    // double what they had. Nothing outside `src/db/ledger.ts` may move a
+    // `_cents` column; this was the one place that did (MONEY_AUDIT.md, Q2).
     return { applied: true, reason: 'credited' as const, creditsCents: purchase.creditsCents };
   });
 

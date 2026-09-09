@@ -293,6 +293,33 @@ export async function reconcileLedger(database: DbLike = defaultDb): Promise<Rec
       `,
     },
     {
+      /**
+       * Not a balance and not in `LEDGER_ACCOUNTS` — a running total of what
+       * each student has ever bought, shown on their dashboard.
+       *
+       * Checked here anyway, because it *is* a materialised money column moved
+       * by `applyToMaterialisedBalance`, and being outside the reconciliation
+       * is exactly how it came to be counted twice on every purchase without
+       * anybody noticing for nine phases (MONEY_AUDIT.md, Q2). Reported under
+       * `student_credits`, the account whose entries move it.
+       */
+      account: 'student_credits',
+      scope: 'user',
+      query: sql`
+        select coalesce(l.owner_id::text, w.user_id::text) as id,
+               coalesce(l.total, 0) as ledger_cents,
+               coalesce(w.lifetime_purchased_cents, 0) as materialised_cents
+        from (
+          select owner_id, sum(delta_cents) as total
+          from ledger_entries
+          where account = 'student_credits' and purchase_id is not null and delta_cents > 0
+          group by owner_id
+        ) l
+        full outer join student_wallets w on w.user_id = l.owner_id
+        where coalesce(l.total, 0) <> coalesce(w.lifetime_purchased_cents, 0)
+      `,
+    },
+    {
       account: 'platform_revenue',
       scope: 'platform',
       query: sql`

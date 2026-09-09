@@ -82,6 +82,16 @@ export async function moveBookingStatus(
     .select({ status: bookings.status })
     .from(bookings)
     .where(eq(bookings.id, bookingId))
+    // Locked, so the status this decides against cannot change under us
+    // between the read and the write. Without it the T-48h series charge and a
+    // student cancelling in the same instant could interleave: the job reads
+    // `scheduled`, the cancel commits, and the job writes `confirmed` over a
+    // booking somebody had already called off — taking their credits for a
+    // session that is not happening (MONEY_AUDIT.md, Q4).
+    //
+    // Outside a transaction the lock is taken and released immediately, which
+    // is harmless; every caller that matters passes its own `tx`.
+    .for('update')
     .limit(1);
 
   if (!current) throw new Error(`no booking ${bookingId}`);

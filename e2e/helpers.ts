@@ -122,8 +122,14 @@ export async function grantCredits(userId: string, cents: number): Promise<void>
       )
     `;
 
+    // Both columns, because the ledger entry above carries a purchase id and
+    // `applyToMaterialisedBalance` would have moved both. Reconciliation checks
+    // `lifetime_purchased_cents` against exactly those entries, so a helper
+    // that moved only one would report drift after every run.
     await sql`
-      update student_wallets set credits_cents = credits_cents + ${cents}
+      update student_wallets
+      set credits_cents = credits_cents + ${cents},
+          lifetime_purchased_cents = lifetime_purchased_cents + ${cents}
       where user_id = ${userId}
     `;
   });
