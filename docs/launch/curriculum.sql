@@ -109,18 +109,18 @@ on conflict do nothing;
 
 insert into subjects (id, slug, name, sort_order)
 values
-  ('b1b17bf8-7b2f-433c-9698-aef7368152ef', 'math', 'Math', 0),
-  ('80a998bc-eae4-400c-a09c-bcd04bb1f7f0', 'physics', 'Physics', 1),
-  ('68b49557-6e09-4ce7-9693-a497f3eef0f5', 'chemistry', 'Chemistry', 2),
-  ('a6e96d01-b4c6-4fad-8b72-222bf09afbf1', 'biology', 'Biology', 3),
-  ('edd741e3-87a5-4d26-81ca-10ac5f8e418f', 'english', 'English', 4),
-  ('076e5ceb-5b99-445c-b015-4d609a20dda5', 'ielts-toefl', 'IELTS / TOEFL', 5),
-  ('b55ac456-ea13-48d5-b742-baa052480a5b', 'programming', 'Programming', 6),
-  ('eb0cba29-b807-4ea1-a4a4-c8b5b8d0527c', 'quran-arabic', 'Quran & Arabic', 7),
-  ('1c226a87-9502-4842-8672-bc242cabf9fb', 'business', 'Business', 8),
-  ('c8bcc1ad-5a09-4f8c-b8b3-8d4efdf2039f', 'music', 'Music', 9),
-  ('004e2032-9cf2-47e1-b575-7f77c2050b7a', 'test-prep', 'Test Prep', 10),
-  ('70dbb2c7-c91c-45e0-be7f-6738cad902e8', 'languages', 'Languages', 11)
+  ('ecd9e71e-2e19-44f8-9604-01a8a961dabd', 'math', 'Math', 0),
+  ('f5240157-2c33-4930-b1b0-9c7e3c78d3a5', 'physics', 'Physics', 1),
+  ('48d6b9df-e847-4383-9964-b369b3ba1caa', 'chemistry', 'Chemistry', 2),
+  ('54aadbc1-af39-4c0a-b07e-16709dc086dd', 'biology', 'Biology', 3),
+  ('e0231f09-586c-4d9d-9868-55ada6cd2847', 'english', 'English', 4),
+  ('2a351a1e-8e9f-40a6-a004-c36eb9d43d44', 'ielts-toefl', 'IELTS / TOEFL', 5),
+  ('df8233ee-6f6d-4df0-a626-2c29734aa4e9', 'programming', 'Programming', 6),
+  ('3acf552e-2fb4-4939-9805-e81858ab90b4', 'quran-arabic', 'Quran & Arabic', 7),
+  ('ffcf484e-80c8-4caf-9779-0b8a034a8d18', 'business', 'Business', 8),
+  ('31b3c078-dd4e-467f-a6e3-f9cd120919cd', 'music', 'Music', 9),
+  ('a7b7acd3-fb0c-4129-951a-6bb88a4b8242', 'test-prep', 'Test Prep', 10),
+  ('3000ba59-d422-4339-b3b1-1851025ce14e', 'languages', 'Languages', 11)
 on conflict (slug) do nothing;
 
 -- Chapters, resolved against the subject rows above by slug so this file

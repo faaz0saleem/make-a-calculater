@@ -58,6 +58,27 @@ where the trial actually happened (`confirmed`, `in_progress`, `completed`,
 `settled`, `no_show_student`), leaving `cancelled_by_tutor` and `expired` out of
 it. That is a one-line migration and a change to `pairHasHadTrial`.
 
+**Half landed in Phase 9, and the other half is still yours.**
+
+`expired` is now outside the index and outside the guards, so a request the
+tutor never answered no longer costs the student anything. It surfaced while
+writing the sentence that tells a waiting student what a lapse costs, which had
+to be true.
+
+`cancelled_by_tutor` was deliberately **not** changed, and that is the open
+half. The argument for changing it is the one above: the student got nothing.
+The argument against is that a decline is an answer — the tutor looked at the
+request and said no — and letting the same student ask again turns "one free
+trial" into "ask until they give in". Silence is not an answer; a no is.
+
+If you want declines forgiven too, it is the same one-line predicate:
+`status not in ('expired', 'cancelled_by_tutor')` in `one_trial_per_pair` and in
+`pairTrialUsed` in `src/db/trials.ts`, which is now the single place the rule
+lives.
+
+Note this softens what SPEC.md §6 states as "one per pair, for life", so it is
+flagged in LAUNCH.md §9 as wanting a second opinion before launch.
+
 ## 4. What is a "free-session credit" worth?
 
 **Default in place:** `resolveBookingOutcome` returns
@@ -83,15 +104,28 @@ Phase 1 adds one more, `tutor_languages` (tutor, ISO 639-1 code, proficiency).
 search filter, so a joinable table beats a jsonb column. Say if you would rather
 it were a column on `tutor_profiles`.
 
-## 6. Email verification: gate or nudge?
+## 6. Email verification: gate or nudge? — **ANSWERED, built in Phase 9**
 
-**Default in place:** nudge. `users.email_verified_at` exists and the seed fills
-it in, but nothing sends a verification email and nothing blocks on it.
+**Answered:** nudge, and gate only money.
 
-`SPEC.md` §3 step 1 says "verify email". Should an unverified user be able to
-browse and book, or only browse? My recommendation: let students book (friction
-at the wallet is worse than friction at the inbox) and require verification
-before a tutor can submit for review. Confirm before Phase 1.
+> "Unverified users browse and book. Verify before a tutor's first payout and
+> before a student's first purchase over $25. Money is where it matters; signup
+> is not."
+
+Built exactly there. Browsing, booking and teaching all work with an unconfirmed
+address. Two things do not — a tutor's payout, and a credit purchase over
+$25 — and both are enforced twice: by a pure function the screen reads, so the
+button is refused before it is pressed and says why, and again inside the
+transaction that would have moved the money.
+
+The recommendation above ("require verification before a tutor can submit for
+review") was **not** taken, and the wizard's step 1 stopped blocking submission
+as part of this. A finished profile should be in front of students while its
+owner gets round to clicking a link; the payout is where a confirmed address
+actually earns its keep.
+
+Left open by the answer: nothing about the flow. What remains unknown is
+deliverability — see PROGRESS.md, "built and never met the real world".
 
 ## 7. Google sign-in and an existing password account
 

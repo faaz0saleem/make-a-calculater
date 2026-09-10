@@ -28,6 +28,8 @@ from an empty database, and a smoke test to run before opening the doors.
 2am on a phone.
 [`FLOW_REVIEW.md`](./FLOW_REVIEW.md) walks every journey as a person and says
 what is still wrong with each.
+[`MONEY_AUDIT.md`](./MONEY_AUDIT.md) asks six questions of the paths that
+cannot be wrong, and records the reasoning as well as the answer.
 
 ---
 

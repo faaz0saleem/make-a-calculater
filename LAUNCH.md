@@ -26,6 +26,26 @@ is still open because Stripe does not operate in Pakistan. Until it is answered,
 `PAYMENT_PROVIDER=mock` credits wallets instantly and nobody is charged — which
 is fine for a closed test with tutors you know, and is not a launch.
 
+### Run these once, on a seeded copy, before you deploy anything
+
+They need the seeded world — a tutor over the payout threshold, a tutor with
+free hours — so they belong on a development database rather than in the
+production smoke test in §7. They are the two concurrency proofs the money
+depends on, and they exit non-zero when they fail.
+
+```
+pnpm seed
+pnpm prove:booking       # two clients race one slot  → exactly one booking
+pnpm prove:payout        # eight clients race one balance → exactly one payout
+pnpm prove:curriculum    # the database refuses three impossible curriculum rows
+pnpm prove:rates         # a rate change reaches no booking that already exists
+pnpm prove:payout-privacy  # a dump of payout_methods yields nothing usable
+pnpm reconcile           # seven materialised balances against the ledger
+```
+
+`MONEY_AUDIT.md` says what each of them is defending and what was found when
+they were written.
+
 ---
 
 ## 1. Environment variables
@@ -139,7 +159,7 @@ and will show up as the connection quality that makes people stop using it.
 Order matters. Migrations before seed, seed before an admin.
 
 ```bash
-# 1. Schema. 23 migrations, applied one transaction per file — a Postgres enum
+# 1. Schema. 25 migrations, applied one transaction per file — a Postgres enum
 #    cannot be added and used in the same transaction, which is why the
 #    migrator does not use drizzle's default all-in-one behaviour.
 pnpm db:migrate
@@ -258,8 +278,15 @@ DATABASE_URL="…" pnpm prove:restore      # → "Restore verified"
 Then, by hand, in a browser:
 
 8. **Sign up** as a student with a real address. **The confirmation email must
-   arrive.** If it does not, `/admin/alerts` will say why — this is the check
-   that catches an unverified sending domain.
+   arrive**, and clicking it must turn the amber banner off. If it does not
+   arrive, `/admin/alerts` will say why — this is the check that catches an
+   unverified sending domain.
+8b. **Forget your password on purpose.** Ask for a reset from `/forgot-password`,
+    use the link, and confirm three things: the new password signs you in, the
+    old one does not, and the link is refused the second time. This is the one
+    flow whose failure is silent — somebody just never comes back.
+8c. **Try to buy the $100 pack before confirming your address.** It must be
+    refused, with the reason, and the $25 pack must not be.
 9. **Invite yourself a tutor** at `/admin/invite`, in a private window open the
    link, and complete the wizard. The profile should go live without entering
    the verification queue.
@@ -281,7 +308,13 @@ Then, by hand, in a browser:
 - Resend's dashboard: bounce rate and spam complaints. Above 0.1% complaints,
   stop and fix the domain reputation before sending more.
 - `pnpm reconcile` — the nightly cron does it, but read the result yourself for
-  the first week.
+  the first week. It now checks seven balances rather than six: a materialised
+  money column outside it was double-counted for nine phases without anybody
+  noticing (MONEY_AUDIT.md, Q2).
+- The share of accounts that never confirm their address. Verification is a
+  nudge, so a high number costs nothing until somebody hits a payout or a
+  purchase over $25 — but it is also the first sign that the mail is going to
+  spam.
 
 ---
 
@@ -296,8 +329,33 @@ Straight from `DECISIONS_NEEDED.md`, and none of them are code:
 | 20 | Which LiveKit region | Call quality in the market |
 | — | Legal review of the five policy drafts | They say DRAFT on every page |
 | — | A WhatsApp business account | The T-1h and T-10min nudges |
+| — | A second opinion on SPEC.md §6 | A trial request the tutor never answered no longer burns the student's one free trial with them. That softens "one per pair, for life"; see FLOW_REVIEW.md S9. |
 
 The legal pages are drafts written by an AI and marked as such at the top of
 every one. **Have a qualified person read them before you take a payment from a
 stranger**, and fill in the operator identity, the addresses and the retention
 schedules that the drafts leave blank on purpose.
+
+---
+
+## 10. What is built and not proven
+
+Not open decisions — things that work here and have never met the real world.
+`PROGRESS.md` carries the full list; these are the ones that would change a
+launch plan.
+
+- **No real money has ever moved.** Every purchase and every payout in every run
+  went through a mock. `MONEY_AUDIT.md` proves our handling of a payment event,
+  not our handling of JazzCash.
+- **The audio-only downgrade has never run on a real lossy network.** It is
+  exercised against Chromium's throttling, which shapes the page, the token
+  request and the signalling socket — but not the media transport, which in this
+  sandbox is UDP to localhost. The first real proof is two people on Pakistani
+  mobile data.
+- **Email deliverability is unmeasured.** The outbox, the retries and the dead
+  letters are real and tested. Whether Gmail puts the message in the inbox is a
+  question about a domain that does not exist yet.
+- **Nothing has run under load.** The concurrency proofs are eight clients on
+  one machine, not a hundred on a fleet — and the rate limiter is in-process
+  memory, which is the wrong shape for more than one instance
+  (`DECISIONS_NEEDED.md`).

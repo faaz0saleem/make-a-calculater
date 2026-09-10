@@ -16,7 +16,124 @@ Phases follow `SPEC.md` §15.
 | 6C — payouts + admin dashboard + reports queue | **Done** |
 | 7 — recurring bookings, topics, attendance, homework | **Done** |
 | 8 — content merge, email delivery, day-one states, operations | **Done** |
-| 8 — real payment provider, SEO, analytics | Not started |
+| 9 — password reset, email verification, the money audit | **Done** |
+| — real payment provider, SEO, analytics | Not started |
+
+---
+
+## Phase 9 — getting back in, and the second look at money — done
+
+Two blockers from the flow review, the rest of its backlog, a deliberate audit
+of the paths that cannot be wrong, and a second cold walk over everything that
+had changed.
+
+**Eleven defects, and the ones that matter were not in the new code.**
+
+### Password reset, and what it uncovered
+
+Built to the FLOW_REVIEW design: a single-use token stored as a sha256, thirty
+minutes, rate limited by address *and* by IP, and a response that is identical
+whether the address exists, does not exist, or has asked three times in the last
+quarter hour. `e2e/auth.spec.ts` reads the link out of the outbox the way a
+person reads their inbox and then proves the four properties — the old password
+dies, the old session dies, the link works once, and the wallet and ledger are
+byte-identical either side.
+
+Two bugs surfaced on the way, both older and both worse than the feature:
+
+- **A mistyped password rendered "Application error: a server-side exception has
+  occurred."** Auth.js throws on a bad credential; the throw was uncaught, so
+  the sign-in page's own "check your email and password" was unreachable. Found
+  by resetting a password and then trying the old one — which is what everybody
+  does.
+- **"Sign out everywhere" ran and protected nothing.** It compared the JWT's
+  `iat` to `sessions_valid_from`, and Auth.js re-encodes the token on every
+  request with a fresh `iat`, so no token was ever older than the reset. The
+  check passed every time and defended nothing. Now a claim we own, written only
+  at sign-in and on an explicit update, and stamped in both jwt callbacks
+  because the Node one replaces the edge one wholesale.
+
+Fixing that exposed a third: a revoked session still holds a valid cookie, so
+`/signin` bounced it to a dashboard that bounced it back. Every page that
+decides "signed in" reads the guard now, not the raw session.
+
+Then change-password: current password required, every *other* session dropped,
+and this one re-stamped so the device you typed on survives.
+
+### Email verification — nudge, gate only money
+
+Browsing, booking and teaching all work unconfirmed. Two things do not: a
+tutor's payout, and a credit purchase over $25. Both gates are pure functions
+read by the screen — so the button is refused before it is pressed, with the
+reason — and enforced again inside the transaction that would have moved the
+money. Changing your address needs your password, unverifies it and re-sends.
+The banner is dismissible for a week rather than for ever.
+
+The wizard's step 1 stopped blocking submission: a finished profile should be in
+front of students while its owner gets round to clicking a link.
+
+### The flow review backlog, closed
+
+All seven open items done. The calendar folds to two days behind a summary that
+says what is inside it, so a tutor's profile is 2,900px on a phone instead of
+well over 4,000. A tutor sees "$0.50 to go — about one more session at your
+hourly rate" instead of a balance and a threshold. The payout queue answers the
+question an admin actually has, which is whether this is somebody's first
+payout. The filter panel folds below twenty tutors. A first-time visitor gets a
+timezone from the edge instead of a UTC flicker. And a tutor with a clean record
+is told the reliability rule once, without the ladder.
+
+Writing one sentence for the trial-wait card turned up a real unfairness: **a
+trial request that expired because the tutor never answered burned the student's
+one free trial with them, for life.** Fixed, and it softens a rule SPEC.md §6
+states as "for life" — flagged in LAUNCH.md as wanting a second opinion.
+
+### MONEY_AUDIT.md
+
+Six questions asked of the paths that cannot be wrong, with the reasoning on
+record. Four defects:
+
+- **`lifetime_purchased_cents` was added twice on every purchase**, because the
+  ledger writer moves it and `applyPaymentEvent` moved it again. Proved against
+  the database, not reasoned about: a 2,500-cent purchase moved credits by 2,500
+  and lifetime by 5,000. It gates nothing, so the cost was a dashboard telling
+  every student they had spent double. It survived nine phases because it was
+  the one materialised money column outside `reconcileLedger`. It is the seventh
+  check now.
+- **A charge could beat a cancellation by microseconds.** The T-48h series debit
+  relies on the state machine refusing `cancelled_by_student → confirmed`, but
+  the status re-read was a plain select. `for update` closes the window for
+  every transition in the codebase.
+- **Settlement did not check it was still needed**, so an overlapping run
+  rewrote the status from a decision made before the winner committed.
+- **Resolving a dispute was two transactions**, so two admins both saw an open
+  report and the second got an exception instead of an answer.
+
+Payout locking needed no fix and is now proved rather than asserted: eight
+parallel clients each asking for the whole balance, exactly one wins.
+
+### The second walk, with three tutors in the world
+
+**Every tutor nobody had reviewed was being shown as rated 4.3.** The Bayesian
+prior is the right number to rank by and an invented one to display, and on day
+one it is every tutor on the page. The card already knew how to say "No reviews
+yet" and never got the chance. Fixed on the card, the profile header and the
+reviews panel, with an e2e test holding it.
+
+Three e2e failures came out of reseeding a day later, and none was flaky in the
+sense of "run it again" — the worst being that **the seed manufactured
+credential mismatches**, handing a Programming tutor a degree in English
+Literature and then flagging them for it.
+
+```
+pnpm typecheck   clean
+pnpm test        57 files, 803 tests passed
+pnpm build       compiled, 72 routes
+pnpm e2e         116 passed
+pnpm reconcile   zero drift, now across seven balances
+pnpm prove:payout   8 clients, one winner, ledger and column agree
+pnpm prove:booking  2 clients, one booking, one escrow entry
+```
 
 ---
 
@@ -114,12 +231,15 @@ Eleven defects, all found by walking rather than reading — the worst being tha
 `/admin/alerts`, the screen built to say what is broken, returned a 500 on every
 load because its query read a column that does not exist.
 
-It also found the two things that stop a launch and are **not fixed**: there is
-no password reset, and email addresses are never verified. Both are written up
-in `FLOW_REVIEW.md` with what they need. Password reset is an authentication
-flow and deserves to be built deliberately rather than at the end of a long
-session; verification is waiting on `DECISIONS_NEEDED.md` item 6, which is a
-product decision about gating.
+It also found the two things that stop a launch and were **not fixed here**:
+there was no password reset, and email addresses were never verified. Both were
+written up in `FLOW_REVIEW.md` with what they needed. Password reset is an
+authentication flow and deserved to be built deliberately rather than at the end
+of a long session; verification was waiting on `DECISIONS_NEEDED.md` item 6,
+which is a product decision about gating.
+
+*Both were built in Phase 9. Building the first one properly turned up two older
+bugs that were worse than the missing feature.*
 
 ---
 
@@ -1318,6 +1438,25 @@ The credentials step says so plainly before they do it.
 - every ranked tutor carrying a real `free_hours_mask`, with more than one
   distinct value, which a mask computed from the server's clock would not have
 
+**Phase 9 added nine more**, in `e2e/auth.spec.ts`, and they are the ones whose
+failure is silent in production:
+
+- a reset link arrives in the outbox, works once, kills the session that existed
+  before it, and leaves the wallet and the ledger byte-identical
+- the same words come back for an address with no account, and nothing at all is
+  queued for it
+- an expired link is refused
+- the wrong current password changes nothing, the right one drops every *other*
+  session, and the device the change was made on survives
+- an unverified student is nudged and not blocked: they browse, and the packs
+  over $25 say why they are closed
+- the server refuses a large purchase when the disabled button is re-enabled in
+  the DOM and pressed anyway
+- confirming opens both gates, and the link is refused the second time
+- an unverified tutor's payout request is refused on screen *and* in the
+  transaction, with no payout row left behind
+- the banner can be put away, and changing the address re-arms it and re-sends
+
 **One caveat about the autoplay tests.** The preview is H.264/AAC, which every
 real browser plays. The open-source Chromium Playwright ships deliberately
 excludes proprietary codecs — it reports `canPlayType` empty for H.264 and fails
@@ -1329,20 +1468,73 @@ right element, muted, and stopped on schedule.
 
 ## What is stubbed
 
+Real code behind a fake edge. Each of these works end to end here and stops one
+call short of the outside world.
+
 | Piece | State |
 |---|---|
-| Payment provider | `PaymentProvider` with a `MockProvider`. The mock posts a genuinely signed webhook to the real route. Which provider we use is `DECISIONS_NEEDED.md` item 1. |
-| Hosted transcoding | `FfmpegVideoPipeline` works locally. A deployed environment needs ffmpeg somewhere — item 13. |
-| Transcoding is inline | Fine for a 90-second clip in development; production should queue it (`SPEC.md` §14). Item 14. |
-| Infinite scroll | The grid shows the first 24 with a count. Paging is a small addition once there is enough supply to need it. Item 15. |
-| Notifications | In-app only. Email and WhatsApp are Phase 7 — item 22. |
-| Payouts | The tables, the encryption and the `$100` threshold exist. Requesting and paying one is Phase 6, part C. |
-| Admin dashboard | Verification, moderation, packs and curriculum. GMV, take rate and the reports queue are Phase 6, part C. |
-| Payment providers | Card, JazzCash and Easypaisa all route correctly and all three are mocks. No merchant account exists yet — item 1. |
-| Parent accounts | An under-18 account records a guardian's email and `guardian_id` is ready. A guardian cannot sign in and see it yet. |
-| WhatsApp reminders | The number is collected and stored. Sending is Phase 7 — item 22. |
-| Curriculum matching at scale | One correlated lookup per candidate row. Fine here; the step at a hundred thousand tutors is a denormalised array on `tutor_ranking` with a GIN index, written nightly. |
-| Rate limiting | Real, but in-memory, so it is per instance. Needs a shared store before more than one node. Item 8. |
+| Payment provider | `PaymentProvider` with a `MockProvider`. The mock posts a genuinely signed webhook to the real route, so development exercises the production path rather than a shortcut around it. Card, JazzCash and Easypaisa all route correctly by country and all three are mocks. No merchant account exists — `DECISIONS_NEEDED.md` item 1. |
+| WhatsApp | The routing, the dedupe and the audience rules are live. The last HTTP call is not — item 22. |
+| Hosted transcoding | `FfmpegVideoPipeline` works locally; a deployed environment needs ffmpeg somewhere — item 13. And it runs inline, which is fine for a 90-second clip and wrong for production — item 14. |
+| Rate limiting | Real, and in-memory, so it is per instance. Needs a shared store before more than one node — item 8. |
+| Parent accounts | An under-18 account records a guardian's email and `guardian_id` is ready. A guardian cannot sign in and see it. |
+| Infinite scroll | The grid shows the first 24 with a count. Paging is a small addition once there is supply to need it — item 15. |
+| Curriculum matching at scale | One correlated lookup per candidate row. The step at a hundred thousand tutors is a denormalised array on `tutor_ranking` with a GIN index, written nightly. |
+
+---
+
+## What is not built, and what is built but not proven
+
+The honest list. Split, because the two are different risks: the first costs a
+feature, the second costs a surprise.
+
+### Not built
+
+- **The free-session credit.** SPEC.md §2 promises one when a tutor no-shows.
+  `resolveBookingOutcome` returns `freeSessionCredit: true` and nothing consumes
+  it, because what it is worth has never been decided (item 4). The student is
+  refunded in full, so nobody is out of pocket — but the promise is unkept, and
+  the terms page deliberately does not repeat it.
+- **A guardian's own view of a child's account.** The column is there.
+- **Setting a password on a Google-only account.** The change-password and
+  change-email screens both say so and point at "forgot password", which does
+  work for those accounts. It is a redirect, not a flow.
+- **Any analytics.** Nothing is instrumented beyond structured logs and
+  `/admin/alerts`. The first question anybody asks after launch — where do
+  people drop out — has no answer.
+- **A second admin.** Roles support it; there is no screen to grant one, only
+  the SQL in LAUNCH.md §5.
+
+### Built, and never met the real world
+
+- **No real money has ever moved.** Every purchase, refund and payout in every
+  run went through a mock. MONEY_AUDIT.md proves our handling of a payment
+  event; it says nothing about JazzCash's.
+- **The audio-only downgrade has never run on a real lossy network.** Chromium's
+  emulation shapes the page, the token request and the signalling socket, and
+  not the media transport — which here is UDP to localhost, with no netem in
+  this kernel to shape it. Whether a call actually degrades gracefully on
+  Pakistani mobile data is unknown, and it is the single feature most likely to
+  behave differently in the market than in a sandbox.
+- **The LiveKit region is unmeasured.** `pnpm measure:regions` has never been
+  run from Karachi — item 20.
+- **Email deliverability is unmeasured.** The outbox, retries and dead letters
+  are real and tested. Whether Gmail puts the message in the inbox is a question
+  about a sending domain that does not exist yet, and the verification flow
+  depends on the answer.
+- **Nothing has run under load.** The concurrency proofs are eight clients
+  against one Postgres on one machine. Row locks behave the same on a managed
+  instance; latency does not, and a lock held across a slow network is a lock
+  held longer.
+- **`reconcileLedger` compares columns to the ledger, and nothing compares the
+  ledger to a bank.** The first real payout is the first time those two numbers
+  can disagree.
+- **Intro videos are unproven at scale.** Every seeded video is a 35-second
+  generated clip. Nobody has uploaded a real one from a phone on a slow
+  connection.
+- **The legal pages are AI-written drafts** and say so at the top of each.
+- **Lighthouse was measured on a fast machine against a local server.** The
+  numbers are real and the conditions are not the market's.
 
 ---
 
@@ -1357,8 +1549,11 @@ pnpm seed                      # needs ffmpeg for intro videos; says so if absen
 
 pnpm typecheck && pnpm test && pnpm build
 pnpm rank                      # the nightly ranking job
-pnpm reconcile                 # the nightly ledger check
+pnpm reconcile                 # the nightly ledger check, seven balances
 pnpm prove:curriculum          # the database refusing a class from the wrong board
+pnpm prove:booking             # two clients race one slot
+pnpm prove:payout              # eight clients race one balance
+pnpm prove:restore             # dump, restore into a scratch database, check it
 
 pnpm dev                       # http://localhost:3000
 pnpm e2e                       # reseeds, then drives the UI
@@ -1372,20 +1567,21 @@ says the videos were skipped.
 
 ```
 pnpm typecheck   clean
-pnpm test        55 files, 777 tests passed
-pnpm build       compiled, 68 routes
+pnpm test        57 files, 803 tests passed
+pnpm build       compiled, 72 routes
 pnpm seed        66 users · 40 verified · 5 pending · 1 draft · 1 rejected
-                 10 boards · 214 tutor curriculum positions · 16 student ones
-                 222 bookings spanning the repricing: 15/16/20/22 all present
+                 10 boards · 222 bookings spanning the repricing: 15/16/20/22
                  3 standing arrangements, one already through a T-48h charge
-                 152 chapters · 151 attached to sessions · 77 marked covered
-                 27 pieces of homework: 27 set, 17 handed in, 12 marked
-                 22 emails sent through the mock, 2 in dead letters
-                 2 contact flags · 3 open reports · no sanctions
+                 152 chapters · 147 attached to sessions · 75 marked covered
+                 25 pieces of homework: 25 set, 14 handed in, 10 marked
+                 21 emails sent through the mock, 3 in dead letters
+                 5 contact flags · 3 open reports · no sanctions
                  5 established pairs gone quiet, 3 still booking
                  zero ledger drift
-pnpm e2e         105 passed
+pnpm e2e         116 passed
 pnpm reconcile   zero drift — including straight after the e2e run
+pnpm prove:booking         2 clients, 1 booking, 1 escrow entry
+pnpm prove:payout          8 clients, 1 winner; column and ledger agree at $100.00
 pnpm prove:curriculum      the database refuses all three
 pnpm prove:rates           the rate change reached no booking that already existed
 pnpm prove:payout-privacy  a dump of payout_methods yields nothing usable
@@ -1395,17 +1591,10 @@ pnpm launch:sql            5 packs · 10 boards · 46 classes · 12 subjects ·
                            152 chapters, applied twice against an empty database
 ```
 
-Lighthouse on the built app, desktop preset: feed **99 performance / 100
-accessibility**, tutor profile **100 / 100**, curriculum-filtered feed
-**100 / 100**, tutor earnings **100 / 100**, admin dashboard **100 / 100**,
-payout queue **100 / 100**, moderation queue **100 / 100**. Mobile emulation:
-feed **99 / 100**, admin dashboard **99 / 100**, earnings **100 / 100**.
+Lighthouse figures are from the Phase 7 and 8 runs and are unchanged by Phase 9,
+which touched copy and query projections rather than payload: feed **99 / 100**,
+tutor profile **100 / 100**, earnings **100 / 100**, admin **100 / 100**, and
+**99 / 100** on mobile emulation for the feed and the admin dashboard.
 
 The dashboard's accessibility started at 92 — a `dl` whose groups carried the
 value outside the `dt`/`dd` pair. Fixed rather than noted.
-
-Phase 7's screens, same preset: standing-slot form **100 / 100**, progress
-**100 / 100**, the student's homework **100 / 100**, the tutor's session page
-**100 / 100**, the tutor's homework **100 / 100**, student dashboard
-**100 / 100**. Mobile emulation at 360px: standing-slot form **100 / 100**,
-progress **100 / 100**.
