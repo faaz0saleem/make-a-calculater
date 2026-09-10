@@ -46,7 +46,11 @@ export function ReviewList({
       <CardContent className="flex flex-col gap-5">
         <div className="flex flex-wrap items-start gap-6">
           <div>
-            <p className="text-3xl font-semibold tabular-nums">{formatStars(summary.displayedMilli)}</p>
+            {/* A big "4.3" over the words "No reviews yet" is the prior, not a
+                rating. Nobody has said anything, so nothing is shown. */}
+            <p className="text-3xl font-semibold tabular-nums">
+              {summary.count === 0 ? '—' : formatStars(summary.displayedMilli)}
+            </p>
             <p className="text-sm text-muted-foreground">
               {summary.count === 0
                 ? 'No reviews yet'

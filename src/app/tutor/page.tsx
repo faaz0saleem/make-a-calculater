@@ -320,8 +320,13 @@ export default async function TutorPage({
         ) : (
           /* Said once, quietly, to somebody who has done nothing wrong. A rule
              you only hear about after you have broken it is not a rule you were
-             given a chance to keep. */
-          <p className="text-sm text-muted-foreground" data-testid="reliability-promise">
+             given a chance to keep. In a bordered note rather than loose on the
+             page: a bare paragraph between two cards reads as something left
+             behind rather than something written. */
+          <p
+            className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground"
+            data-testid="reliability-promise"
+          >
             {reliabilityPromise()}
           </p>
         )}

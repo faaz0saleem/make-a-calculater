@@ -148,7 +148,10 @@ export async function findVisibleTutors(
       halfHourCents: tutorProfiles.halfHourCents,
       promoCents: tutorProfiles.promoCents,
       offersTrial: tutorProfiles.offersTrial,
-      ratingMilli: tutorRanking.bayesianRatingMilli,
+      // Null until somebody has actually rated them — the prior is for
+      // ranking, not for showing. See the note in `src/db/discovery.ts`.
+      ratingMilli: sql<number | null>`case when coalesce(${tutorRanking.reviewCount}, 0) > 0
+        then ${tutorRanking.bayesianRatingMilli} end`,
       reviewCount: tutorRanking.reviewCount,
       thumbnailUrl: videos.thumbnailUrl,
       subjects: sql<string[]>`coalesce((

@@ -346,8 +346,25 @@ function credentialsFor(subjectSlugs: string[], mismatched: boolean): Credential
     const supporting = qualifications.filter(
       (template) => template.supports === 'any' || (template.supports as readonly string[]).includes(slug),
     );
-    const template = supporting.length > 0 ? pick(supporting) : pick(qualifications);
+
+    // Nothing in the table covers this subject, so this tutor simply has no
+    // document for it. Handing them an unrelated one instead is what used to
+    // happen, and it manufactured a mismatch: a Programming tutor holding a
+    // degree in English Literature is flagged by the review screen, correctly,
+    // for a discrepancy the seed invented. Most of a real queue is coherent,
+    // and `e2e/curriculum.spec.ts` is the check that says so.
+    if (supporting.length === 0) continue;
+
+    const template = pick(supporting);
     if (!chosen.includes(template)) chosen.push(template);
+  }
+
+  // The wizard will not let a profile through with no documents at all, so
+  // somebody whose subjects the table does not cover gets a general teaching
+  // qualification rather than nothing.
+  if (chosen.length === 0) {
+    const general = qualifications.filter((template) => template.supports === 'any');
+    chosen.push(pick(general.length > 0 ? general : qualifications));
   }
 
   return chosen;

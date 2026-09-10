@@ -57,7 +57,12 @@ export function StandingSlots({
           const other = viewer === 'student' ? row.tutorName : row.studentName;
 
           return (
-            <div key={row.id} className="flex flex-col gap-3" data-testid="standing-slot">
+            <div
+              key={row.id}
+              className="flex flex-col gap-3"
+              data-testid="standing-slot"
+              data-series-id={row.id}
+            >
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <div>
                   <p className="font-medium">{other}</p>

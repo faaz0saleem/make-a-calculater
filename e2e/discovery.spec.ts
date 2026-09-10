@@ -21,10 +21,25 @@ test('the feed renders seeded tutors as cards', async ({ page }) => {
   expect(await cards.count()).toBeGreaterThan(10);
 
   // Cards carry a poster and a preview produced by the video pipeline.
+  //
+  // Found by the card that has one rather than by position: not every tutor
+  // has uploaded an intro yet, and which of them the ranking puts first moves
+  // with the seed's clock. A card without a video says so instead, which is
+  // asserted below.
   const grid = page.locator('section', { has: page.getByRole('heading', { name: 'All tutors' }) });
-  const firstCard = grid.getByTestId('tutor-card').first();
-  await expect(firstCard.locator('img').first()).toHaveAttribute('src', /thumb-\d\.jpg$/);
-  await expect(firstCard.locator('video')).toHaveAttribute('src', /preview\.mp4$/);
+  const withVideo = grid.getByTestId('tutor-card').filter({ has: page.locator('video') }).first();
+  await expect(withVideo).toBeVisible();
+  await expect(withVideo.locator('img').first()).toHaveAttribute('src', /thumb-\d\.jpg$/);
+  await expect(withVideo.locator('video')).toHaveAttribute('src', /preview\.mp4$/);
+
+  // And one without is not a blank rectangle.
+  const withoutVideo = grid
+    .getByTestId('tutor-card')
+    .filter({ hasNot: page.locator('video') })
+    .first();
+  if ((await withoutVideo.count()) > 0) {
+    await expect(withoutVideo).toContainText('No intro video yet');
+  }
 });
 
 /**
@@ -64,6 +79,37 @@ type PlaybackCall = { type: 'play' | 'pause'; at: number; muted: boolean; src: s
 function playback(page: import('@playwright/test').Page): Promise<PlaybackCall[]> {
   return page.evaluate(() => (window as unknown as { __playback: PlaybackCall[] }).__playback ?? []);
 }
+
+test('a tutor nobody has reviewed is not given a rating', async ({ page }) => {
+  // `bayesian_rating_milli` defaults to the prior, 4300, because that is the
+  // right number to *rank* an unreviewed tutor by. Showing it is a different
+  // matter: on day one every tutor has zero reviews, and a page of cards all
+  // claiming "4.3 (0)" is a number nobody gave.
+  const unreviewed = await queryDatabase<{ id: string; name: string }[]>(
+    (sql) => sql`
+      select tp.user_id::text as id, u.name
+      from tutor_profiles tp
+      join users u on u.id = tp.user_id
+      join tutor_ranking r on r.tutor_id = tp.user_id
+      where tp.status = 'verified' and u.suspended_at is null and r.review_count = 0
+      limit 1
+    ` as never,
+  );
+
+  expect(unreviewed[0], 'the seed always leaves some tutors unreviewed').toBeTruthy();
+  const tutor = unreviewed[0]!;
+
+  // On their profile.
+  await page.goto(`/tutors/${tutor.id}`);
+  await expect(page.getByText('No reviews yet').first()).toBeVisible();
+  await expect(page.getByText(/★\s*4\.3/)).toHaveCount(0);
+
+  // And on their card in the feed.
+  await page.goto(`/?q=${encodeURIComponent(tutor.name)}`);
+  const card = page.getByTestId('tutor-card').first();
+  await expect(card).toContainText('No reviews yet');
+  await expect(card).not.toContainText('★');
+});
 
 test('hovering a card autoplays its preview, muted', async ({ page }) => {
   await spyOnPlayback(page);

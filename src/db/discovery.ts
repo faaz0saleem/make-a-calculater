@@ -243,7 +243,18 @@ const BASE_FEED_COLUMNS = {
   trialMinutes: tutorProfiles.trialMinutes,
   responseMedianSeconds: tutorProfiles.responseMedianSeconds,
   verifiedAt: tutorProfiles.verifiedAt,
-  ratingMilli: tutorRanking.bayesianRatingMilli,
+  /**
+   * Null until somebody has actually rated them.
+   *
+   * `bayesian_rating_milli` defaults to the prior — 4300 — and that is right
+   * for *ranking*: it stops one five-star review outranking two hundred. It is
+   * wrong to *show*, because a tutor nobody has reviewed is not rated 4.3, and
+   * on day one that is every tutor on the page. Three cards all claiming
+   * "4.3 (0)" is an invented number, and the card already knows how to say
+   * "No reviews yet" — it just never got the chance.
+   */
+  ratingMilli: sql<number | null>`case when coalesce(${tutorRanking.reviewCount}, 0) > 0
+    then ${tutorRanking.bayesianRatingMilli} end`,
   reviewCount: sql<number>`coalesce(${tutorRanking.reviewCount}, 0)`,
   sessionCount: sql<number>`coalesce(${tutorRanking.sessionCount}, 0)`,
   posterUrl: videos.thumbnailUrl,

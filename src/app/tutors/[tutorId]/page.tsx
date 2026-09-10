@@ -201,13 +201,21 @@ export default async function TutorProfilePage({
               {[tutor.city, tutor.country].filter(Boolean).join(', ')} · {tutor.timezone}
             </p>
             <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
-              <span>
-                <span aria-hidden>★</span>{' '}
-                <span className="font-medium text-foreground">{formatStars(ratings.displayedMilli)}</span>{' '}
-                {ratings.count === 0
-                  ? '(no reviews yet)'
-                  : `(${ratings.count} review${ratings.count === 1 ? '' : 's'})`}
-              </span>
+              {/* No star at all until somebody has given one. `displayedMilli`
+                  is the Bayesian prior when the count is zero — 4.3 — which is
+                  the right number to *rank* by and an invented one to show.
+                  Every tutor has zero reviews on day one. */}
+              {ratings.count === 0 ? (
+                <span>No reviews yet</span>
+              ) : (
+                <span>
+                  <span aria-hidden>★</span>{' '}
+                  <span className="font-medium text-foreground">
+                    {formatStars(ratings.displayedMilli)}
+                  </span>{' '}
+                  ({ratings.count} review{ratings.count === 1 ? '' : 's'})
+                </span>
+              )}
               {respondsIn ? <span>{respondsIn}</span> : null}
               {followers > 0 ? (
                 <span>

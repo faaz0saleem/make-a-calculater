@@ -142,7 +142,15 @@ test('a student books a weekly slot, with chapters, and pays for none of it toda
   expect(balanceAfter).toBe(balanceBefore);
 
   await expect(page.getByTestId('standing-slots')).toBeVisible();
-  await expect(page.getByTestId('series-topics').first()).toContainText('Past papers every week');
+
+  // Scoped to the arrangement this test just made. The student has seeded
+  // arrangements too, and `.first()` was reading whichever one the page
+  // happened to list first.
+  const seriesId = new URL(page.url()).searchParams.get('series');
+  expect(seriesId, 'the redirect carries the new series id').toBeTruthy();
+  await expect(
+    page.locator(`[data-series-id="${seriesId}"]`).getByTestId('series-topics'),
+  ).toContainText('Past papers every week');
 
   // Every occurrence carries the chapters and the sentence, so the tutor reads
   // what the standing hour is for before each one rather than only the first.
