@@ -81,6 +81,7 @@ const BOOKING_MESSAGES: Record<string, string> = {
   bad_duration: 'Sessions are 30 or 60 minutes.',
   guardian_required:
     'We need a parent or guardian’s email before your first session. Nothing has been charged.',
+  already_booked: 'You have already booked this session. It is on your dashboard.',
 };
 
 /**
@@ -176,6 +177,15 @@ export async function confirmBooking(
     if (topicNote) await setBookingNote(result.bookingId, user.id, topicNote);
 
     revalidatePath(`/tutors/${tutorId}`);
+    revalidatePath('/dashboard');
+    redirect(`/dashboard?booked=${result.bookingId}`);
+  }
+
+  // They already have this session: the form was submitted twice and the first
+  // one worked. Send them where the first submit would have sent them, rather
+  // than telling them the time is no longer free — which is true of the
+  // calendar and false about their booking and their credits.
+  if (result.problem === 'already_booked' && result.bookingId) {
     revalidatePath('/dashboard');
     redirect(`/dashboard?booked=${result.bookingId}`);
   }

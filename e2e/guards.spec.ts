@@ -37,6 +37,17 @@ const ADMIN_PAGES = [
   '/admin/invite',
 ];
 
+/** A student's credit balance, straight from the wallet. */
+async function creditsOf(email: string): Promise<number> {
+  const [row] = await queryDatabase<{ c: number }[]>(
+    (sql) => sql`
+      select w.credits_cents::int as c from student_wallets w
+      join users u on u.id = w.user_id where u.email = ${email}
+    ` as never,
+  );
+  return row!.c;
+}
+
 async function signOutHard(page: Page): Promise<void> {
   await page.context().clearCookies();
 }
@@ -286,4 +297,92 @@ test('a slot held by somebody else is refused at the moment it is picked', async
     await first.close();
     await second.close();
   }
+});
+
+/**
+ * The same student, the same slot, submitted twice.
+ *
+ * The database was never in danger: the partial unique index and the
+ * serializable transaction mean one booking and one debit whatever happens.
+ * What was wrong was the screen. The first submit booked the session and the
+ * second was refused with "That time is no longer free", under a heading
+ * reading "Nothing is charged until you press the button below" — so a student
+ * who double-clicked was told their booking had not happened, while $65 of
+ * their credits sat in escrow for it.
+ */
+test('submitting the booking form twice books once and says so', async ({ page }) => {
+  test.setTimeout(120_000);
+
+  // Their own account, funded well past the dearest tutor in the seed ($200 an
+  // hour). Sharing the seeded student means running after every other spec has
+  // spent its credits, and "you are short $146.40" is a fixture failing, not a
+  // bug being found.
+  const email = `dblsubmit.${Date.now().toString(36)}@example.test`;
+  await createStudent(email, { creditsCents: 100_000 });
+  await signInWith(page, email, SEED_PASSWORD);
+  await page.waitForURL((url) => !url.pathname.startsWith('/signin'));
+
+  const tutorId = await queryDatabase<{ id: string }[]>(
+    (sql) => sql`
+      select p.user_id::text as id from tutor_profiles p
+      where p.status = 'verified'
+        and exists (select 1 from availability_rules r where r.tutor_id = p.user_id and r.active)
+      order by p.user_id limit 1
+    ` as never,
+  ).then((rows) => rows[0]!.id);
+
+  await page.goto(`/tutors/${tutorId}`);
+  await revealEveryDay(page);
+  const slot = page.getByTestId('calendar-slot').first();
+  await expect(slot).toBeVisible();
+  const startUtc = (await slot.getAttribute('data-start'))!;
+  await slot.click();
+  await page.waitForURL(/\/book\?/);
+
+  const walletBefore = await creditsOf(email);
+
+  // Slow the link down so the first submit is still in flight for the second.
+  // The button has no pending state, so both land.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Network.enable');
+  await cdp.send('Network.emulateNetworkConditions', {
+    offline: false,
+    latency: 400,
+    downloadThroughput: (200 * 1024) / 8,
+    uploadThroughput: (100 * 1024) / 8,
+  });
+
+  const confirm = page.getByTestId('confirm-booking');
+  // If this is disabled the student cannot afford the slot, and the rest of the
+  // test would fail thirty seconds later as a timeout rather than a reason.
+  await expect(confirm, 'the student could not afford the slot').toBeEnabled();
+  await confirm.click({ noWaitAfter: true });
+  await confirm.click({ noWaitAfter: true, force: true }).catch(() => {
+    // The navigation may have detached it already, which is the other way
+    // this ends and equally fine.
+  });
+
+  await page.waitForURL(/\/dashboard\?booked=/, { timeout: 30_000 });
+  await expect(page.getByText(/Booked\./i).first()).toBeVisible();
+
+  // One booking, one escrow entry, one debit — and the screen agrees.
+  const bookingId = new URL(page.url()).searchParams.get('booked')!;
+  const [row] = await queryDatabase<{ bookings: number; escrow: number; cents: number }[]>(
+    (sql) => sql`
+      select (select count(*)::int from bookings
+               where tutor_id = ${tutorId}::uuid
+                 and start_at_utc = ${startUtc}::timestamptz
+                 and status in ('pending_tutor','confirmed','in_progress')) as bookings,
+             (select count(*)::int from ledger_entries
+               where booking_id = ${bookingId}::uuid and account = 'escrow') as escrow,
+             (select coalesce(sum(delta_cents),0)::int from ledger_entries
+               where booking_id = ${bookingId}::uuid and account = 'escrow') as cents
+    ` as never,
+  );
+
+  expect(row!.bookings, 'two bookings exist for one slot').toBe(1);
+  expect(row!.escrow, 'the slot was charged twice').toBe(1);
+
+  const walletAfter = await creditsOf(email);
+  expect(walletBefore - walletAfter, 'the student was debited more than the price').toBe(row!.cents);
 });

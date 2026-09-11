@@ -27,7 +27,7 @@ Phases follow `SPEC.md` §15.
 No features. No roadmap. Walk the product, read for four named patterns, force
 every error path, and write down what is actually broken.
 
-**Thirteen findings. Eleven fixed, two not.** `BUGS.md` has every one with what
+**Fourteen findings. Twelve fixed, two not.** `BUGS.md` has every one with what
 I did, what happened, what should have happened, and why the two are unfixed.
 
 The two that matter most were both the same shape, and neither was in new code:
@@ -44,8 +44,15 @@ The two that matter most were both the same shape, and neither was in new code:
 
 Both are a guard that runs and whose answer nobody uses, which is invisible from
 inside the suite: 807 unit tests and 121 e2e tests were green the whole time.
-Hence `e2e/guards.spec.ts` — six tests that assert only refusals, each one run
+Hence `e2e/guards.spec.ts` — seven tests that assert only refusals, each one run
 against the code with its fix removed and watched to fail.
+
+The third of that shape came from pressing Book twice on a throttled
+connection. The money was never at risk — one booking, one debit, whatever
+arrives — but the second submit was refused with "that time is no longer free",
+so a student who double-clicked was told their booking had failed while their
+credits sat in escrow for it. A refusal now checks whose booking is in the way
+and, when it is the reader's own, takes them to it.
 
 Also in this pass: a child-safety check that the booking form left to an HTML
 `required` attribute, now enforced server-side in all three booking paths; an

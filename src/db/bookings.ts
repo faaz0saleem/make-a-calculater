@@ -18,7 +18,7 @@
  * unique index (23505) or a serialization failure (40001).
  */
 
-import { and, count, desc, eq, gt, ne, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gt, inArray, ne, sql } from 'drizzle-orm';
 
 import { appendLedger } from './ledger';
 import { db as defaultDb, type Database } from './client';
@@ -40,6 +40,7 @@ import {
 } from '@/lib/bookings/reschedule';
 
 export type BookingFailure =
+  | 'already_booked'
   | 'no_such_tutor'
   | 'not_bookable'
   | 'own_profile'
@@ -58,7 +59,13 @@ export type CreateBookingResult =
       /** True when the tutor has lost instant booking and must accept first. */
       needsAcceptance: boolean;
     }
-  | { ok: false; problem: BookingFailure; shortfallCents?: number };
+  | {
+      ok: false;
+      problem: BookingFailure;
+      shortfallCents?: number;
+      /** Set only on `already_booked`: the session they turn out to have. */
+      bookingId?: string;
+    };
 
 /**
  * Postgres codes that mean "somebody else got there first".
@@ -239,6 +246,13 @@ export async function createBooking(
           !free.known ||
           !free.value.some((slot) => slot.startUtc.getTime() === input.startAtUtc.getTime())
         ) {
+          // Before calling it unavailable: is it unavailable because they
+          // already booked it? Their own session is the commonest reason this
+          // slot is gone, and "that time is no longer free" is the wrong thing
+          // to tell somebody who has it.
+          const mine = await ownBookingAt(tx, input);
+          if (mine) return { ok: false, problem: 'already_booked' as const, bookingId: mine };
+
           return { ok: false, problem: 'not_available' as const };
         }
 
@@ -313,9 +327,45 @@ export async function createBooking(
 
     return result;
   } catch (error) {
-    if (isRaceLoss(error)) return { ok: false, problem: 'slot_taken' };
+    if (isRaceLoss(error)) {
+      // The same question on the other losing path: two submits genuinely in
+      // flight together end here rather than at the availability check.
+      const mine = await ownBookingAt(database, input);
+      if (mine) return { ok: false, problem: 'already_booked', bookingId: mine };
+
+      return { ok: false, problem: 'slot_taken' };
+    }
     throw error;
   }
+}
+
+/**
+ * The booking this student already has at this tutor's slot, if any.
+ *
+ * Asked only when a booking has just been refused. A student who submits the
+ * confirm form twice — a double click, or a second press on a slow connection —
+ * has their first submit succeed and their second refused, and the refusal
+ * reads "that time is no longer free", which is true about the calendar and a
+ * lie about their money. It is their own booking sitting in the slot.
+ */
+async function ownBookingAt(
+  tx: DbLike,
+  input: { studentId: string; tutorId: string; startAtUtc: Date },
+): Promise<string | null> {
+  const [mine] = await tx
+    .select({ id: bookings.id })
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.studentId, input.studentId),
+        eq(bookings.tutorId, input.tutorId),
+        eq(bookings.startAtUtc, input.startAtUtc),
+        inArray(bookings.status, ['pending_tutor', 'confirmed', 'in_progress']),
+      ),
+    )
+    .limit(1);
+
+  return mine?.id ?? null;
 }
 
 /**

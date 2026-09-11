@@ -4,7 +4,7 @@ Phase 10, part one. A hunt, not a feature. Everything below was found by using
 the product or by reading for a named pattern — not by running the suite, which
 was green throughout and stayed green while every one of these was true.
 
-**Thirteen findings. Eleven fixed, two not.** Ordered by severity, not by the order
+**Fourteen findings. Twelve fixed, two not.** Ordered by severity, not by the order
 they were found.
 
 | # | What | Class | Severity | Fixed |
@@ -16,14 +16,15 @@ they were found.
 | 5 | `lifetime_earned_cents` sat outside reconciliation — the exact sibling of the Phase 9 bug | unreconciled | **High** | Yes |
 | 6 | One reply ever was rendered as "Usually replies within an hour" and badged "Responds in <1h" | invented number | Moderate | Yes |
 | 7 | Picking a slot somebody else was holding walked the student on anyway, under a banner saying it was held for them | walk | **High** | Yes |
-| 8 | The booking page told a student their slot was held while also telling them it was not | walk | Moderate | Yes |
-| 9 | "Sign in" on the signup page dropped the slot a returning student had chosen | walk | Moderate | Yes |
-| 10 | `pnpm prove:booking` printed its result and exited 0 whatever it found — a double-booking proof that proved nothing | silent pass | Moderate | Yes |
-| 11 | Admin rates rendered "0.0%" when the denominator was zero | invented number | Low | Yes |
-| 12 | Strikes never expire, and "3 strikes in 90 days = review" does not exist | silent pass | Moderate | **No** |
-| 13 | A minor is refused a trial with nowhere on the trial journey to give a guardian's email | walk | Moderate | **Partly** |
+| 8 | Double-clicking Book charged the student, made the booking, and told them the time was no longer free | walk | **High** | Yes |
+| 9 | The booking page told a student their slot was held while also telling them it was not | walk | Moderate | Yes |
+| 10 | "Sign in" on the signup page dropped the slot a returning student had chosen | walk | Moderate | Yes |
+| 11 | `pnpm prove:booking` printed its result and exited 0 whatever it found — a double-booking proof that proved nothing | silent pass | Moderate | Yes |
+| 12 | Admin rates rendered "0.0%" when the denominator was zero | invented number | Low | Yes |
+| 13 | Strikes never expire, and "3 strikes in 90 days = review" does not exist | silent pass | Moderate | **No** |
+| 14 | A minor is refused a trial with nowhere on the trial journey to give a guardian's email | walk | Moderate | **Partly** |
 
-Six guards had no test proving they refuse anything. They have one now:
+Seven guards had no test proving they refuse anything. They have one now:
 `e2e/guards.spec.ts`.
 
 ---
@@ -297,7 +298,62 @@ fail is finding 1 again.
 
 ---
 
-## 8. The booking page contradicted itself about the hold
+## 8. Double-clicking Book charged them and said it had not
+
+**Class:** found by walking. **Severity:** high. **Fixed.**
+
+**What I did.** Opened the booking page as a student, throttled the connection
+to roughly 3G, and pressed **Book and hold $65.00** twice — the way anybody
+presses a button that has not visibly done anything yet. The button has no
+pending state, so both submits land.
+
+**What happened.** The booking was made. $65.00 moved into escrow. And the page
+the student was left looking at said:
+
+> Confirm your booking
+> Nothing is charged until you press the button below.
+>
+> **That time is no longer free. The calendar below is up to date.**
+
+Verified in the database at that moment: one booking, `confirmed`, and one
+escrow entry for 6500 cents. The student is being told their booking did not
+happen while their money is held for it. The obvious next thing they do is book
+another slot, and pay again.
+
+**What should have happened.** They have the session. Say so, and take them to
+it.
+
+**Why it was there.** The second submit reaches `createBooking`, which asks the
+availability engine whether the slot is free, finds it is not — because of the
+booking the first submit just made — and returns `not_available`. Nothing asked
+*whose* booking was in the way. "Somebody just took that time" and "that time is
+no longer free" are both written for a stranger taking the slot, and both are
+false when the person in the slot is the person reading the message.
+
+**What was never at risk.** The money. The partial unique index and the
+serializable transaction mean one booking and one debit however many submits
+arrive — I raced two `createBooking` calls for the same student and slot and got
+`["slot_taken", "ok"]`, one booking, one escrow row, one debit of $35. This was
+never a double-charge. It was a lie about a charge, which is its own kind of
+expensive.
+
+**Fixed.** On the two paths that can lose — the availability check and the
+unique-index race — `createBooking` now asks whether this student already holds
+a live booking at that slot, and returns `already_booked` with its id if so.
+`confirmBooking` sends them to `/dashboard?booked=<id>`: exactly where the first
+submit would have taken them. A double-click is now indistinguishable from a
+single one, which is what a student pressing twice means.
+
+**Deliberately not done: disabling the button while the form is in flight.**
+That is the usual cure and it is the wrong one here. It needs a new client
+component (`useFormStatus` appears nowhere in this codebase), it is a new thing
+rather than a fix to a broken one, and it does nothing for the cases that are
+not double-clicks — a retried POST, a flaky connection, a page restored from
+the back-forward cache. The refusal telling the truth covers all of them.
+
+---
+
+## 9. The booking page contradicted itself about the hold
 
 **Class:** found by walking. **Severity:** moderate. **Fixed.**
 
@@ -321,7 +377,7 @@ opposite when it does not.
 
 ---
 
-## 9. "Sign in" on the signup page dropped the chosen slot
+## 10. "Sign in" on the signup page dropped the chosen slot
 
 **Class:** found by walking. **Severity:** moderate. **Fixed.**
 
@@ -339,7 +395,7 @@ their dashboard instead. The link in the other direction has always carried
 
 ---
 
-## 10. The double-booking proof exited 0 whatever it found
+## 11. The double-booking proof exited 0 whatever it found
 
 **Class:** silent pass. **Severity:** moderate. **Fixed.**
 
@@ -387,7 +443,7 @@ same treatment.
 
 ---
 
-## 11. Admin rates said "0.0%" with nothing to divide by
+## 12. Admin rates said "0.0%" with nothing to divide by
 
 **Class:** invented number. **Severity:** low — admin-only, and the denominator
 is printed next to it. **Fixed.**
@@ -402,7 +458,7 @@ different thing from "the rate is zero".
 
 ---
 
-## 12. Strikes never expire, and the review trigger does not exist
+## 13. Strikes never expire, and the review trigger does not exist
 
 **Class:** silent pass. **Severity:** moderate. **NOT FIXED — needs a decision.**
 
@@ -443,7 +499,7 @@ next reader is not told the window exists.
 
 ---
 
-## 13. A minor is refused a trial with nowhere to give a guardian's email
+## 14. A minor is refused a trial with nowhere to give a guardian's email
 
 **Class:** found by walking. **Severity:** moderate. **PARTLY FIXED.**
 
@@ -470,10 +526,12 @@ it has to collect.
 
 Worth recording, because "we looked and it was fine" is a result:
 
-- **Double-submitting a booking** — two clicks as fast as a frustrated person
-  on a slow line produced one booking and one $5 debit.
-- **Back, then confirm again** — refused with "That time is no longer free. The
-  calendar below is up to date", balance correct, no second booking.
+- **Double-submitting a booking** — one booking and one debit, every time.
+  *Recorded here in the first pass as wholly fine, which was half right: the
+  money was never in danger and the message was a lie. See finding 8.*
+- **Back, then confirm again** — no second booking and the balance correct. The
+  refusal text was the same lie as finding 8 and went the same way; pressing
+  back now shows the booking they have.
 - **A hold expiring with the page open** — the page stops claiming the slot is
   held (and now stops contradicting itself, finding 7).
 - **The admin wall** — a student is bounced off all nine admin pages; an admin
@@ -482,6 +540,26 @@ Worth recording, because "we looked and it was fine" is a result:
   call sites across nine action files.
 - **A purchase whose webhook never arrives** shows as `pending` in the
   student's own purchase history rather than vanishing.
+- **Cancelling the same booking twice.** Read rather than run. Sequentially it
+  refuses with `not_cancellable` before touching anything. Concurrently the
+  second transaction blocks on `SELECT … FOR UPDATE` inside `moveBookingStatus`,
+  reads the now-terminal status, and throws — and because the refund entries
+  were appended in that same transaction, they roll back with it. That is three
+  stops, and no test exercises any of them.
+- **Marking the same payout paid twice.** Read rather than run: the row is
+  locked with `SELECT … FOR UPDATE` inside the transaction, the payout state
+  machine refuses `paid → paid`, and the `UPDATE` is additionally guarded on the
+  status it read. Three independent stops, none of them exercised by a test —
+  which is what the whole silent-pass section is about, so it is named here
+  rather than claimed as proven.
+- **Submitting the confirm form twice** never double-charged. Only the message
+  was wrong (finding 8).
+- **Signing out mid-booking** and then pressing Book lands on `/signin` with no
+  stack trace. It does drop the slot they had chosen — `requireUser()` redirects
+  to a bare `/signin` with no `next` — which is the same papercut as finding 10
+  in a place that is harder to reach. Not fixed: threading a return path through
+  the auth boundary touches every caller, and the hold survives ten minutes, so
+  what is lost is a click rather than a slot. Worth doing, larger than a bug fix.
 - **The $100 payout threshold**, the trial-per-pair rule, both verification
   gates and the rate limiter all already had tests that prove a refusal.
 
@@ -498,15 +576,25 @@ anything. `e2e/guards.spec.ts` now covers:
 5. a minor with the `required` attribute stripped is refused a booking, and no
    booking row exists afterwards;
 6. a student picking a slot another student is holding is refused at the click,
-   and no second hold is written.
+   and no second hold is written;
+7. the booking form submitted twice produces one booking, one escrow entry and
+   one debit, and lands the student on the session they have.
 
 Each of these was run against the code with its fix removed, and each failed.
 That step is not optional: test 6 passed against a half-reverted build, because
 the revert had missed one of the two call sites — a negative test nobody has
 watched fail is just a test.
 
-Two guards still have no negative test, and both are honest gaps rather than
-oversights: **the dispute window** (`window_closed` is returned and never
-asserted) and **the series notice period**. Neither is reachable from the UI
-without manufacturing a booking at a specific age, which is a fixture, not a
-test — worth doing, and larger than this phase.
+Four guards still have no negative test, and all four are honest gaps rather
+than oversights:
+
+- **The dispute window** (`window_closed` is returned and never asserted) and
+  **the series notice period**. Neither is reachable from the UI without
+  manufacturing a booking at a specific age, which is a fixture, not a test.
+- **Cancelling the same booking twice** and **marking the same payout paid
+  twice**, both concurrently. I read both paths closely and both look sound —
+  row lock, terminal state, rollback — but reading is how the first seven
+  findings in this document survived for nine phases. Racing two refunds needs
+  the same harness `prove-no-double-booking.ts` uses, pointed at cancellation.
+
+All four are worth doing and all four are larger than this phase.
