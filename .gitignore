@@ -1,16 +1,22 @@
 # dependencies
+# Unanchored on purpose: a nested node_modules is still dependencies.
 node_modules/
 .pnp
 .pnp.js
 
 # next
-.next/
-out/
+# Every pattern below is anchored with a leading slash, because these are
+# build output at the repo root and nothing else. Unanchored, `out/` matches a
+# directory called `out` at ANY depth — which is how src/lib/messaging/out/
+# (the outbound messaging provider) went untracked for four phases while local
+# builds passed and a fresh clone failed to compile.
+/.next/
+/out/
 next-env.d.ts
 
 # production
-build/
-dist/
+/build/
+/dist/
 
 # env
 .env
@@ -18,13 +24,13 @@ dist/
 .env*.local
 
 # testing
-coverage/
-test-results/
-playwright-report/
+/coverage/
+/test-results/
+/playwright-report/
 
 # misc
 .DS_Store
 *.pem
 *.tsbuildinfo
 .vercel
-.storage/
+/.storage/
