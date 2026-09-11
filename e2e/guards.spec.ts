@@ -12,7 +12,15 @@
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { ACCOUNTS, SEED_PASSWORD, queryDatabase, signIn } from './helpers';
+import {
+  ACCOUNTS,
+  SEED_PASSWORD,
+  createStudent,
+  queryDatabase,
+  revealEveryDay,
+  signIn,
+  signInWith,
+} from './helpers';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -176,4 +184,106 @@ test('a minor cannot book, start a series or ask for a trial without a guardian'
   ).then((rows) => rows[0]!.n);
 
   expect(booked, 'a booking row exists for a minor with no guardian').toBe(0);
+});
+
+/**
+ * A slot somebody else is holding.
+ *
+ * The tutor page already hides slots another student is holding, so this never
+ * happens on a freshly loaded calendar. It happens on a page that has been open
+ * a minute — a second tab, or one left and come back to — which is most of them.
+ *
+ * `holdSlot` has always refused this. The refusal was thrown away by the action
+ * that called it, so the second student was sent on to the confirm page — and,
+ * signed out, to sign up under a banner reading "that time is held for you" —
+ * and only found out at the last step. A guard whose answer is discarded is not
+ * a guard.
+ */
+test('a slot held by somebody else is refused at the moment it is picked', async ({ browser }) => {
+  // Two contexts and two sign-ins: more than the 60s default.
+  test.setTimeout(120_000);
+
+  const first = await browser.newContext();
+  const second = await browser.newContext();
+
+  try {
+    // Straight to a tutor with hours published. Going through the feed would
+    // make a discovery failure look like a hold failure.
+    const tutorId = await queryDatabase<{ id: string }[]>(
+      (sql) => sql`
+        select p.user_id::text as id from tutor_profiles p
+        where p.status = 'verified'
+          and exists (select 1 from availability_rules r where r.tutor_id = p.user_id and r.active)
+        order by p.user_id limit 1
+      ` as never,
+    ).then((rows) => rows[0]!.id);
+
+    // The rival loads the calendar FIRST, while the slot is genuinely free.
+    // This is the whole point: their page is a snapshot, and it goes stale.
+    const email = `holdrace.${Date.now().toString(36)}@example.test`;
+    const rivalId = await createStudent(email, { creditsCents: 50_000 });
+    const rival = await second.newPage();
+    await signInWith(rival, email, SEED_PASSWORD);
+    await rival.waitForURL((url) => !url.pathname.startsWith('/signin'));
+    await rival.goto(`/tutors/${tutorId}`);
+    await revealEveryDay(rival);
+    const onRivalPage = await rival
+      .locator('[data-testid="calendar-slot"]')
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-start')));
+    expect(onRivalPage.length, 'the tutor had no free slots to race for').toBeGreaterThan(0);
+
+    // Now somebody else takes one of the times still showing on that page.
+    const holder = await first.newPage();
+    await signIn(holder, ACCOUNTS.student);
+    await holder.goto(`/tutors/${tutorId}`);
+    await revealEveryDay(holder);
+    const onHolderPage = await holder
+      .locator('[data-testid="calendar-slot"]')
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-start')));
+
+    const shared = onHolderPage.find((slot) => onRivalPage.includes(slot));
+    expect(shared, 'the two students were shown no slot in common').toBeTruthy();
+    const startUtc = shared!;
+
+    await holder.locator(`[data-testid="calendar-slot"][data-start="${startUtc}"]`).first().click();
+    await holder.waitForURL(/\/book\?/);
+
+    const held = await queryDatabase<{ n: number }[]>(
+      (sql) => sql`
+        select count(*)::int as n from slot_holds
+        where tutor_id = ${tutorId}::uuid
+          and start_at_utc = ${startUtc}::timestamptz
+          and expires_at > now()
+      ` as never,
+    ).then((rows) => rows[0]!.n);
+    expect(held, 'the first student did not get a hold').toBe(1);
+
+    // The rival presses the time their stale page still offers.
+    await rival.locator(`[data-testid="calendar-slot"][data-start="${startUtc}"]`).first().click();
+    await rival.waitForURL(
+      (url) =>
+        url.href.includes('error=') || url.pathname.includes('/book') || url.pathname.startsWith('/signup'),
+      { timeout: 15_000 },
+    );
+
+    // Told now, on the calendar — not walked on to the confirm page.
+    expect(rival.url(), 'the rival was sent on for a slot they cannot have').not.toMatch(/\/book\?/);
+    await expect(rival.getByText(/Somebody else is booking that time/i)).toBeVisible();
+    // Picking a slot never touches money, and the message has to say so.
+    await expect(rival.getByText(/nothing has been charged/i)).toBeVisible();
+
+    // And no hold was written for them on that slot.
+    const rivalHolds = await queryDatabase<{ n: number }[]>(
+      (sql) => sql`
+        select count(*)::int as n from slot_holds
+        where student_id = ${rivalId}::uuid
+          and start_at_utc = ${startUtc}::timestamptz
+          and expires_at > now()
+      ` as never,
+    ).then((rows) => rows[0]!.n);
+    expect(rivalHolds, 'a second hold exists on a slot already held').toBe(0);
+  } finally {
+    await first.close();
+    await second.close();
+  }
 });

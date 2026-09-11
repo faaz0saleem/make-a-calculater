@@ -12,6 +12,9 @@
  * `e2e/booking.spec.ts` asserts on. Sequential calls would prove nothing: the
  * question is what Postgres does when both transactions read the slot as free
  * before either has written.
+ *
+ * It exits non-zero when that is not what happened — including when nobody won,
+ * which means the slot it picked was not free and the race never ran.
  */
 
 import './bootstrap';
@@ -95,22 +98,44 @@ async function main() {
          and status in ('pending_tutor', 'confirmed', 'in_progress')
     `)) as unknown as { bookings: number; escrow_entries: number }[];
 
-    console.log(
-      JSON.stringify(
-        {
-          tutorEmail: tutor.email,
-          slot: slot.toISOString(),
-          clients: students.length,
-          succeeded: results.filter((result) => result.ok).length,
-          failures: results.filter((result) => !result.ok).map((result) => (result as { problem: string }).problem),
-          bookingsInDatabase: row?.bookings ?? 0,
-          escrowEntries: row?.escrow_entries ?? 0,
-        },
-        null,
-        2,
-      ),
-    );
+    const report = {
+      tutorEmail: tutor.email,
+      slot: slot.toISOString(),
+      clients: students.length,
+      succeeded: results.filter((result) => result.ok).length,
+      failures: results.filter((result) => !result.ok).map((result) => (result as { problem: string }).problem),
+      bookingsInDatabase: row?.bookings ?? 0,
+      escrowEntries: row?.escrow_entries ?? 0,
+    };
 
+    // stdout stays nothing but this object: `e2e/booking.spec.ts` parses it.
+    // The verdict goes to stderr, and the exit code is the actual answer.
+    console.log(JSON.stringify(report, null, 2));
+
+    // Printed and not asserted, this was a demo that always passed. Run against
+    // a database where somebody already held the slot it picked, it reported
+    // "succeeded: 0" and exited 0 — a green run that proved nothing.
+    const problems: string[] = [];
+    if (report.succeeded !== 1) {
+      problems.push(
+        report.succeeded === 0
+          ? `nobody won the race (${report.failures.join(', ')}) — the slot was not free to begin with, so nothing was proven`
+          : `${report.succeeded} of ${report.clients} bookings succeeded, expected exactly 1`,
+      );
+    }
+    if (report.bookingsInDatabase !== 1) {
+      problems.push(`${report.bookingsInDatabase} live bookings at that slot, expected 1`);
+    }
+    if (report.escrowEntries !== 1) {
+      problems.push(`${report.escrowEntries} escrow entries, expected 1`);
+    }
+
+    if (problems.length > 0) {
+      console.error(`\nFAILED:\n  ${problems.join('\n  ')}`);
+      process.exit(1);
+    }
+
+    console.error('\nExactly one booking won the slot, and exactly one escrow entry exists for it.');
     process.exit(0);
   }
 

@@ -4,7 +4,7 @@ Phase 10, part one. A hunt, not a feature. Everything below was found by using
 the product or by reading for a named pattern — not by running the suite, which
 was green throughout and stayed green while every one of these was true.
 
-**Eleven findings. Nine fixed, two not.** Ordered by severity, not by the order
+**Thirteen findings. Eleven fixed, two not.** Ordered by severity, not by the order
 they were found.
 
 | # | What | Class | Severity | Fixed |
@@ -15,13 +15,15 @@ they were found.
 | 4 | The pre-call check said "Video and audio should both be fine" with the video service unreachable | invented number | **High** | Yes |
 | 5 | `lifetime_earned_cents` sat outside reconciliation — the exact sibling of the Phase 9 bug | unreconciled | **High** | Yes |
 | 6 | One reply ever was rendered as "Usually replies within an hour" and badged "Responds in <1h" | invented number | Moderate | Yes |
-| 7 | The booking page told a student their slot was held while also telling them it was not | walk | Moderate | Yes |
-| 8 | "Sign in" on the signup page dropped the slot a returning student had chosen | walk | Moderate | Yes |
-| 9 | Admin rates rendered "0.0%" when the denominator was zero | invented number | Low | Yes |
-| 10 | Strikes never expire, and "3 strikes in 90 days = review" does not exist | silent pass | Moderate | **No** |
-| 11 | A minor is refused a trial with nowhere on the trial journey to give a guardian's email | walk | Moderate | **Partly** |
+| 7 | Picking a slot somebody else was holding walked the student on anyway, under a banner saying it was held for them | walk | **High** | Yes |
+| 8 | The booking page told a student their slot was held while also telling them it was not | walk | Moderate | Yes |
+| 9 | "Sign in" on the signup page dropped the slot a returning student had chosen | walk | Moderate | Yes |
+| 10 | `pnpm prove:booking` printed its result and exited 0 whatever it found — a double-booking proof that proved nothing | silent pass | Moderate | Yes |
+| 11 | Admin rates rendered "0.0%" when the denominator was zero | invented number | Low | Yes |
+| 12 | Strikes never expire, and "3 strikes in 90 days = review" does not exist | silent pass | Moderate | **No** |
+| 13 | A minor is refused a trial with nowhere on the trial journey to give a guardian's email | walk | Moderate | **Partly** |
 
-Five guards had no test proving they refuse anything. They have one now:
+Six guards had no test proving they refuse anything. They have one now:
 `e2e/guards.spec.ts`.
 
 ---
@@ -246,7 +248,56 @@ that was the bug.
 
 ---
 
-## 7. The booking page contradicted itself about the hold
+## 7. A slot somebody else was holding walked the student on anyway
+
+**Class:** found by walking. **Severity:** high. **Fixed.**
+
+**What I did.** Opened one tutor's calendar in two browsers, as two different
+students — the "open it in a second tab" case. Both pages showed the same free
+hour. One student clicked it. Then the other student clicked the hour their own
+page was still showing.
+
+**What happened.** The second student was taken straight to the confirm page for
+a slot they could not have. Signed out, it is worse: they were sent to sign up,
+under this banner —
+
+> **That time is held for you for ten minutes.** Finish here and you will land
+> straight back on it.
+
+— which was false when it was written. They could then create an account and buy
+credits before anything told them the truth, and the refusal only came at the
+final button.
+
+**What should have happened.** They should be told at the click, on the calendar,
+while the only thing they have spent is a click.
+
+**Why it was there.** `holdSlot` has always refused this and returns
+`{ ok: false, problem: 'slot_taken' }`. The action that called it discarded the
+return value twice:
+
+```ts
+await holdSlot({ guestToken, tutorId, startAtUtc, durationMinutes });
+redirect(`/signup?next=${encodeURIComponent(bookHere)}&held=1`);
+```
+
+A guard whose answer is thrown away is not a guard. This is the same shape as
+finding 1, and it is why "does the check run?" is the wrong question.
+
+**Worth being precise about the blast radius.** The tutor page *does* hide slots
+another student is holding, so a freshly loaded calendar never offers one. This
+needs a page that has been open a little while — a second tab, or one left and
+come back to. That is most pages, and the hold window is ten minutes.
+
+**Fixed.** Both calls now check, and a refusal goes back to the calendar with a
+message that also says nothing has been charged, because picking a slot never
+touches money. `e2e/guards.spec.ts` covers it, and I checked the test fails with
+the fix removed — twice, because the first revert only removed one of the two
+call sites and the test still passed. A negative test that has not been seen to
+fail is finding 1 again.
+
+---
+
+## 8. The booking page contradicted itself about the hold
 
 **Class:** found by walking. **Severity:** moderate. **Fixed.**
 
@@ -270,7 +321,7 @@ opposite when it does not.
 
 ---
 
-## 8. "Sign in" on the signup page dropped the chosen slot
+## 9. "Sign in" on the signup page dropped the chosen slot
 
 **Class:** found by walking. **Severity:** moderate. **Fixed.**
 
@@ -288,7 +339,55 @@ their dashboard instead. The link in the other direction has always carried
 
 ---
 
-## 9. Admin rates said "0.0%" with nothing to divide by
+## 10. The double-booking proof exited 0 whatever it found
+
+**Class:** silent pass. **Severity:** moderate. **Fixed.**
+
+**What I did.** Ran `pnpm prove:booking` against a database the e2e suite had
+just finished with, as a final check before pushing.
+
+**What happened.** It printed this and exited 0:
+
+```json
+{ "succeeded": 0, "failures": ["slot_taken", "slot_taken"],
+  "bookingsInDatabase": 0, "escrowEntries": 0 }
+```
+
+Nobody won the race. The slot it picked was already held by somebody else, so
+the two clients were refused before they ever reached the serializable
+transaction, and the thing the script exists to prove was never exercised. It
+reported that as success.
+
+**What should have happened.** Exit non-zero. Its own docblock says "Exactly one
+must succeed"; nothing enforced it.
+
+**Why it matters.** This is the script that proves double-booking is impossible
+— the invariant the whole booking design is built around. `RUNBOOK.md` offers it
+as the check to run against a new environment. Anyone running it there would
+have got a wall of JSON and a zero exit code, and a regression that made *every*
+booking fail would have looked identical to a pass.
+
+`e2e/booking.spec.ts` does assert on the JSON, so CI was never blind. The
+standalone tool was.
+
+**Fixed.** It now checks its three outcomes and exits 1 with a reason, naming
+the "nobody won, so nothing was proven" case specifically. stdout stays pure
+JSON because the e2e parses it; the verdict goes to stderr. Verified both ways:
+green on a free slot, and
+
+```
+FAILED:
+  nobody won the race (slot_taken, slot_taken) — the slot was not free to
+  begin with, so nothing was proven
+```
+
+with a hold placed on the slot first. `prove-payout-lock.ts` already did this
+and even has a comment explaining why; this script predates it and never got the
+same treatment.
+
+---
+
+## 11. Admin rates said "0.0%" with nothing to divide by
 
 **Class:** invented number. **Severity:** low — admin-only, and the denominator
 is printed next to it. **Fixed.**
@@ -303,7 +402,7 @@ different thing from "the rate is zero".
 
 ---
 
-## 10. Strikes never expire, and the review trigger does not exist
+## 12. Strikes never expire, and the review trigger does not exist
 
 **Class:** silent pass. **Severity:** moderate. **NOT FIXED — needs a decision.**
 
@@ -344,7 +443,7 @@ next reader is not told the window exists.
 
 ---
 
-## 11. A minor is refused a trial with nowhere to give a guardian's email
+## 13. A minor is refused a trial with nowhere to give a guardian's email
 
 **Class:** found by walking. **Severity:** moderate. **PARTLY FIXED.**
 
@@ -388,7 +487,7 @@ Worth recording, because "we looked and it was fine" is a result:
 
 ## Where the negative tests were missing
 
-Five guards ran, returned success, and had nothing proving they ever refuse
+Six guards ran, returned success, and had nothing proving they ever refuse
 anything. `e2e/guards.spec.ts` now covers:
 
 1. a student is refused every admin page;
@@ -397,7 +496,14 @@ anything. `e2e/guards.spec.ts` now covers:
 3. a demoted admin loses access on the session they are already holding;
 4. a suspended account loses its session;
 5. a minor with the `required` attribute stripped is refused a booking, and no
-   booking row exists afterwards.
+   booking row exists afterwards;
+6. a student picking a slot another student is holding is refused at the click,
+   and no second hold is written.
+
+Each of these was run against the code with its fix removed, and each failed.
+That step is not optional: test 6 passed against a half-reverted build, because
+the revert had missed one of the two call sites — a negative test nobody has
+watched fail is just a test.
 
 Two guards still have no negative test, and both are honest gaps rather than
 oversights: **the dispute window** (`window_closed` is returned and never

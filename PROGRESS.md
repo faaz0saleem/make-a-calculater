@@ -17,7 +17,48 @@ Phases follow `SPEC.md` §15.
 | 7 — recurring bookings, topics, attendance, homework | **Done** |
 | 8 — content merge, email delivery, day-one states, operations | **Done** |
 | 9 — password reset, email verification, the money audit | **Done** |
+| 10 part one — the bug hunt | **Done** |
 | — real payment provider, SEO, analytics | Not started |
+
+---
+
+## Phase 10, part one — the bug hunt — done
+
+No features. No roadmap. Walk the product, read for four named patterns, force
+every error path, and write down what is actually broken.
+
+**Thirteen findings. Eleven fixed, two not.** `BUGS.md` has every one with what
+I did, what happened, what should have happened, and why the two are unfixed.
+
+The two that matter most were both the same shape, and neither was in new code:
+
+- **A signed-in session never re-read roles or suspension.** Demoting an admin
+  or suspending an account changed the database and nothing else until the token
+  expired. Every `requireRole('admin')` call ran, returned success, and enforced
+  a fact from sign-in time. `currentUser()` now reads roles and suspension per
+  request, cached once, and refuses a deleted account too.
+- **A slot somebody else was holding walked the student on anyway.**
+  `holdSlot` refused correctly and the caller threw the answer away — sending a
+  signed-out visitor to sign up under a banner reading "that time is held for
+  you", then to buy credits, with the refusal arriving at the last button.
+
+Both are a guard that runs and whose answer nobody uses, which is invisible from
+inside the suite: 807 unit tests and 121 e2e tests were green the whole time.
+Hence `e2e/guards.spec.ts` — six tests that assert only refusals, each one run
+against the code with its fix removed and watched to fail.
+
+Also in this pass: a child-safety check that the booking form left to an HTML
+`required` attribute, now enforced server-side in all three booking paths; an
+error boundary that leads with whether money moved; a pre-call check that
+stopped claiming a video service was fine without ever asking it; an eighth
+reconciliation check on `lifetime_earned_cents`; a minimum of three replies
+before one anecdote is rendered as "usually replies within an hour"; and
+`pnpm prove:booking`, which printed its result and exited 0 whatever it found.
+
+Unfixed and written up rather than quietly left: the strikes counter has no
+window and the "three in ninety days triggers a review" rule does not exist, and
+a minor refused a trial has nowhere on the trial journey to supply a guardian's
+email. Both need new surface area, which this phase was explicitly not for.
 
 ---
 

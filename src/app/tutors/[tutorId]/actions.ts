@@ -84,6 +84,17 @@ const BOOKING_MESSAGES: Record<string, string> = {
 };
 
 /**
+ * Back to the calendar, saying why.
+ *
+ * The only way to lose a slot at this step is somebody else holding it, and
+ * nothing has been charged yet — picking a slot does not touch money.
+ */
+function slotGone(tutorId: string, durationMinutes: 30 | 60): string {
+  const message = 'Somebody else is booking that time right now. Pick another one — nothing has been charged.';
+  return `/tutors/${tutorId}?mode=${durationMinutes}&error=${encodeURIComponent(message)}`;
+}
+
+/**
  * Book a paid session.
  *
  * When the balance is short, the slot is held for ten minutes and the student
@@ -107,15 +118,23 @@ export async function bookSession(
   // Signed out: hold the slot, then send them to sign up. Holding *first* is
   // the whole point — "create an account to book this" has to mean the slot is
   // still there when they come back, not that they can look for it again.
+  //
+  // Which is exactly why the result is checked. `holdSlot` refuses when
+  // somebody else is already holding this time, and walking on regardless
+  // would send them to sign up, and then to buy credits, for a slot they
+  // cannot have — telling them it was held for them the whole way. Better to
+  // say so here, while the only thing they have spent is a click.
   if (!user) {
     const guestToken = await ensureGuestToken();
-    await holdSlot({ guestToken, tutorId, startAtUtc, durationMinutes });
+    const held = await holdSlot({ guestToken, tutorId, startAtUtc, durationMinutes });
+    if (!held.ok) redirect(slotGone(tutorId, durationMinutes));
     redirect(`/signup?next=${encodeURIComponent(bookHere)}&held=1`);
   }
 
   // Signed in: hold it and take them to the one page that shows the price, the
   // balance and the top-up together. Committing happens there.
-  await holdSlot({ studentId: user.id, tutorId, startAtUtc, durationMinutes });
+  const held = await holdSlot({ studentId: user.id, tutorId, startAtUtc, durationMinutes });
+  if (!held.ok) redirect(slotGone(tutorId, durationMinutes));
   redirect(bookHere);
 }
 
