@@ -84,6 +84,29 @@ async function measureRttMs(signal: AbortSignal): Promise<number> {
   return samples[Math.floor(samples.length / 2)]!;
 }
 
+/**
+ * Is the classroom service itself reachable?
+ *
+ * The rest of this check measures a download from *our* origin and a few
+ * round trips to it, and then says "Video and audio should both be fine" —
+ * which is a claim about LiveKit, a service it never touched. With LiveKit
+ * unreachable the verdict was a confident green light on the screen somebody
+ * opens for a lesson they have paid for.
+ *
+ * `/api/health` already probes it. `null` means we could not tell, which is
+ * treated as "do not claim either way" rather than as a failure.
+ */
+async function classroomReachable(signal: AbortSignal): Promise<boolean | null> {
+  try {
+    const response = await fetch('/api/health', { cache: 'no-store', signal });
+    const health = (await response.json()) as { checks?: { livekit?: string } };
+    const state = health.checks?.livekit;
+    return state === undefined ? null : state === 'up';
+  } catch {
+    return null;
+  }
+}
+
 async function checkDevices(): Promise<{ devices: DeviceCheck; stream: MediaStream | null }> {
   const result: DeviceCheck = { microphone: 'missing', camera: 'missing' };
   let stream: MediaStream | null = null;
@@ -120,6 +143,8 @@ export function PreCallCheck({
   const [phase, setPhase] = useState<Phase>('idle');
   const [devices, setDevices] = useState<DeviceCheck | null>(null);
   const [verdict, setVerdict] = useState<ConnectionVerdict | null>(null);
+  /** Our own video service, not the viewer's connection. See `classroomReachable`. */
+  const [classroomDown, setClassroomDown] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const previewRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -138,6 +163,7 @@ export function PreCallCheck({
   const run = useCallback(async () => {
     setPhase('checking');
     setError(null);
+    setClassroomDown(false);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -152,11 +178,13 @@ export function PreCallCheck({
         if (previewRef.current) previewRef.current.srcObject = stream;
       }
 
-      const [downlinkKbps, rttMs] = await Promise.all([
+      const [downlinkKbps, rttMs, classroom] = await Promise.all([
         measureDownlinkKbps(controller.signal),
         measureRttMs(controller.signal),
+        classroomReachable(controller.signal),
       ]);
 
+      setClassroomDown(classroom === false);
       setVerdict(assessConnection({ downlinkKbps, rttMs, packetLossPercent: null }));
       setPhase('done');
     } catch (caught) {
@@ -221,7 +249,19 @@ export function PreCallCheck({
         </div>
       ) : null}
 
-      {phase === 'done' && verdict ? (
+      {phase === 'done' && classroomDown ? (
+        <p role="alert" className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+          <strong>Our video service is not responding.</strong> Your own connection is fine — this
+          is at our end. Nothing extra has been charged, and if the session cannot go ahead you are
+          refunded in full. Try again in a minute, and tell your tutor if it does not come back.
+        </p>
+      ) : null}
+
+      {/* Suppressed while the classroom is unreachable. The verdict's best case
+          says "Video and audio should both be fine", which is a claim about a
+          service that is not answering — two contradictory sentences on one
+          screen is worse than one. "Check again" is still below. */}
+      {phase === 'done' && verdict && !classroomDown ? (
         <div className="flex flex-col gap-4" role="status" aria-live="polite">
           <div
             className={cn(

@@ -204,7 +204,13 @@ export default async function BookPage({
                 You need {formatCents(shortfall)} more <Badge variant="secondary">Top up here</Badge>
               </CardTitle>
               <CardDescription>
-                Buy credits without leaving this page. Your slot stays held while you do.
+                {/* Only true while there is a hold. The card above this one
+                    says "This time is not held" once it has expired, and the
+                    two of them were contradicting each other on the screen
+                    where somebody decides to spend money. */}
+                {hold
+                  ? 'Buy credits without leaving this page. Your slot stays held while you do.'
+                  : 'Buy credits without leaving this page. This time is not held any more, so somebody else could take it while you pay.'}
               </CardDescription>
             </CardHeader>
             <CardContent>

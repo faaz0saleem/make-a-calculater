@@ -58,7 +58,14 @@ export default async function SignUpPage({
           <SignUpForm googleEnabled={isGoogleConfigured()} next={next} />
           <p className="mt-4 text-sm text-muted-foreground">
             Already registered?{' '}
-            <Link href="/signin" className="underline underline-offset-4">
+            {/* Carrying `next` matters here more than anywhere: a returning
+                student who picked a slot arrives on this page, and the sign-in
+                link was dropping the slot they had chosen. The link the other
+                way has always carried it. */}
+            <Link
+              href={next ? `/signin?next=${encodeURIComponent(next)}` : '/signin'}
+              className="underline underline-offset-4"
+            >
               Sign in
             </Link>
           </p>

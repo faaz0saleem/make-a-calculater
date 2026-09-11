@@ -175,9 +175,19 @@ export const {
   callbacks: {
     ...authConfig.callbacks,
     /**
-     * The JWT carries the roles. On sign-in they come from the provider result;
-     * on later requests they are re-read from the database so a role change or a
-     * suspension takes effect without waiting for the token to expire.
+     * The JWT carries a *copy* of the roles, for the edge middleware.
+     *
+     * It is not the authorization boundary and must not be treated as one: this
+     * callback runs when a token is issued or explicitly updated, so the copy
+     * can be up to thirty days stale. The comment that used to sit here claimed
+     * the roles were re-read on every request; the condition below has always
+     * been `trigger === 'update' || !token.roles`, and after the first sign-in
+     * neither is ever true — so demoting an admin left them an admin.
+     *
+     * `currentUser()` now reads roles and suspension from the database on every
+     * request, in the query it was already making. This stays because the edge
+     * `authorized` callback has no database and a rough copy is better than
+     * nothing there.
      */
     async jwt({ token, user, trigger }) {
       // Same claim the edge config writes, and it has to be written here too:

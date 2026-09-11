@@ -236,16 +236,45 @@ export async function changePassword(
   return { ok: true };
 }
 
-/** Everything issued before this instant is refused. Read on every request. */
-export async function sessionsValidFrom(
+/**
+ * The three facts about an account that a session cannot be trusted to carry.
+ *
+ * Read once per request, from the database, by `currentUser()`.
+ *
+ * All three were previously answered by the token, and two of them wrongly.
+ * The JWT is signed at sign-in and then believed for up to thirty days, so a
+ * role taken away, an account suspended, or a password reset elsewhere had no
+ * effect until it expired. `sessions_valid_from` was already read here; roles
+ * and suspension have joined it, in the same query, so the fix costs nothing.
+ *
+ * `roles` in particular: the token's copy is what every `requireRole` check
+ * used to read, which meant demoting an admin left them an admin.
+ */
+export type AccountFacts = {
+  sessionsValidFrom: Date | null;
+  suspendedAt: Date | null;
+  roles: string[];
+};
+
+export async function accountFacts(
   userId: string,
   database: DbLike = defaultDb,
-): Promise<Date | null> {
+): Promise<AccountFacts | null> {
   const [row] = await database
-    .select({ at: users.sessionsValidFrom })
+    .select({
+      sessionsValidFrom: users.sessionsValidFrom,
+      suspendedAt: users.suspendedAt,
+      roles: users.roles,
+    })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1);
 
-  return row?.at ?? null;
+  if (!row) return null;
+
+  return {
+    sessionsValidFrom: row.sessionsValidFrom ?? null,
+    suspendedAt: row.suspendedAt ?? null,
+    roles: (row.roles ?? []) as string[],
+  };
 }

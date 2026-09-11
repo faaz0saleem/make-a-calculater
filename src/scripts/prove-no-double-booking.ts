@@ -45,6 +45,11 @@ async function main() {
     join student_wallets w on w.user_id = u.id
     where 'student' = any(u.roles) and w.credits_cents >= 20000
       and not exists (select 1 from tutor_profiles p where p.user_id = u.id)
+      -- Somebody who can actually book. A minor with no guardian on record is
+      -- refused before the race is reached, and the seed has one on purpose —
+      -- racing them would have this script prove the guardian rule instead of
+      -- the thing it exists to prove.
+      and (u.is_adult is not false or u.guardian_email is not null)
     order by w.credits_cents desc
     limit ${clients}
   `)) as unknown as Row[];

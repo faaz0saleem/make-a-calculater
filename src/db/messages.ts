@@ -28,7 +28,7 @@ import {
 } from '@/lib/messaging/limits';
 import { scoreContactIntent, shouldQueueForReview } from '@/lib/messaging/contact-intent';
 import { maskContactInfo } from '@/lib/messaging/masking';
-import { replyLatencies, medianSeconds } from '@/lib/messaging/response-time';
+import { responseMedianFor } from '@/lib/messaging/response-time';
 
 export {
   MAX_ATTACHMENT_BYTES,
@@ -339,9 +339,10 @@ export async function recomputeResponseMedian(
     byThread.set(row.threadId, thread);
   }
 
-  const median = medianSeconds(
-    [...byThread.values()].flatMap((thread) => replyLatencies(thread, tutorId, now)),
-  );
+  // Through `responseMedianFor`, so the minimum-sample rule applies here too:
+  // one reply is an anecdote and the profile renders it as "Usually replies
+  // within an hour".
+  const median = responseMedianFor([...byThread.values()], tutorId, now);
 
   await database
     .update(tutorProfiles)

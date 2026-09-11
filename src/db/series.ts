@@ -80,7 +80,8 @@ export type SeriesProblem =
   | 'bad_duration'
   | 'no_weekdays'
   | 'not_available'
-  | 'already_running';
+  | 'already_running'
+  | 'guardian_required';
 
 const PROBLEMS: Record<SeriesProblem, string> = {
   bad_time: 'Pick a time of day.',
@@ -92,6 +93,8 @@ const PROBLEMS: Record<SeriesProblem, string> = {
   not_available:
     'That time is not free every week you picked. Try a different time, or fewer days.',
   already_running: 'You already have a standing arrangement with this tutor.',
+  guardian_required:
+    'We need a parent or guardian’s email before a standing arrangement. Nothing has been charged.',
 };
 
 export function seriesProblemMessage(problem: SeriesProblem): string {
@@ -222,6 +225,18 @@ export async function createSeries(
       .limit(1);
 
     if (existing) return { ok: false, problem: 'already_running' as const };
+
+    // Same rule as a one-off booking: a minor needs a guardian on record before
+    // any lesson (SPEC.md §1, and the terms say "lessons", not "paid lessons").
+    const [student] = await tx
+      .select({ isAdult: users.isAdult, guardianEmail: users.guardianEmail })
+      .from(users)
+      .where(eq(users.id, input.studentId))
+      .limit(1);
+
+    if (student?.isAdult === false && !student.guardianEmail) {
+      return { ok: false, problem: 'guardian_required' as const };
+    }
 
     const timezone = tutor.timezone;
     const startsOn = input.startsOn ?? dateInZone(now, timezone);

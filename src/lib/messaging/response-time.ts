@@ -59,6 +59,20 @@ export function replyLatencies(
   return latencies;
 }
 
+/**
+ * How many replies it takes before "usually" is a word we are entitled to.
+ *
+ * One answer is an anecdote, and rendering it as "Usually replies within an
+ * hour" — plus a "Responds in <1h" badge — is the same mistake as showing the
+ * Bayesian prior as a rating: a number that is true of the data and false about
+ * the tutor. Three is the smallest sample where a median is not just the single
+ * observation wearing a hat.
+ *
+ * Applied in `responseMedianFor` rather than in `medianSeconds`, which stays a
+ * plain median with no opinions.
+ */
+export const MIN_REPLIES_FOR_A_MEDIAN = 3;
+
 /** The middle value; the mean of the middle two when there is an even count. */
 export function medianSeconds(values: number[]): number | null {
   if (values.length === 0) return null;
@@ -77,7 +91,9 @@ export function responseMedianFor(
   tutorId: string,
   now: Date,
 ): number | null {
-  return medianSeconds(threads.flatMap((thread) => replyLatencies(thread, tutorId, now)));
+  const latencies = threads.flatMap((thread) => replyLatencies(thread, tutorId, now));
+  if (latencies.length < MIN_REPLIES_FOR_A_MEDIAN) return null;
+  return medianSeconds(latencies);
 }
 
 /** "under an hour", "about 3 hours", "over a day" — for the profile. */

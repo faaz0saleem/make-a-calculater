@@ -56,7 +56,19 @@ import { formatInTimeZone } from '@/lib/time';
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Admin' };
 
-function pct(basisPoints: number): string {
+/**
+ * A rate, or an em dash when there was nothing to divide by.
+ *
+ * `bps(0, 0)` is 0, and "0.0%" is a claim: it says nobody converts, nobody
+ * cancels, nothing is covered. On day one every denominator here is zero and
+ * every one of those statements is false — we have no data, which is a
+ * different thing and reads differently.
+ *
+ * `whole` is optional so the call sites that genuinely cannot be empty (a
+ * blended take rate over real money) stay as they were.
+ */
+function pct(basisPoints: number, whole?: number): string {
+  if (whole !== undefined && whole <= 0) return '—';
   return `${(basisPoints / 100).toFixed(1)}%`;
 }
 
@@ -197,7 +209,7 @@ export default async function AdminPage() {
                 ],
                 [
                   'Effective take rate',
-                  pct(money.takeRateBps),
+                  pct(money.takeRateBps, money.gmvCents),
                   'Blended across every rate we have charged.',
                 ],
                 [
@@ -250,6 +262,7 @@ export default async function AdminPage() {
                     unmatched.positionsDeclared > 0
                       ? Math.round((unmatched.positionsUnmatched * 10_000) / unmatched.positionsDeclared)
                       : 0,
+                    unmatched.positionsDeclared,
                   )}
                 </p>
               </div>
@@ -270,6 +283,7 @@ export default async function AdminPage() {
                             unmatched.positionsDeclared,
                         )
                       : 0,
+                    unmatched.positionsDeclared,
                   )}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">Declared positions we can serve.</p>
@@ -423,7 +437,7 @@ export default async function AdminPage() {
                         <td className="py-2 text-right tabular-nums font-medium">
                           {formatCents(pack.marginCents)}{' '}
                           <Badge variant={pack.marginBps < 500 ? 'destructive' : 'outline'}>
-                            {pct(pack.marginBps)}
+                            {pct(pack.marginBps, pack.cashInCents)}
                           </Badge>
                         </td>
                       </tr>
@@ -465,7 +479,7 @@ export default async function AdminPage() {
                       </span>
                       <span className="flex items-center gap-2">
                         <span className="tabular-nums">{formatCents(row.cashInCents)}</span>
-                        <Badge variant="secondary">{pct(row.shareBps)}</Badge>
+                        <Badge variant="secondary">{pct(row.shareBps, row.cashInCents)}</Badge>
                       </span>
                     </li>
                   ))}
@@ -489,17 +503,17 @@ export default async function AdminPage() {
                   [
                     [
                       'Trial to paid',
-                      `${pct(ops.trialToPaidBps)}`,
+                      pct(ops.trialToPaidBps, ops.trials),
                       `${ops.trialsConverted} of ${ops.trials} trial pairs came back and paid.`,
                     ],
                     [
                       'Cancelled by student',
-                      pct(ops.cancellationStudentBps),
+                      pct(ops.cancellationStudentBps, ops.bookingsTerminal),
                       `${ops.cancelledByStudent} of ${ops.bookingsTerminal} finished bookings.`,
                     ],
                     [
                       'Cancelled by tutor',
-                      pct(ops.cancellationTutorBps),
+                      pct(ops.cancellationTutorBps, ops.bookingsTerminal),
                       `${ops.cancelledByTutor} of ${ops.bookingsTerminal}. This one costs us students.`,
                     ],
                     [

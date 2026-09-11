@@ -36,7 +36,12 @@ import {
   type TrialRequestProblem,
 } from '@/lib/trials/rules';
 
-export type TrialRequestFailure = TrialRequestProblem | 'slot_taken' | 'not_available' | 'no_such_tutor';
+export type TrialRequestFailure =
+  | TrialRequestProblem
+  | 'slot_taken'
+  | 'not_available'
+  | 'no_such_tutor'
+  | 'guardian_required';
 
 export type TrialRequestResult =
   | { ok: true; bookingId: string; startAtUtc: Date; durationMinutes: number }
@@ -198,12 +203,23 @@ export async function requestTrial(
   if (!tutor) return { ok: false, problem: 'no_such_tutor' };
 
   const [student] = await database
-    .select({ timezone: users.timezone })
+    .select({
+      timezone: users.timezone,
+      isAdult: users.isAdult,
+      guardianEmail: users.guardianEmail,
+    })
     .from(users)
     .where(eq(users.id, input.studentId))
     .limit(1);
 
   if (!student) return { ok: false, problem: 'no_such_tutor' };
+
+  // A trial is free and it is still a lesson: a video call between a child and
+  // an adult stranger. The terms require a guardian on record before lessons,
+  // not before payments (SPEC.md §1).
+  if (student.isAdult === false && !student.guardianEmail) {
+    return { ok: false, problem: 'guardian_required' };
+  }
 
   // Counts have to be taken after the dead requests are cleared, or a student
   // stays blocked by three requests that all timed out yesterday.

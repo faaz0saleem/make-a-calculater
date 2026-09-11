@@ -9,8 +9,8 @@ import { cache } from 'react';
 import { redirect } from 'next/navigation';
 
 import { auth } from '@/auth';
-import { sessionsValidFrom } from '@/db/passwords';
-import { hasRole, type UserRole } from './roles';
+import { accountFacts } from '@/db/passwords';
+import { hasRole, isUserRole, type UserRole } from './roles';
 
 /**
  * One lookup per request, however many guards run.
@@ -19,7 +19,7 @@ import { hasRole, type UserRole } from './roles';
  * places asks the database once. Without it this would add a query to every
  * component that checks who is signed in.
  */
-const validFrom = cache(sessionsValidFrom);
+const facts = cache(accountFacts);
 
 export type CurrentUser = {
   id: string;
@@ -38,6 +38,12 @@ export type CurrentUser = {
  * password. Comparing the token's issue time against the account's
  * `sessions_valid_from` is the only way to refuse it.
  *
+ * **Roles and suspension are read here too, and not from the token.** The JWT
+ * is signed once and believed for thirty days; `src/auth.ts` claimed in a
+ * comment to re-read them on every request and did not, so demoting an admin
+ * left them an admin and suspending an account did nothing until it expired.
+ * One query already ran here, so the two extra columns are free.
+ *
  * The middleware deliberately does not do this: it runs on the edge with no
  * database, and it is not the authorization boundary anyway (SPEC.md §13.4).
  * This is.
@@ -46,19 +52,27 @@ export async function currentUser(): Promise<CurrentUser | null> {
   const session = await auth();
   if (!session?.user?.id) return null;
 
-  const cutoff = await validFrom(session.user.id);
-  if (cutoff) {
+  const account = await facts(session.user.id);
+
+  // Deleted between the token being signed and now.
+  if (!account) return null;
+
+  // Suspended accounts cannot sign in, and must not keep working on a session
+  // they signed in with beforehand.
+  if (account.suspendedAt) return null;
+
+  if (account.sessionsValidFrom) {
     // A session that began at or before the cutoff is refused. Equality counts
     // as older: the reset happened after the session it is revoking.
     const startedAt = session.user.signedInAtMs ?? 0;
-    if (startedAt <= cutoff.getTime()) return null;
+    if (startedAt <= account.sessionsValidFrom.getTime()) return null;
   }
 
   return {
     id: session.user.id,
     email: session.user.email ?? '',
     name: session.user.name ?? '',
-    roles: session.user.roles ?? [],
+    roles: account.roles.filter(isUserRole),
     timezone: session.user.timezone ?? 'UTC',
   };
 }

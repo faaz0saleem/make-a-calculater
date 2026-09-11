@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { describeResponseTime, medianSeconds, replyLatencies, responseMedianFor } from './response-time';
+import {
+  describeResponseTime,
+  medianSeconds,
+  replyLatencies,
+  responseMedianFor,
+  type ThreadMessage,
+} from './response-time';
 
 const TUTOR = 'tutor-1';
 const STUDENT = 'student-1';
@@ -95,5 +101,41 @@ describe('describeResponseTime', () => {
     expect(describeResponseTime(3 * 3_600)).toBe('Usually replies within 3 hours');
     expect(describeResponseTime(10 * 3_600)).toBe('Usually replies within a day');
     expect(describeResponseTime(48 * 3_600)).toBe('Can take more than a day to reply');
+  });
+});
+
+describe('the minimum sample before we claim a habit', () => {
+  const student = 'student-1';
+  const tutor = 'tutor-1';
+  const at = (minutes: number) => new Date(Date.UTC(2026, 0, 1, 0, minutes));
+
+  /** One student message answered `afterMinutes` later, `times` over. */
+  function exchanges(times: number): ThreadMessage[][] {
+    return Array.from({ length: times }, (_, i) => [
+      { senderId: student, createdAt: at(i * 100) },
+      { senderId: tutor, createdAt: at(i * 100 + 10) },
+    ]);
+  }
+
+  it('says nothing after one reply, however fast it was', () => {
+    // The bug: one ten-minute reply rendered as "Usually replies within an
+    // hour" on the profile and "Responds in <1h" on the card.
+    expect(responseMedianFor(exchanges(1), tutor, at(1_000))).toBeNull();
+    expect(describeResponseTime(responseMedianFor(exchanges(1), tutor, at(1_000)))).toBeNull();
+  });
+
+  it('still says nothing after two', () => {
+    expect(responseMedianFor(exchanges(2), tutor, at(1_000))).toBeNull();
+  });
+
+  it('speaks at three', () => {
+    expect(responseMedianFor(exchanges(3), tutor, at(1_000))).toBe(600);
+    expect(describeResponseTime(responseMedianFor(exchanges(3), tutor, at(1_000)))).toBe(
+      'Usually replies within an hour',
+    );
+  });
+
+  it('leaves the plain median with no opinion about sample size', () => {
+    expect(medianSeconds([42])).toBe(42);
   });
 });

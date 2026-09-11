@@ -25,6 +25,11 @@ const FAILURE_MESSAGES: Record<string, string> = {
   slot_taken: 'Someone just took that slot. Pick another one.',
   not_available: 'That time is no longer free. The calendar below is up to date.',
   no_such_tutor: 'That tutor could not be found.',
+  // A trial is free and it is still a lesson. The guardian's email is asked for
+  // on the booking page today, which is where this sends them — see BUGS.md for
+  // why the trial journey does not ask for it itself yet.
+  guardian_required:
+    'We need a parent or guardian’s email before your first lesson, including a free trial. Open any paid slot to add it — nothing is charged until you confirm.',
 };
 
 function describe(problem: string): string {
@@ -74,6 +79,8 @@ const BOOKING_MESSAGES: Record<string, string> = {
   slot_taken: 'Somebody just took that time. Pick another one — nothing has been charged.',
   not_available: 'That time is no longer free. The calendar below is up to date.',
   bad_duration: 'Sessions are 30 or 60 minutes.',
+  guardian_required:
+    'We need a parent or guardian’s email before your first session. Nothing has been charged.',
 };
 
 /**

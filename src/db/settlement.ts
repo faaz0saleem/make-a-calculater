@@ -189,7 +189,14 @@ export async function settleBooking(
       })
       .where(eq(bookings.id, booking.id));
 
-    // SPEC.md §2: three strikes in 90 days triggers a review.
+    // A lifetime counter, and only that.
+    //
+    // SPEC.md §2 says "3 strikes/90d = review". Nothing here implements the
+    // window or the review: no job looks for a third strike, no queue shows
+    // one, and no admin is told. What the counter does drive — the ranking
+    // penalty and the loss of instant booking — it drives for ever, with no
+    // decay. A tutor who missed two sessions in their first month is still on
+    // manual accept two years later. See BUGS.md.
     if (outcome.tutorStrike) {
       await tx
         .update(tutorProfiles)

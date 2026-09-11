@@ -46,7 +46,8 @@ export type BookingFailure =
   | 'slot_taken'
   | 'not_available'
   | 'insufficient_credits'
-  | 'bad_duration';
+  | 'bad_duration'
+  | 'guardian_required';
 
 export type CreateBookingResult =
   | {
@@ -162,13 +163,25 @@ export async function createBooking(
         }
 
         const [student] = await tx
-          .select({ timezone: users.timezone, creditsCents: studentWallets.creditsCents })
+          .select({
+            timezone: users.timezone,
+            creditsCents: studentWallets.creditsCents,
+            isAdult: users.isAdult,
+            guardianEmail: users.guardianEmail,
+          })
           .from(users)
           .innerJoin(studentWallets, eq(studentWallets.userId, users.id))
           .where(eq(users.id, input.studentId))
           .limit(1);
 
         if (!student) return { ok: false, problem: 'no_such_tutor' as const };
+
+        // A minor cannot enter a paid session without a guardian on record
+        // (SPEC.md §1). The booking form marks the field `required`, which is
+        // an attribute in someone else's browser — this is the check.
+        if (student.isAdult === false && !student.guardianEmail) {
+          return { ok: false, problem: 'guardian_required' as const };
+        }
 
         // Price and commission are decided here and never again. A rate change
         // tomorrow cannot reach this row (SPEC.md §5).

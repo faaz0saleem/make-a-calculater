@@ -320,6 +320,34 @@ export async function reconcileLedger(database: DbLike = defaultDb): Promise<Rec
       `,
     },
     {
+      /**
+       * The other running total the ledger writer moves, and the sibling of the
+       * one above: `tutor_pending` entries with a positive delta raise it and
+       * nothing lowers it.
+       *
+       * Here for the same reason. `lifetime_purchased_cents` sat outside this
+       * list for nine phases and was double-counted the whole time; this column
+       * has exactly the same shape and exactly the same blind spot, and it is
+       * one careless line away from the same bug (MONEY_AUDIT.md, Q2).
+       * Reported under `tutor_pending`, the account whose entries move it.
+       */
+      account: 'tutor_pending',
+      scope: 'user',
+      query: sql`
+        select coalesce(l.owner_id::text, t.user_id::text) as id,
+               coalesce(l.total, 0) as ledger_cents,
+               coalesce(t.lifetime_earned_cents, 0) as materialised_cents
+        from (
+          select owner_id, sum(delta_cents) as total
+          from ledger_entries
+          where account = 'tutor_pending' and delta_cents > 0
+          group by owner_id
+        ) l
+        full outer join tutor_profiles t on t.user_id = l.owner_id
+        where coalesce(l.total, 0) <> coalesce(t.lifetime_earned_cents, 0)
+      `,
+    },
+    {
       account: 'platform_revenue',
       scope: 'platform',
       query: sql`
