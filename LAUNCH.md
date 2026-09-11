@@ -21,10 +21,48 @@ You need accounts for:
 | A payment provider | Selling credits | n/a |
 | A domain | All of the above | No |
 
+### The runtime this needs, and one it cannot use
+
+**Node.js. Not Cloudflare Workers.** `npx wrangler deploy` cannot work here, and
+not because of configuration — three things in this app are Node-only:
+
+- **Postgres over a raw TCP socket.** `postgres` (postgres.js) opens a socket.
+  Workers has no general TCP; it has `cloudflare:sockets` plus Hyperdrive, which
+  is a different connection path than the driver takes here.
+- **`node:crypto` with `createCipheriv`.** `src/lib/crypto.ts` encrypts payout
+  bank details with AES before they are written. WebCrypto can do AES-GCM, but
+  it is a different API and this is the code path guarding tutors' account
+  numbers — not the place for a hasty port.
+- **`livekit-server-sdk`**, used for room tokens and webhook verification.
+
+There is also `node:child_process` (ffmpeg, for intro videos) and `node:fs` (the
+local storage driver used when R2 is not configured). Neither exists on Workers.
+
+Nothing declares `export const runtime` anywhere in `src/`, and there is no
+`wrangler.toml` or OpenNext config in the repo — so there was never a Workers
+build to deploy. **Vercel** is the target the app is written for: Node runtime,
+Next 15 App Router with Server Actions, and the cron schedule in §5.
+
 **The payment provider is the one open decision.** `DECISIONS_NEEDED.md` item 1
 is still open because Stripe does not operate in Pakistan. Until it is answered,
 `PAYMENT_PROVIDER=mock` credits wallets instantly and nobody is charged — which
 is fine for a closed test with tutors you know, and is not a launch.
+
+### Build from a clean clone, not from your working tree
+
+```bash
+git clone <repo> /tmp/verify && cd /tmp/verify
+cp /path/to/.env .env
+pnpm install --frozen-lockfile && pnpm build
+```
+
+A local build proves the files on your disk compile. It says nothing about what
+is in the repository. `src/lib/messaging/out/` — the outbound messaging provider
+`src/db/reminders.ts` imports — sat untracked for four phases because
+`.gitignore` said `out/` without a leading slash, which matches a directory of
+that name at any depth. Every local build passed. The first deploy failed on a
+module that does not exist. Run the clone build before you trust a green local
+one.
 
 ### Run these once, on a seeded copy, before you deploy anything
 
